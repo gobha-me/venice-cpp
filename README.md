@@ -1,5 +1,7 @@
 # venice-cpp
 
+[![CI](https://github.com/gobha-me/venice-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/gobha-me/venice-cpp/actions/workflows/ci.yml)
+
 A header-only **C++23 client for the [Venice.ai](https://venice.ai) API** — BSD
 3-clause licensed. Talks to Venice's OpenAI-compatible endpoints plus the
 `venice_parameters` extension block, over HTTPS, with `std::expected` error
