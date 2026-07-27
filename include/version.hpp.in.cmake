@@ -7,7 +7,8 @@
  */
 
 constexpr std::string_view PROGRAM_NAME{"@PROJECT_NAME@"};
-constexpr std::uint32_t VERSION_MAJOR{@PROJECT_VERSION_MAJOR@};
-constexpr std::uint32_t VERSION_MINOR{@PROJECT_VERSION_MINOR@};
-constexpr std::uint32_t VERSION_PATCH{@PROJECT_VERSION_PATCH@};
-constexpr std::uint32_t VERSION_TWEAK{@PROJECT_VERSION_TWEAK@};
+constexpr std::uint32_t VERSION_MAJOR{@VERSION_MAJOR@};
+constexpr std::uint32_t VERSION_MINOR{@VERSION_MINOR@};
+constexpr std::uint32_t VERSION_PATCH{@VERSION_PATCH@};
+constexpr std::uint32_t VERSION_TWEAK{@VERSION_TWEAK@};   // commits since the tag (0 when on it)
+constexpr bool          VERSION_DIRTY{@VERSION_DIRTY@};   // working tree had uncommitted changes at configure time

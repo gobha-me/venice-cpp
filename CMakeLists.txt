@@ -15,7 +15,7 @@ project(${ProjectId}
   LANGUAGES CXX
 )
 
-message(STATUS "${PROJECT_NAME}:${CMAKE_PROJECT_VERSION}")
+message(STATUS "${PROJECT_NAME}:${CMAKE_PROJECT_VERSION} (tweak=${VERSION_TWEAK} dirty=${VERSION_DIRTY})")
 
 set (VERSION_HEADER_IN "${CMAKE_CURRENT_LIST_DIR}/include/version.hpp.in.cmake")
 
