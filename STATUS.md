@@ -27,8 +27,8 @@ enforcing the dual-compiler rule across nine jobs.
 
 Two defects were found *in* the ported artifact checker and fixed here: rule B3's
 unanchored token regex gave a false pass on suffix-appended renames, and rule B2
-was blinded by any comment mentioning a package name. Both are upstream bugs and
-should go back to cpp-template.
+was blinded by any comment mentioning a package name. Both were upstream bugs and
+have since landed there as CT-14.
 
 ## Next up
 1. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
@@ -50,9 +50,10 @@ FetchContent dependency that ships no `export()` call of its own.
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.
 - venice-cpp issues double as the AIForge kickoff tracker for now (#1).
-- The template↔fork sync runs both directions: this repo took upstream's fixes,
-  and owes it three — two artifact-checker fixes (B2, B3) and the build-tree
-  `export(EXPORT ...)` finding from the VC-07 port.
+- The template↔fork sync runs both directions and is current: the artifact-checker
+  fixes this repo owed upstream landed there as CT-14, and the VC-07 port's own
+  finding — upstream's build-tree `export(EXPORT ...)` cannot work for a fork with
+  a public FetchContent dependency — is filed as CT-15.
 
 ## How to verify
 CI does the gate now (gcc + clang × {default,asan,tsan,ubsan}, nine jobs), but
