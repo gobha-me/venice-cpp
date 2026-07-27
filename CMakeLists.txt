@@ -54,5 +54,5 @@ endif(${PROJECT_NAME}_TESTS)
 
 # TODO VC-07 (#8): install()/export() + package config, so `find_package(venice-cpp
 # CONFIG)` works and consumers aren't forced into add_subdirectory/FetchContent.
-# Deferred deliberately: cpp-template CT-04 (gobha-me/cpp-template#5) solves this
-# once for the family — crib that pattern here rather than inventing a second one.
+# Deferred deliberately: upstream ticket CT-04 solves this once for the cpp-template
+# family — crib that pattern here rather than inventing a second one.

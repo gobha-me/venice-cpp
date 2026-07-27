@@ -9,6 +9,16 @@ add_test(
   COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/cmake/version_selftest.cmake
 )
 
+# Leftover-artifact and wiring-drift check (cmake/check_artifacts.cmake), also
+# standalone. venice-cpp is a fork, never the template, so this always runs in
+# enforce mode: every rule must report zero hits. Upstream keys the mode on
+# NEW_PROJECT.md; that conditional is deliberately not ported, because a file by
+# that name appearing here would silently invert every Class-A rule.
+add_test(
+  NAME artifact-check
+  COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/cmake/check_artifacts.cmake
+)
+
 file(GLOB TEST_DIRS ${CMAKE_CURRENT_LIST_DIR}/*)
 
 # Say this once, at configure time, instead of letting it surface as a link error

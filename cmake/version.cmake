@@ -5,7 +5,7 @@
 #
 # The actual string parsing lives in version_parse.cmake (pure, no git) so it can
 # be unit-tested via `cmake -P cmake/version_selftest.cmake`.
-# Ported from cpp-template CT-05 (gobha-me/cpp-template#6).
+# Ported from the cpp-template upstream ticket CT-05.
 
 include(${CMAKE_CURRENT_LIST_DIR}/version_parse.cmake)  # absolute: no CMAKE_MODULE_PATH here
 
