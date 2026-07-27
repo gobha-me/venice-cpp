@@ -1,0 +1,101 @@
+name: CI
+
+# Enforces the AGENTS.md rule: "build on both compilers, always." Every push to
+# main and every pull request builds + tests venice-cpp on GCC and Clang across
+# the default toolchain and each sanitizer, so a change that only builds on one
+# compiler fails visibly instead of being discovered by the next person.
+#
+# Nothing here is hardcoded to a checkout path: the project name is derived from
+# the checkout directory (see the root CMakeLists.txt), which means the directory
+# must stay named `venice-cpp`. The status badge lives at the top of README.md.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04   # ships GCC 13 + Clang (both C++23-capable); pinned for reproducibility
+    strategy:
+      fail-fast: false      # always show every compiler's result, not just the first failure
+      matrix:
+        include:
+          - { name: "gcc / default",   cxx: g++,     toolchain: default.cmake,   build_type: Debug }
+          - { name: "gcc / asan",      cxx: g++,     toolchain: address.cmake,   build_type: Debug }
+          - { name: "gcc / tsan",      cxx: g++,     toolchain: thread.cmake,    build_type: RelWithDebInfo }
+          - { name: "gcc / ubsan",     cxx: g++,     toolchain: undefined.cmake, build_type: Debug }
+          - { name: "clang / default", cxx: clang++, toolchain: clang.cmake,     build_type: Debug }
+          - { name: "clang / asan",    cxx: clang++, toolchain: address.cmake,   build_type: Debug }
+          - { name: "clang / tsan",    cxx: clang++, toolchain: thread.cmake,    build_type: RelWithDebInfo }
+          - { name: "clang / ubsan",   cxx: clang++, toolchain: undefined.cmake, build_type: Debug }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # full history + tags so cmake/version.cmake's `git describe --tags` resolves a real version
+
+      # OpenSSL is a hard requirement, twice over: src/lib/CMakeLists.txt calls
+      # find_package(OpenSSL REQUIRED), and cmake/deps/httplib.cmake forces
+      # HTTPLIB_REQUIRE_OPENSSL ON so cpp-httplib demands it too. The runner image
+      # currently ships libssl-dev, but installing it explicitly means a change to
+      # that image manifest is not a mystery build failure six months from now.
+      - name: Install OpenSSL headers
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      # GCC jobs use the preinstalled g++ (13). The clang jobs must NOT use
+      # ubuntu-24.04's stock clang 18: its libstdc++ pairing cannot compile C++23
+      # std::expected, and venice-cpp puts std::expected in the *public* header
+      # (include/venice/client.hpp — every fallible entry point returns one). So
+      # unlike upstream, where a single test dir was affected, stock clang 18 here
+      # fails all four clang jobs outright. Pin to a known-good Clang so "both
+      # compilers, always" stays honest. The symlinks make `clang++` resolve to the
+      # pinned version, so clang.cmake's find_program and the sanitizer toolchains'
+      # $CXX both pick it up.
+      - name: Install Clang
+        if: ${{ startsWith(matrix.cxx, 'clang') }}
+        env:
+          CLANG_VERSION: "20"
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh "$CLANG_VERSION"
+          sudo ln -sf "/usr/bin/clang-$CLANG_VERSION"   /usr/local/bin/clang
+          sudo ln -sf "/usr/bin/clang++-$CLANG_VERSION" /usr/local/bin/clang++
+          clang++ --version
+
+      - name: Configure
+        env:
+          CXX: ${{ matrix.cxx }}   # default/sanitizer toolchains respect $CXX; clang.cmake selects clang itself
+        run: >
+          cmake -B build
+          -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/${{ matrix.toolchain }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        # Runs the offline Catch2 suites (01client, 30sanitizer-smoke), the
+        # version-parse self-test and the artifact check. No API key, no network:
+        # the live smoke binary needs $VENICE_API_KEY and is never invoked here.
+        run: ctest --test-dir build --output-on-failure
+
+  # Fast, dependency-free guard: the git-describe version parser self-test on its
+  # own (no compiler, no network). It also runs inside every build job above via
+  # ctest; this job gives quick, isolated feedback.
+  version-selftest:
+    name: version parser self-test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run version_selftest.cmake
+        run: cmake -P cmake/version_selftest.cmake

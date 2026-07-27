@@ -6,7 +6,7 @@
 //
 // Link: venice-cpp is header-only (INTERFACE). Consumers need cpp-httplib,
 // nlohmann/json, and OpenSSL — provided transitively when linking the
-// `venice-cpp::venice` CMake target.
+// `venice-cpp::lib` CMake target.
 
 #include "venice/error.hpp"
 #include "venice/types.hpp"

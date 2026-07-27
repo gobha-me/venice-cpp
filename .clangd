@@ -1,7 +1,15 @@
 ---
+# clangd config for this C++23 project.
+# The build is the source of truth: `cmake -B build` exports compile_commands.json
+# (CMAKE_EXPORT_COMPILE_COMMANDS=ON) carrying the real compiler, -std=c++23, warnings,
+# and include paths, and clangd prefers that database. So we do NOT pin a compiler or an
+# older standard here: a hardcoded `Compiler: clang++` mis-emulates GCC builds (this repo
+# respects $CXX; see AGENTS.md), and an appended `-std=c++20` silently overrode the
+# database's c++23, producing false std-version diagnostics on C++23 code — which is what
+# this file used to do. The flags below are only a fallback for files not yet in the
+# database (headers, or a fresh checkout before configuring).
 CompileFlags:
-  Add: [-xc++, -Wall, -Wnarrowing, -I, include, -std=c++20]
-  Compiler: clang++
+  Add: [-std=c++23, -I, include]
 Index:
   StandardLibrary: Yes
 ClangTidy:
