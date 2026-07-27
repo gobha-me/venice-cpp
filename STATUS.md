@@ -39,16 +39,20 @@ should go back to cpp-template.
 3. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
 
-**VC-07 (#8, install/export) stays deferred on purpose.** Upstream CT-04 solves
-install/export once for the whole cpp-template family precisely so downstream
-repos don't each invent one. When it lands, crib it — the root CMakeLists TODO
-says so. `PROJECT_IS_TOP_LEVEL` gating belongs to the same ticket.
+**VC-07 (#8, install/export) is done** — see v0.2.0. Upstream CT-04 landed the
+pattern for the whole cpp-template family and this repo ported it rather than
+inventing a second one, with four divergences recorded in `cmake/install.cmake`.
+`find_package(venice-cpp CONFIG)` is real; `PROJECT_IS_TOP_LEVEL` gating came
+with it. Porting it surfaced a third upstream-relevant finding: the build-tree
+`export(EXPORT ...)` in upstream's file cannot work for any project with a public
+FetchContent dependency that ships no `export()` call of its own.
 
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.
 - venice-cpp issues double as the AIForge kickoff tracker for now (#1).
 - The template↔fork sync runs both directions: this repo took upstream's fixes,
-  and owes it two artifact-checker fixes.
+  and owes it three — two artifact-checker fixes (B2, B3) and the build-tree
+  `export(EXPORT ...)` finding from the VC-07 port.
 
 ## How to verify
 CI does the gate now (gcc + clang × {default,asan,tsan,ubsan}, nine jobs), but

@@ -13,6 +13,14 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
 - **Catch2 v3** for tests (`FetchContent`).
 - **Header-only library** (`src/lib/CMakeLists.txt` is an INTERFACE target).
   No compiled sources for the library itself.
+- **The project name is spelled out**, not derived from the directory name as
+  upstream does. Since VC-07 it is public API — the spelling in
+  `find_package(venice-cpp CONFIG)`, in `venice-cpp::lib`, and in
+  `lib/cmake/venice-cpp`. Do not make it derived again.
+- **Everything but the library is gated on `PROJECT_IS_TOP_LEVEL`**
+  (`venice-cpp_BUILD_BIN`, `_TESTS`, `_INSTALL`). A consumed build gets the
+  library and nothing else. The options are declared *above* the dependency list
+  because the list and two dep recipes are gated on them.
 - **Toolchains are opt-in files**, not flags: `default`, `clang`, `address`,
   `thread`, `undefined` under `cmake/toolchain/`. You cannot pass two, so
   compose a sanitizer with clang via `CXX=clang++` rather than stacking files.
@@ -80,6 +88,11 @@ cmake -B build-clang -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/clang.cmake \
 cmake -P cmake/version_selftest.cmake     # git-describe parser
 cmake -P cmake/check_artifacts.cmake      # leftover artifacts + wiring drift
 
+# touching CMake wiring, install rules or the public headers? prove a consumer
+# still builds all three ways, on both compilers
+./example/consumer/verify.sh
+CXX=clang++ ./example/consumer/verify.sh
+
 # touching a sanitizer toolchain? prove it still engages
 cmake -B build-asan -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/address.cmake \
   && cmake --build build-asan \
@@ -88,8 +101,15 @@ cmake -B build-asan -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/address.cmake \
 
 CI (`.github/workflows/ci.yml`) enforces the dual-compiler rule on every push and
 pull request: GCC × Clang across {default, address, thread, undefined}, plus the
-version self-test standalone — nine jobs. A one-compiler change turns that
-compiler's four jobs red. Run the commands above locally first.
+consumer acceptance check on both compilers and the version self-test standalone
+— eleven jobs. A one-compiler change turns that compiler's five jobs red. Run the
+commands above locally first.
+
+`example/consumer/verify.sh` is slow by design (four configures, three dependency
+fetches), which is why it is a CI job and not a ctest test. For a quick local
+loop, point it at an existing `_deps` directory:
+`VENICE_DEPS_CACHE=build/_deps ./example/consumer/verify.sh`. CI deliberately
+leaves that unset — fetching for real is part of what it tests.
 
 CI pins its Clang jobs to Clang 20. Ubuntu 24.04's stock Clang 18 cannot compile
 C++23 `std::expected` against libstdc++, and `std::expected` is in this library's
@@ -127,6 +147,22 @@ and PRs note what was actually run to verify.
   four, `-rc1` suffixes) is rejected by design and falls back to `0.0.0` with a
   STATUS line saying why. The version is read at **configure** time, so a tag
   cut after configuring does not show up until you re-run `cmake -B`.
+- **`cmake/install.cmake` is a port of upstream's (ticket CT-04), not a copy.**
+  Four divergences are marked ⚠ in the file; if you re-sync from upstream, keep
+  them, because each is a property of venice-cpp that upstream does not share:
+  (1) no ARCHIVE/LIBRARY/RUNTIME destinations — header-only by design, not by
+  configuration; (2) **no build-tree `export(EXPORT ...)`** — it fails outright
+  here, because cpp-httplib is a public dependency that registers no build export
+  set (`export called with target "venice-cpp_lib" which requires target
+  "httplib" that is not in any export set`); (3) `include/venice/` only, so the
+  generated `version.hpp` and its unprefixed globals stay out of consumers'
+  include paths; (4) `SameMinorVersion`, since at 0.x `SameMajorVersion` would
+  claim 0.1.0 satisfies a request for 0.9.0 — revisit at 1.0.0.
+  The public dependencies are the reason any of this needs thought: upstream's
+  library has none, ours has four, so `cmake/project-config.cmake.in` must
+  `find_dependency` each one, and `HTTPLIB_INSTALL` / `JSON_Install` are tied to
+  `venice-cpp_INSTALL` in the dep recipes so those targets land in an export set
+  when we install and stay out of a consumer's prefix when we don't.
 - **`cmake/check_artifacts.cmake`** runs in enforce mode here (ctest:
   `artifact-check`) — every rule must report zero hits. Class A catches leftover
   template artifacts; Class B catches wiring drift that stays relevant for the
