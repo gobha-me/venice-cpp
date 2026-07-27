@@ -5,8 +5,13 @@
 // (including malformed input), and the error model's status mapping.
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_template_test_macros.hpp>
+
+#include <cstdint>
+#include <type_traits>
 
 #include <venice/venice.hpp>
+#include <version.hpp>
 
 using venice::ChatRequest;
 using venice::ChatResponse;
@@ -144,4 +149,25 @@ TEST_CASE("Error carries status and body for inspection", "[error]") {
   REQUIRE(e.is(ErrorKind::RateLimited));
   REQUIRE(e.status == 429);
   REQUIRE(e.body.find("slow down") != std::string::npos);
+}
+
+// ── Generated version header ──────────────────────────────────────────────
+// include/version.hpp is produced by configure_file from version.hpp.in.cmake,
+// with the values cmake/version_parse.cmake derives from `git describe`. Nothing
+// else in the tree includes it, so without this case the whole version pipeline
+// could emit a header that does not compile — or one whose fields are silently
+// empty-brace-initialized — and every build would still be green.
+TEST_CASE("generated version header is well-formed", "[version]") {
+  // The name is the one field with a knowable value, and it proves
+  // configure_file actually substituted rather than emitting the raw @TOKEN@.
+  REQUIRE(PROGRAM_NAME == "venice-cpp");
+
+  // The numeric fields have no assertable value — 0.0.0 is correct on an
+  // untagged clone and 0.1.0 after the release tag. What is worth pinning is
+  // the header's contract, which downstream code compiles against: these are
+  // constexpr integers of a fixed width, not whatever a future edit makes them.
+  STATIC_REQUIRE(std::is_same_v<decltype(VERSION_MAJOR), const std::uint32_t>);
+  STATIC_REQUIRE(std::is_same_v<decltype(VERSION_TWEAK), const std::uint32_t>);
+  STATIC_REQUIRE(std::is_same_v<decltype(VERSION_DIRTY), const bool>);
+  STATIC_REQUIRE(VERSION_MAJOR == VERSION_MAJOR);  // usable in a constant expression
 }
