@@ -1,0 +1,64 @@
+@PACKAGE_INIT@
+
+# Package config input for configure_package_config_file() — see
+# cmake/install.cmake. This is what a consumer's find_package(venice-cpp CONFIG)
+# ends up executing.
+#
+# @PROJECT_NAME@ is substituted at configure time, so the generic filename is kept
+# from the upstream template (ticket CT-04) rather than renamed: a renamed file is
+# permanent diff noise on every re-sync, for no benefit.
+
+# ── Public dependencies ─────────────────────────────────────────────────────
+# A dependency is *public* when it appears in this project's installed headers or
+# in an INTERFACE/PUBLIC target_link_libraries, because the consumer's compiler
+# will need it too. All of venice-cpp's are: include/venice/client.hpp includes
+# <httplib.h> and <nlohmann/json.hpp> in the open, and httplib.h pulls
+# <openssl/ssl.h> once CPPHTTPLIB_OPENSSL_SUPPORT is defined.
+#
+# Without this block the Targets file below reports the httplib and nlohmann_json
+# targets as missing, and OpenSSL::SSL fails later still with "The link interface
+# of target ... but the target was not found" — all of which read like a broken
+# package rather than a missing find_package.
+#
+# find_dependency, not find_package: it forwards the REQUIRED/QUIET the consumer
+# passed us, and reports a miss as "package venice-cpp not found because
+# dependency X was missing".
+include(CMakeFindDependencyMacro)
+
+# ⚠ Vendored-dependency shim. Substituted non-empty only when this package was
+# built with httplib / nlohmann_json fetched from source rather than found
+# installed. In that configuration `cmake --install` also placed those packages'
+# config files inside THIS prefix, so the calls below have to see them even when
+# the consumer located us with -Dvenice-cpp_DIR=... rather than via
+# CMAKE_PREFIX_PATH.
+#
+# Appended, not prepended, so a copy the consumer already has still wins. Restored
+# immediately after, so this config does not permanently reshape the caller's
+# search path. One honest wart: find_dependency is a macro that return()s on
+# failure, so a *failing* dependency skips the restore. That only matters for a
+# non-REQUIRED find_package that keeps configuring afterwards, and the
+# alternative — leaving the append in place — is worse.
+set(_venice_cpp_vendored "@CONFIG_VENDORED_DEPS@")
+set(_venice_cpp_saved_prefix_path "${CMAKE_PREFIX_PATH}")
+if (_venice_cpp_vendored)
+  list(APPEND CMAKE_PREFIX_PATH "${PACKAGE_PREFIX_DIR}")
+endif ()
+
+# ⚠ No REQUIRED spelled on any of these: find_dependency already forwards the
+# consumer's. Writing it would turn an optional find_package(venice-cpp CONFIG)
+# into a FATAL_ERROR instead of setting venice-cpp_FOUND to FALSE.
+#
+# ⚠ No version bound on httplib. Its own ConfigVersion is SameMinorVersion, so
+# asking for the 0.18.3 that cmake/deps/httplib.cmake pins would reject a
+# perfectly good 0.19.
+find_dependency(OpenSSL)
+find_dependency(httplib)
+find_dependency(nlohmann_json 3.11)
+
+set(CMAKE_PREFIX_PATH "${_venice_cpp_saved_prefix_path}")
+unset(_venice_cpp_saved_prefix_path)
+unset(_venice_cpp_vendored)
+
+include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@Targets.cmake")
+
+check_required_components(@PROJECT_NAME@)

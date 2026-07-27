@@ -62,10 +62,59 @@ auto s = client.chat_stream(req, [](std::string_view delta) {
 
 ### CMake
 
+However you acquire venice-cpp, the line you write is the same:
+
 ```cmake
-# after add_subdirectory / FetchContent of venice-cpp:
 target_link_libraries(your_target PRIVATE venice-cpp::lib)
 ```
+
+No include directories, no `CMAKE_CXX_STANDARD`, no OpenSSL — the C++23
+requirement, the headers and the transitive dependencies all arrive as usage
+requirements of that one target. Three ways to get it:
+
+```cmake
+# 1. A copy in your tree
+add_subdirectory(third_party/venice-cpp)
+
+# 2. FetchContent
+include(FetchContent)
+FetchContent_Declare(venice-cpp
+  GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
+  GIT_TAG        v0.2.0)
+FetchContent_MakeAvailable(venice-cpp)
+
+# 3. An installed package
+find_package(venice-cpp CONFIG REQUIRED)
+```
+
+Modes 1 and 2 build the library and nothing else: the smoke binary, the test
+suite and the install rules all default to `PROJECT_IS_TOP_LEVEL`, so a consumed
+build does not drag them along. Override with `-Dvenice-cpp_BUILD_BIN=ON`,
+`-Dvenice-cpp_TESTS=ON`, `-Dvenice-cpp_INSTALL=ON` if you want them anyway.
+
+To install:
+
+```bash
+cmake -B build -DCMAKE_INSTALL_PREFIX=/your/prefix \
+  -Dvenice-cpp_BUILD_BIN=OFF -Dvenice-cpp_TESTS=OFF
+cmake --build build && cmake --install build
+```
+
+Two things to know about that prefix:
+
+- **It may contain more than venice-cpp.** Dependencies are `find_package`-first
+  with a FetchContent fallback, and a dependency built from source has to be
+  installed alongside us — CMake cannot export a target's interface while
+  omitting an edge of it. Configure says which ones, by name. Install
+  cpp-httplib and nlohmann/json as packages first and reconfigure for a prefix
+  holding only venice-cpp. Everything third-party is filed under its own name
+  (`share/doc/httplib/`, `share/licenses/httplib/`), never under ours.
+- **`venice-cpp_ROOT` is not usable as a shell environment variable** — POSIX
+  variable names cannot contain a hyphen. Point consumers at the prefix with
+  `-DCMAKE_PREFIX_PATH=` or `-Dvenice-cpp_DIR=<prefix>/lib/cmake/venice-cpp`.
+
+`example/consumer/` is a miniature downstream project that builds all three ways;
+`example/consumer/verify.sh` runs them and is part of CI.
 
 The `Client` constructor takes the API key explicitly — the library reads no
 environment variables of its own, so the caller decides where the key comes from.
@@ -104,10 +153,11 @@ Sanitizer builds use opt-in toolchain files (`address`, `thread`, `undefined`);
 ## Continuous integration
 
 Every push and pull request builds and tests on GCC **and** Clang across the
-default and all three sanitizer toolchains — nine jobs, including a standalone
-run of the version-parser self-test. The Clang jobs pin Clang 20: Ubuntu's stock
-Clang 18 cannot compile C++23 `std::expected` against libstdc++, and this
-library returns `std::expected` from every fallible entry point.
+default and all three sanitizer toolchains — eleven jobs, including a standalone
+run of the version-parser self-test and the three-mode consumer acceptance check
+on both compilers. The Clang jobs pin Clang 20: Ubuntu's stock Clang 18 cannot
+compile C++23 `std::expected` against libstdc++, and this library returns
+`std::expected` from every fallible entry point.
 
 ## Releases
 
