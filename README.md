@@ -70,6 +70,10 @@ auto s = client.chat_stream(req, [](std::string_view delta) {
 });
 ```
 
+Whether a request streams is decided by the method you call, not by a field on
+`ChatRequest`. If you build the wire body yourself, say so explicitly:
+`req.to_json_body(/*stream=*/false)`.
+
 **`response_format` is raw JSON, not an enum.** The API accepts both
 `{"type":"json_object"}` and a full `{"type":"json_schema", …}` block, and no
 enum can carry a schema — so the field is `std::optional<nlohmann::json>` and
@@ -87,10 +91,13 @@ req.response_format = venice::response_format::json_schema("reply", my_schema);
 model (`top_k`, `min_p`, `repetition_penalty`), and `extra` reaches them without
 forking the header. Modeled fields always win over a same-named key in `extra`.
 
-Nothing here is range-checked client-side. Structural problems that make a
-request unsendable (empty model, no messages) come back as
-`ErrorKind::InvalidArg`; value-range policy belongs to the server, so
-`temperature = 5.0` is transmitted and the API decides.
+Ranges are not checked client-side, but representability is. Structural problems
+that make a request unsendable — an empty model, no messages, or a non-finite
+`temperature` / `top_p` / `frequency_penalty` / `presence_penalty`, since JSON
+has no NaN or infinity — come back as `ErrorKind::InvalidArg` naming the
+offending field, before any HTTP call is made. Value-range policy belongs to the
+server, so `temperature = 5.0` is transmitted and the API decides. Values inside
+`extra` are passthrough and are not inspected, finiteness included.
 
 ### CMake
 
@@ -112,7 +119,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.2.0)
+  GIT_TAG        v0.4.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

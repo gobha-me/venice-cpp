@@ -58,6 +58,20 @@ builders. All request-body serialization tests now live in `test/02request/`,
 anchored on a byte-exact baseline body — which was proven to fail by adding a
 stray key before it was trusted.
 
+**VC-11 (#15) and VC-10 (#14) are done** — see v0.4.0, shipped together because
+both rewrite the head of `Client::chat` / `Client::chat_stream`. `ChatRequest`
+lost its `stream` member; `to_json_body(bool stream)` takes the mode instead, so
+neither entry point copies the request (VC-02's `extra` had made that a deep json
+tree copy per call) and no state remains for a copy to mutate — the regression is
+now uncompilable rather than merely untested. The duplicated precondition checks
+became one private `Client::validate` returning `std::expected<void, Error>`,
+which also gained an `std::isfinite` sweep over the four double fields: JSON
+cannot encode NaN or ±inf, nlohmann emits `null`, and the server's 400 never says
+why. The sweep runs before the emptiness checks on purpose — that ordering is
+what lets `test/03guards/` prove the *passing* path without opening a socket.
+`extra` is still not walked; that boundary is pinned by a test rather than left
+implicit. Both are public API breaks, hence the minor bump.
+
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.
 - venice-cpp issues double as the AIForge kickoff tracker for now (#1).

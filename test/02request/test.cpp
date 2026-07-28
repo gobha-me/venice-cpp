@@ -24,8 +24,6 @@
 #include <venice/venice.hpp>
 
 using venice::ChatRequest;
-using venice::Client;
-using venice::ErrorKind;
 using venice::Message;
 using venice::VeniceParameters;
 
@@ -52,7 +50,7 @@ constexpr auto kBaseline = R"({"messages":[{"content":"hi","role":"user"}],"mode
 // happily when an *extra* key is accidentally emitted. Byte equality does not.
 
 TEST_CASE("absent optionals produce the byte-identical baseline body", "[request][baseline]") {
-  const auto j = minimal().to_json_body();
+  const auto j = minimal().to_json_body(false);
 
   REQUIRE(j.dump() == kBaseline);
   REQUIRE(j.size() == 3);
@@ -70,7 +68,7 @@ TEST_CASE("stop transmits caller intent verbatim", "[request][stop][failure]") {
   SECTION("engaged but empty emits an empty array, not nothing") {
     auto r = minimal();
     r.stop = std::vector<std::string>{};
-    const auto j = r.to_json_body();
+    const auto j = r.to_json_body(false);
     REQUIRE(j.contains("stop"));
     REQUIRE(j["stop"].is_array());
     REQUIRE(j["stop"].empty());
@@ -78,14 +76,14 @@ TEST_CASE("stop transmits caller intent verbatim", "[request][stop][failure]") {
   SECTION("more entries than the API accepts are still sent — we do not validate") {
     auto r = minimal();
     r.stop = std::vector<std::string>{"a", "b", "c", "d", "e"};
-    const auto j = r.to_json_body();
+    const auto j = r.to_json_body(false);
     REQUIRE(j["stop"].size() == 5);
     REQUIRE(j["stop"][4] == "e");
   }
   SECTION("an empty stop string is not pruned") {
     auto r = minimal();
     r.stop = std::vector<std::string>{"", "END"};
-    const auto j = r.to_json_body();
+    const auto j = r.to_json_body(false);
     REQUIRE(j["stop"].size() == 2);
     REQUIRE(j["stop"][0] == "");
   }
@@ -94,7 +92,7 @@ TEST_CASE("stop transmits caller intent verbatim", "[request][stop][failure]") {
 TEST_CASE("response_format engaged with a null json emits null", "[request][failure]") {
   auto r = minimal();
   r.response_format.emplace();  // default-constructed nlohmann::json is null
-  const auto j = r.to_json_body();
+  const auto j = r.to_json_body(false);
   REQUIRE(j.contains("response_format"));
   REQUIRE(j["response_format"].is_null());
 }
@@ -102,7 +100,7 @@ TEST_CASE("response_format engaged with a null json emits null", "[request][fail
 TEST_CASE("response_format passes an unmodeled object through verbatim", "[request]") {
   auto r = minimal();
   r.response_format = nlohmann::json::parse(R"({"type":"future_mode","x":1})");
-  const auto j = r.to_json_body();
+  const auto j = r.to_json_body(false);
   REQUIRE(j["response_format"]["type"] == "future_mode");
   REQUIRE(j["response_format"]["x"] == 1);
 }
@@ -117,34 +115,37 @@ TEST_CASE("seed survives its boundaries", "[request][seed][failure]") {
   SECTION("negative") {
     auto r = minimal();
     r.seed = -1;
-    REQUIRE(r.to_json_body()["seed"].get<std::int64_t>() == -1);
+    REQUIRE(r.to_json_body(false)["seed"].get<std::int64_t>() == -1);
   }
   SECTION("zero is emitted, not treated as unset") {
     auto r = minimal();
     r.seed = 0;
-    const auto j = r.to_json_body();
+    const auto j = r.to_json_body(false);
     REQUIRE(j.contains("seed"));
     REQUIRE(j["seed"].get<std::int64_t>() == 0);
   }
   SECTION("past INT_MAX") {
     auto r = minimal();
     r.seed = 4294967296LL;
-    REQUIRE(r.to_json_body()["seed"].get<std::int64_t>() == 4294967296LL);
+    REQUIRE(r.to_json_body(false)["seed"].get<std::int64_t>() == 4294967296LL);
   }
 }
 
-// ── non-finite doubles: a known quirk, pinned rather than left a mystery ──
+// ── non-finite doubles: what the serializer alone still does ──────────────
 //
-// JSON cannot represent NaN or infinity, so nlohmann emits null and the server
-// 400s with a message that will not mention NaN. This is structural rather than
-// a range question, so it arguably belongs behind an InvalidArg guard in
-// Client — filed as a follow-up. Until then, the behavior is documented here.
+// Client::chat and Client::chat_stream reject these with InvalidArg before they
+// serialize anything (VC-10, #14 — see test/03guards/). to_json_body does not:
+// it is public, it takes no view on whether a request is sendable, and a caller
+// who builds a body by hand bypasses the guard entirely. So the old behavior is
+// still reachable and still pinned here — JSON cannot represent NaN or infinity,
+// so nlohmann emits null and the server 400s with a message that will not
+// mention NaN. Two layers, two contracts.
 
 TEST_CASE("non-finite doubles serialize as null", "[request][failure]") {
   auto r = minimal();
   r.top_p = std::numeric_limits<double>::quiet_NaN();
   r.frequency_penalty = std::numeric_limits<double>::infinity();
-  const auto j = r.to_json_body();
+  const auto j = r.to_json_body(false);
 
   // The value is still a float in memory — the collapse to null happens at
   // dump() time, which is the only place it matters. Asserting is_null() on the
@@ -164,7 +165,7 @@ TEST_CASE("zero and negative penalties are emitted", "[request][failure]") {
   auto r = minimal();
   r.frequency_penalty = 0.0;
   r.presence_penalty = -2.0;
-  const auto j = r.to_json_body();
+  const auto j = r.to_json_body(false);
   REQUIRE(j.contains("frequency_penalty"));
   REQUIRE(j["frequency_penalty"] == 0.0);
   REQUIRE(j["presence_penalty"] == -2.0);
@@ -176,7 +177,7 @@ TEST_CASE("out-of-range sampling values are transmitted, not rejected", "[reques
   auto r = minimal();
   r.temperature = 5.0;  // API range is 0-2
   r.top_p = 1.5;        // API range is 0-1
-  const auto j = r.to_json_body();
+  const auto j = r.to_json_body(false);
   REQUIRE(j["temperature"] == 5.0);
   REQUIRE(j["top_p"] == 1.5);
 }
@@ -185,51 +186,48 @@ TEST_CASE("out-of-range sampling values are transmitted, not rejected", "[reques
 
 TEST_CASE("extra cannot corrupt the body", "[request][extra][failure]") {
   SECTION("default (null) extra leaves the baseline untouched") {
-    REQUIRE(minimal().to_json_body().dump() == kBaseline);
+    REQUIRE(minimal().to_json_body(false).dump() == kBaseline);
   }
   SECTION("an array-valued extra does not throw out of the public API") {
     auto r = minimal();
     r.extra = nlohmann::json::array({1, 2, 3});
-    REQUIRE_NOTHROW(r.to_json_body());
-    REQUIRE(r.to_json_body().dump() == kBaseline);
+    REQUIRE_NOTHROW(r.to_json_body(false));
+    REQUIRE(r.to_json_body(false).dump() == kBaseline);
   }
   SECTION("a number-valued extra does not throw either") {
     auto r = minimal();
     r.extra = 42;
-    REQUIRE_NOTHROW(r.to_json_body());
-    REQUIRE(r.to_json_body().dump() == kBaseline);
+    REQUIRE_NOTHROW(r.to_json_body(false));
+    REQUIRE(r.to_json_body(false).dump() == kBaseline);
   }
   SECTION("modeled fields win over same-named extra keys") {
     auto r = minimal();
     r.temperature = 0.5;
-    r.stream = false;
     r.extra = nlohmann::json::parse(R"({"model":"wrong","stream":true,"temperature":9})");
-    const auto j = r.to_json_body();
-    REQUIRE(j["model"] == "m");
-    REQUIRE(j["stream"] == false);
-    REQUIRE(j["temperature"] == 0.5);
+
+    // Both directions, because `stream` is now an argument rather than a member:
+    // an extra["stream"] of true must lose to a false argument *and* to a true
+    // one. Asserting only the first would pass for a to_json_body that ignored
+    // its parameter and let extra through.
+    const auto off = r.to_json_body(false);
+    REQUIRE(off["model"] == "m");
+    REQUIRE(off["stream"] == false);
+    REQUIRE(off["temperature"] == 0.5);
+
+    REQUIRE(r.to_json_body(true)["stream"] == true);
   }
   SECTION("unmodeled keys pass through") {
     auto r = minimal();
     r.extra = nlohmann::json::parse(R"({"top_k":40,"min_p":0.05})");
-    const auto j = r.to_json_body();
+    const auto j = r.to_json_body(false);
     REQUIRE(j["top_k"] == 40);
     REQUIRE(j["min_p"] == 0.05);
   }
 }
 
-TEST_CASE("extra cannot smuggle past the InvalidArg guard", "[request][extra][failure]") {
-  // Offline-safe: Client::chat returns on the empty-model check before it
-  // touches the transport.
-  const Client c{"not-a-real-key"};
-  ChatRequest r;
-  r.messages = {Message::user("hi")};
-  r.extra = nlohmann::json::parse(R"({"model":"m"})");
-
-  const auto res = c.chat(r);
-  REQUIRE_FALSE(res.has_value());
-  REQUIRE(res.error().is(ErrorKind::InvalidArg));
-}
+// "extra cannot smuggle past the InvalidArg guard" moved to test/03guards/
+// (VC-10): it asserted on Client::chat's return value rather than on a body, so
+// it belonged to that file's charter, not this one's.
 
 // ── happy path ────────────────────────────────────────────────────────────
 
@@ -237,14 +235,14 @@ TEST_CASE("each new field serializes with the right value and json type", "[requ
   SECTION("top_p") {
     auto r = minimal();
     r.top_p = 0.9;
-    const auto j = r.to_json_body();
+    const auto j = r.to_json_body(false);
     REQUIRE(j["top_p"].is_number_float());
     REQUIRE(j["top_p"] == 0.9);
   }
   SECTION("stop") {
     auto r = minimal();
     r.stop = std::vector<std::string>{"\n\n"};
-    const auto j = r.to_json_body();
+    const auto j = r.to_json_body(false);
     REQUIRE(j["stop"].is_array());
     REQUIRE(j["stop"][0] == "\n\n");
   }
@@ -252,7 +250,7 @@ TEST_CASE("each new field serializes with the right value and json type", "[requ
     auto r = minimal();
     r.frequency_penalty = 1.5;
     r.presence_penalty = 0.25;
-    const auto j = r.to_json_body();
+    const auto j = r.to_json_body(false);
     REQUIRE(j["frequency_penalty"].is_number_float());
     REQUIRE(j["frequency_penalty"] == 1.5);
     REQUIRE(j["presence_penalty"] == 0.25);
@@ -260,14 +258,14 @@ TEST_CASE("each new field serializes with the right value and json type", "[requ
   SECTION("seed") {
     auto r = minimal();
     r.seed = 1234;
-    const auto j = r.to_json_body();
+    const auto j = r.to_json_body(false);
     REQUIRE(j["seed"].is_number_integer());
     REQUIRE(j["seed"] == 1234);
   }
   SECTION("response_format") {
     auto r = minimal();
     r.response_format = venice::response_format::json_object();
-    const auto j = r.to_json_body();
+    const auto j = r.to_json_body(false);
     REQUIRE(j["response_format"].is_object());
     REQUIRE(j["response_format"]["type"] == "json_object");
   }
@@ -305,7 +303,6 @@ TEST_CASE("a fully populated request builds the whole wire shape", "[request]") 
   r.venice_parameters = VeniceParameters{};
   r.venice_parameters->disable_thinking = true;
   r.extra = nlohmann::json::parse(R"({"top_k":40})");
-  r.stream = true;
 
   // Exact equality, not a field-by-field walk — an accidentally emitted key
   // fails this. Compared as json rather than as a dumped string only so the
@@ -326,5 +323,5 @@ TEST_CASE("a fully populated request builds the whole wire shape", "[request]") 
     "venice_parameters": {"disable_thinking":true}
   })");
 
-  REQUIRE(r.to_json_body() == expected);
+  REQUIRE(r.to_json_body(true) == expected);
 }
