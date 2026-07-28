@@ -8,7 +8,8 @@ AGENTS.md (which holds standing conventions, not state).
 **Phase 0: DONE and verified against the live API.**
 - `chat()` non-streaming completion (verified: "venice-cpp works").
 - `chat_stream()` SSE streaming via callback, cancellable (verified live).
-- `models()` list (104 models fetched), `balance()` rate-limit endpoint.
+- `models()` list with typed per-model metadata (106 text models fetched live),
+  `balance()` rate-limit endpoint.
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   rate_limited/invalid_arg, each carrying status + raw body.
@@ -71,6 +72,46 @@ why. The sweep runs before the emptiness checks on purpose — that ordering is
 what lets `test/03guards/` prove the *passing* path without opening a socket.
 `extra` is still not walked; that boundary is pinned by a test rather than left
 implicit. Both are public API breaks, hence the minor bump.
+
+**VC-03 (#4, typed model metadata) is done** — see v0.5.0. `Model` was `id` +
+`type`; it now carries the context window, fourteen capability flags, a rate
+card (`Price` / `PriceTier` / `Pricing`) and the human name/description, all
+optional, plus `raw` holding the verbatim entry. Three decisions went past the
+ticket's text and are worth knowing:
+
+- **The escape hatch is `raw`, not `extra`, and it is a superset.** The ticket
+  said "a raw `nlohmann::json extra` mirroring `VeniceParameters::extra`", but
+  that mirror is inverted: the request-side `extra` is additive and merged into
+  the wire body, this one is never sent. Making it *subtractive* (only unmodeled
+  keys) would break every reader the release a key graduates to a typed field,
+  so it holds the whole entry — which also makes a listing round-trippable for a
+  downstream cache without adding a `to_json`.
+- **`extended` pricing is typed, sharing `PriceTier` with the base rates.** Ten
+  text models reprice past a context threshold, by 3x on one of them. Sharing
+  the type makes tier selection an expression rather than a second code path.
+  The selector itself is deliberately *not* shipped: Venice does not document
+  whether `context_token_threshold` counts prompt tokens or prompt+completion,
+  and a member function would encode that guess as API.
+- **The parse left `Client`.** `models_from_json_body` is a free function in
+  `types.hpp`, because the ticket's own acceptance criterion — malformed entries
+  degrade rather than failing the list — is unreachable offline while the parse
+  only exists behind a socket.
+
+Two real defects surfaced on the way. `Client::models()` did
+`res->contains("data") ? res->at("data") : *res` and then iterated: a `data`
+that was an *object* iterated its values and a scalar body iterated as itself,
+so both silently produced models built from whatever was there, reporting
+success. That is now the one fatal case (`ErrorKind::Parse`); everything below
+it degrades. And `get<int>()` neither throws nor trips UBSan on a float or an
+out-of-range integer — it returns `1` for `1.9` and `276447231` for
+`99999999999999` — which is why the `detail::opt_*` helpers are predicate-based
+and `opt_int` range-checks. All four guards were proven by breaking them and
+watching the intended case go red; the fourth break restored the old container
+handling and turned all three §0 cases red at once.
+
+Additive to `Model`, but `models()` changed behaviour on malformed input, hence
+the minor bump. `?type=` (only text models are reachable today — 106 of 287) is
+filed separately as VC-13.
 
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.

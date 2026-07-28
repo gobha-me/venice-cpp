@@ -72,8 +72,32 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   covers modeled fields only; `extra` is passthrough and is not walked. The
   non-finite sweep runs *first*, which is what makes the guard's passing path
   testable offline — see `test/03guards/`.
+- **Response parsing: tolerant for listings, loud for everything else.**
+  `venice::detail::opt_bool` / `opt_int` / `opt_i64` / `opt_double` /
+  `opt_string` / `opt_object` / `opt_array` / `string_array` in `types.hpp` read
+  a field or return nullopt, using nlohmann **type predicates rather than
+  try/catch**. That is not style: measured against the pinned 3.11.3,
+  `get<int>()` returns `1` for `1.9` and `276447231` for `99999999999999` and
+  throws in neither case, so an exception-only guard turns a wrong-typed number
+  into a confident wrong one — and the second case does not even trip UBSan,
+  because the narrowing is well-defined. `opt_int` therefore goes through
+  `opt_i64` and range-checks. `opt_double` accepts `is_number()`, not
+  `is_number_float()`: Venice quotes whole prices as JSON integers.
+  These are for *listings*, where one odd entry must not cost the caller the
+  other hundred. Do **not** retrofit them onto `Usage` / `ChatResponse` — those
+  parse inside `Client::chat`'s try/catch, where a malformed body should fail as
+  `ErrorKind::Parse`; a chat reply has no sibling entries to protect and
+  silently zeroing a token count would hide a billing bug.
+- **Response-side escape hatches are named `raw`, not `extra`.** `Model::raw`
+  holds the verbatim entry — modeled fields included — because a *subtractive*
+  hatch breaks its readers every time a key graduates to a typed field. The
+  request-side `extra` on `ChatRequest` / `VeniceParameters` is the opposite
+  contract (additive, merged into the wire body, modeled fields win), so it
+  keeps the opposite name.
 - **Usage/cost metadata:** keep cache buckets distinct (cached vs uncached
-  tokens price differently — see venice-cli #75).
+  tokens price differently — see venice-cli #75). Model *pricing* has two cache
+  buckets (`cache_input` read, `cache_write` write) where `Usage` reports one,
+  so the two cannot be paired 1:1 — don't write code that assumes they can.
 - **KDE/Qt-readiness:** keep the library UI-free and Qt-linkable. No Qt types
   in the API client; a separate service layer owns D-Bus/KF concerns.
 
