@@ -6,6 +6,7 @@
 // `venice_parameters` extension. Plain structs, nlohmann/json (de)serialization
 // via to_json/from_json free functions.
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -63,21 +64,106 @@ struct VeniceParameters {
   }
 };
 
+// ── response_format builders ──────────────────────────────────────────────
+//
+// `ChatRequest::response_format` is raw JSON rather than an enum: the API
+// accepts both {"type":"json_object"} and a full
+// {"type":"json_schema","json_schema":{...}} block, and an enum cannot carry a
+// schema. These builders supply the ergonomics an enum would have; anything
+// they don't cover, assign the object directly.
+//
+// Free functions, not statics on a struct — a zero-member type whose statics
+// return nlohmann::json would invite `ResponseFormat rf = ...;`, which cannot
+// compile. Same shape as venice::to_string / venice::kind_for_status.
+
+namespace response_format {
+
+inline auto text() -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["type"] = "text";
+  return j;
+}
+
+inline auto json_object() -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["type"] = "json_object";
+  return j;
+}
+
+// Field-by-field assignment, not a brace-init list: an array-valued `schema`
+// makes the outer initializer-list ambiguous and nlohmann reads the whole
+// thing as an array.
+inline auto json_schema(std::string name, nlohmann::json schema, bool strict = true)
+    -> nlohmann::json {
+  auto inner = nlohmann::json::object();
+  inner["name"] = std::move(name);
+  inner["schema"] = std::move(schema);
+  inner["strict"] = strict;
+
+  auto j = nlohmann::json::object();
+  j["type"] = "json_schema";
+  j["json_schema"] = std::move(inner);
+  return j;
+}
+
+}  // namespace response_format
+
 // ── chat request ──────────────────────────────────────────────────────────
+//
+// No client-side range checking on any of these. The line this library draws:
+// *structural* preconditions that make a request unsendable by construction
+// (an empty model, no messages — see Client::chat) are ErrorKind::InvalidArg;
+// *value-range policy the server owns* (temperature 0-2, top_p 0-1, penalties
+// -2..2) is transmitted verbatim, because a bound hardcoded here goes stale
+// the moment Venice widens it.
+//
+// The same principle governs engaged-but-degenerate optionals: an engaged
+// `stop` holding an empty vector serializes as "stop": [], and an engaged
+// `response_format` holding a default-constructed (null) json serializes as
+// null. The caller said something; silently discarding it is a harder bug to
+// diagnose than the 400 that follows.
 
 struct ChatRequest {
   std::string model;
   std::vector<Message> messages;
   std::optional<double> temperature;
+  std::optional<double> top_p;
   std::optional<int> max_tokens;
+  std::optional<std::vector<std::string>> stop;  // always sent as an array
+  std::optional<double> frequency_penalty;
+  std::optional<double> presence_penalty;
+  // Wider than max_tokens on purpose, not by oversight: callers seed from
+  // std::random_device / mt19937, which yield uint32_t values up to
+  // 4294967295 — past INT_MAX. max_tokens is bounded by the context window and
+  // stays int.
+  std::optional<std::int64_t> seed;
+  std::optional<nlohmann::json> response_format;  // see the builders above
   std::optional<VeniceParameters> venice_parameters;
+  // Forward-compatible top-level passthrough, mirroring VeniceParameters::extra.
+  // Venice accepts sampling keys this struct doesn't model (top_k, min_p,
+  // repetition_penalty); without this they'd be unreachable without forking the
+  // header. Modeled fields always win over a same-named key here.
+  nlohmann::json extra;
   bool stream{false};
 
   // Serialize to the wire body. `stream` is emitted as "stream": true|false.
   [[nodiscard]] auto to_json_body() const -> nlohmann::json {
-    nlohmann::json j{{"model", model}, {"messages", messages}, {"stream", stream}};
+    // is_object() guard as in VeniceParameters::to_json: a default-constructed
+    // json is null, and an array- or number-valued `extra` would make the
+    // operator[] below throw type_error.305 straight out of a function the
+    // client calls with no try/catch — an exception escaping the public API.
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["model"] = model;
+    j["messages"] = messages;
+    j["stream"] = stream;
     if (temperature) j["temperature"] = *temperature;
+    if (top_p) j["top_p"] = *top_p;
     if (max_tokens) j["max_tokens"] = *max_tokens;
+    if (stop) j["stop"] = *stop;
+    if (frequency_penalty) j["frequency_penalty"] = *frequency_penalty;
+    if (presence_penalty) j["presence_penalty"] = *presence_penalty;
+    if (seed) j["seed"] = *seed;
+    if (response_format) j["response_format"] = *response_format;
     if (venice_parameters) j["venice_parameters"] = *venice_parameters;
     return j;
   }

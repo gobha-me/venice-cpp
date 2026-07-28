@@ -48,8 +48,16 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   across the public API; a transport/parse/HTTP failure is a value the caller
   inspects. Error kinds: network / http / parse / auth / rate_limited /
   invalid_arg, each carrying `status` + raw `body`.
-- **`venice_parameters`:** only serialize set fields; keep `extra` as a
-  forward-compatible passthrough so future Venice keys don't break the client.
+- **Request serialization:** only serialize set fields. Both `ChatRequest` and
+  `VeniceParameters` carry an `extra` json passthrough so future Venice keys are
+  reachable without editing the header; modeled fields always win over a
+  same-named key in `extra`, and the `is_object()` guard is load-bearing — a
+  non-object `extra` would otherwise throw out of `to_json_body()`.
+- **Range checking:** none, deliberately. Structural preconditions that make a
+  request unsendable by construction (empty model, no messages) are
+  `ErrorKind::InvalidArg`; value ranges (temperature, top_p, penalties) are the
+  server's policy and are transmitted verbatim, because a bound hardcoded here
+  goes stale when Venice widens it.
 - **Usage/cost metadata:** keep cache buckets distinct (cached vs uncached
   tokens price differently — see venice-cli #75).
 - **KDE/Qt-readiness:** keep the library UI-free and Qt-linkable. No Qt types
