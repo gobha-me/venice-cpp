@@ -110,12 +110,13 @@ inline auto json_schema(std::string name, nlohmann::json schema, bool strict = t
 
 // ── chat request ──────────────────────────────────────────────────────────
 //
-// No client-side range checking on any of these. The line this library draws:
-// *structural* preconditions that make a request unsendable by construction
-// (an empty model, no messages — see Client::chat) are ErrorKind::InvalidArg;
-// *value-range policy the server owns* (temperature 0-2, top_p 0-1, penalties
-// -2..2) is transmitted verbatim, because a bound hardcoded here goes stale
-// the moment Venice widens it.
+// Ranges are not checked client-side; representability is. The line this
+// library draws: *structural* preconditions that make a request unsendable by
+// construction — an empty model, no messages, a non-finite double, since JSON
+// has no NaN or infinity — are ErrorKind::InvalidArg, raised by Client::validate
+// before any transport. *Value-range policy the server owns* (temperature 0-2,
+// top_p 0-1, penalties -2..2) is transmitted verbatim, because a bound
+// hardcoded here goes stale the moment Venice widens it.
 //
 // The same principle governs engaged-but-degenerate optionals: an engaged
 // `stop` holding an empty vector serializes as "stop": [], and an engaged

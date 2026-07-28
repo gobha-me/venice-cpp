@@ -15,9 +15,13 @@
 // Not in Phase 0 (later phases, fed by real use): image/audio/video, TTS,
 // embeddings, characters, retries/backoff, async.
 
+#include <array>
+#include <cmath>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -39,8 +43,7 @@ class Client {
 
   // ── chat (non-streaming) ──────────────────────────────────────────────
   [[nodiscard]] auto chat(const ChatRequest& req) const -> std::expected<ChatResponse, Error> {
-    if (req.model.empty()) return std::unexpected{Error{ErrorKind::InvalidArg, 0, "model is empty", {}}};
-    if (req.messages.empty()) return std::unexpected{Error{ErrorKind::InvalidArg, 0, "messages is empty", {}}};
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
 
     auto res = post_json("/chat/completions", req.to_json_body(/*stream=*/false));
     if (!res) return std::unexpected{std::move(res.error())};
@@ -61,8 +64,7 @@ class Client {
       const ChatRequest& req,
       const std::function<bool(std::string_view /*delta*/)>& on_token) const
       -> std::expected<ChatResponse, Error> {
-    if (req.model.empty()) return std::unexpected{Error{ErrorKind::InvalidArg, 0, "model is empty", {}}};
-    if (req.messages.empty()) return std::unexpected{Error{ErrorKind::InvalidArg, 0, "messages is empty", {}}};
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
 
     const std::string payload = req.to_json_body(/*stream=*/true).dump();
 
@@ -155,6 +157,66 @@ class Client {
  private:
   std::string m_api_key;
   std::string m_base_url;
+
+  // ── preconditions ─────────────────────────────────────────────────────
+  //
+  // Everything both chat entry points refuse to send, in one place. A caller
+  // that trips any of these has touched no socket: this runs before
+  // make_transport().
+  //
+  // Non-finite doubles belong here rather than under "range checking, none
+  // deliberately". JSON has no NaN and no infinity, so nlohmann's dump()
+  // collapses such a value to null and Venice answers with a 400 that will
+  // never mention NaN — the caller gets a confusing rejection for a bug in
+  // their own arithmetic. That is unsendable *by construction*, which is the
+  // line AGENTS.md draws for InvalidArg, not an opinion about what range
+  // Venice accepts (VC-10).
+  //
+  // The sweep runs *before* the emptiness checks, and that ordering is load
+  // bearing rather than cosmetic. Every failure case is offline either way,
+  // but the passing path is not: a valid request would go to api.venice.ai and
+  // the assertion would depend on whether the runner has a network. Checking
+  // finiteness first means a finite request with an empty model comes back
+  // "model is empty" — a message reachable only if the sweep ran and let the
+  // values through. That is how test/03guards/ proves the accept path without
+  // opening a connection, and the ordering itself is pinned there by a
+  // precedence case — reorder these two blocks and it goes red.
+  //
+  // Modeled fields only. `extra` is documented verbatim passthrough and is not
+  // walked: validating an arbitrary json tree per call is the exact cost VC-11
+  // just removed, and "something in extra is not finite" would be no more
+  // actionable than the 400 it replaces.
+  [[nodiscard]] static auto validate(const ChatRequest& req) -> std::expected<void, Error> {
+    // Pointer-to-member, so name and field travel together and a future double
+    // field is one line. Members rather than references into `req`: the table
+    // is then a compile-time constant with no lifetime relationship to any
+    // request. test/03guards/ mirrors this list on purpose — a fifth field
+    // added here and not there ships unguarded with the suite still green.
+    struct DoubleField {
+      std::optional<double> ChatRequest::*field;
+      std::string_view name;
+    };
+    static constexpr std::array<DoubleField, 4> kDoubleFields{{
+        {&ChatRequest::temperature, "temperature"},
+        {&ChatRequest::top_p, "top_p"},
+        {&ChatRequest::frequency_penalty, "frequency_penalty"},
+        {&ChatRequest::presence_penalty, "presence_penalty"},
+    }};
+
+    for (const auto& [field, name] : kDoubleFields) {
+      const auto& value = req.*field;
+      if (value && !std::isfinite(*value))
+        return std::unexpected{
+            Error{ErrorKind::InvalidArg, 0, std::string{name} + " is not finite", {}}};
+    }
+
+    if (req.model.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "model is empty", {}}};
+    if (req.messages.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "messages is empty", {}}};
+
+    return {};
+  }
 
   // Split base_url into scheme://host and the /api/v1 path prefix.
   [[nodiscard]] auto host() const -> std::string {

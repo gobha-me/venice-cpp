@@ -24,8 +24,6 @@
 #include <venice/venice.hpp>
 
 using venice::ChatRequest;
-using venice::Client;
-using venice::ErrorKind;
 using venice::Message;
 using venice::VeniceParameters;
 
@@ -133,12 +131,15 @@ TEST_CASE("seed survives its boundaries", "[request][seed][failure]") {
   }
 }
 
-// ── non-finite doubles: a known quirk, pinned rather than left a mystery ──
+// ── non-finite doubles: what the serializer alone still does ──────────────
 //
-// JSON cannot represent NaN or infinity, so nlohmann emits null and the server
-// 400s with a message that will not mention NaN. This is structural rather than
-// a range question, so it arguably belongs behind an InvalidArg guard in
-// Client — filed as a follow-up. Until then, the behavior is documented here.
+// Client::chat and Client::chat_stream reject these with InvalidArg before they
+// serialize anything (VC-10, #14 — see test/03guards/). to_json_body does not:
+// it is public, it takes no view on whether a request is sendable, and a caller
+// who builds a body by hand bypasses the guard entirely. So the old behavior is
+// still reachable and still pinned here — JSON cannot represent NaN or infinity,
+// so nlohmann emits null and the server 400s with a message that will not
+// mention NaN. Two layers, two contracts.
 
 TEST_CASE("non-finite doubles serialize as null", "[request][failure]") {
   auto r = minimal();
@@ -224,18 +225,9 @@ TEST_CASE("extra cannot corrupt the body", "[request][extra][failure]") {
   }
 }
 
-TEST_CASE("extra cannot smuggle past the InvalidArg guard", "[request][extra][failure]") {
-  // Offline-safe: Client::chat returns on the empty-model check before it
-  // touches the transport.
-  const Client c{"not-a-real-key"};
-  ChatRequest r;
-  r.messages = {Message::user("hi")};
-  r.extra = nlohmann::json::parse(R"({"model":"m"})");
-
-  const auto res = c.chat(r);
-  REQUIRE_FALSE(res.has_value());
-  REQUIRE(res.error().is(ErrorKind::InvalidArg));
-}
+// "extra cannot smuggle past the InvalidArg guard" moved to test/03guards/
+// (VC-10): it asserted on Client::chat's return value rather than on a body, so
+// it belonged to that file's charter, not this one's.
 
 // ── happy path ────────────────────────────────────────────────────────────
 

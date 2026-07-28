@@ -60,11 +60,18 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   one bool, and it leaves no second source of truth for that bit. The parameter
   has no default, on purpose: a defaulted `stream` would rebuild the very defect
   it retires, a bit that looks set and silently never reaches the wire.
-- **Range checking:** none, deliberately. Structural preconditions that make a
-  request unsendable by construction (empty model, no messages) are
-  `ErrorKind::InvalidArg`; value ranges (temperature, top_p, penalties) are the
-  server's policy and are transmitted verbatim, because a bound hardcoded here
-  goes stale when Venice widens it.
+- **Range checking: none, deliberately — representability checking: yes.**
+  Structural preconditions that make a request unsendable by construction are
+  `ErrorKind::InvalidArg`, checked in `Client::validate` before any socket: an
+  empty model, no messages, and a non-finite `temperature` / `top_p` /
+  `frequency_penalty` / `presence_penalty`. NaN and ±inf are not a range opinion
+  — JSON cannot encode them, nlohmann collapses them to `null`, and the 400 that
+  follows never mentions NaN (VC-10). Value *ranges* (temperature 0-2, top_p
+  0-1, penalties -2..2) are the server's policy and are transmitted verbatim,
+  because a bound hardcoded here goes stale when Venice widens it. The guard
+  covers modeled fields only; `extra` is passthrough and is not walked. The
+  non-finite sweep runs *first*, which is what makes the guard's passing path
+  testable offline — see `test/03guards/`.
 - **Usage/cost metadata:** keep cache buckets distinct (cached vs uncached
   tokens price differently — see venice-cli #75).
 - **KDE/Qt-readiness:** keep the library UI-free and Qt-linkable. No Qt types
