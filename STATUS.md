@@ -47,6 +47,17 @@ with it. Porting it surfaced a third upstream-relevant finding: the build-tree
 `export(EXPORT ...)` in upstream's file cannot work for any project with a public
 FetchContent dependency that ships no `export()` call of its own.
 
+**VC-02 (#3, request sampling parameters) is done** — see v0.3.0. `ChatRequest`
+now carries `top_p`, `stop`, `frequency_penalty`, `presence_penalty`, `seed`
+(int64 — callers seed from `mt19937`, which overflows `int`) and
+`response_format`, plus a top-level `extra` json passthrough beyond the ticket's
+text so unmodeled Venice keys (`top_k`, `min_p`, `repetition_penalty`) don't
+require editing the header. `response_format` is raw JSON rather than an enum
+because no enum can carry a `json_schema`; `venice::response_format::` supplies
+builders. All request-body serialization tests now live in `test/02request/`,
+anchored on a byte-exact baseline body — which was proven to fail by adding a
+stray key before it was trusted.
+
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.
 - venice-cpp issues double as the AIForge kickoff tracker for now (#1).

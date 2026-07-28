@@ -15,6 +15,9 @@ right bridge.
 
 - **Chat completions** (`/chat/completions`) — non-streaming and streaming
   (SSE via callback).
+- **Sampling and control parameters** — `temperature`, `top_p`, `max_tokens`,
+  `stop`, `frequency_penalty`, `presence_penalty`, `seed`, `response_format`,
+  plus a top-level `extra` passthrough for keys this struct doesn't model.
 - **`venice_parameters`** extension — web search, citations, character,
   thinking toggles, with forward-compatible passthrough for unmodeled keys.
 - **Models list** (`/models`).
@@ -46,6 +49,13 @@ venice::ChatRequest req;
 req.model = "llama-3.3-70b";
 req.messages = {venice::Message::user("Hello")};
 
+// sampling controls — every one is optional; unset fields are never serialized
+req.temperature = 0.7;
+req.top_p = 0.9;
+req.stop = std::vector<std::string>{"\n\n"};
+req.seed = 42;
+req.response_format = venice::response_format::json_object();
+
 // non-streaming
 if (auto res = client.chat(req)) {
   // res->content, res->usage, res->finish_reason
@@ -59,6 +69,28 @@ auto s = client.chat_stream(req, [](std::string_view delta) {
   return true;
 });
 ```
+
+**`response_format` is raw JSON, not an enum.** The API accepts both
+`{"type":"json_object"}` and a full `{"type":"json_schema", …}` block, and no
+enum can carry a schema — so the field is `std::optional<nlohmann::json>` and
+the ergonomics live in builders:
+
+```cpp
+req.response_format = venice::response_format::text();
+req.response_format = venice::response_format::json_object();
+req.response_format = venice::response_format::json_schema("reply", my_schema);
+// anything the builders don't cover, assign the object yourself
+```
+
+**`ChatRequest::extra` is a top-level passthrough**, same idea as
+`VeniceParameters::extra`: Venice accepts sampling keys this struct doesn't
+model (`top_k`, `min_p`, `repetition_penalty`), and `extra` reaches them without
+forking the header. Modeled fields always win over a same-named key in `extra`.
+
+Nothing here is range-checked client-side. Structural problems that make a
+request unsendable (empty model, no messages) come back as
+`ErrorKind::InvalidArg`; value-range policy belongs to the server, so
+`temperature = 5.0` is transmitted and the API decides.
 
 ### CMake
 

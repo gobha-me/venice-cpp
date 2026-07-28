@@ -1,8 +1,10 @@
 // Unit tests for venice-cpp — offline, no API key or network required.
 //
 // Following the repo's testing philosophy: probe the failure modes, not just
-// the happy path. These cover serialization round-trips, response parsing
-// (including malformed input), and the error model's status mapping.
+// the happy path. These cover message/venice_parameters serialization, response
+// parsing (including malformed input), and the error model's status mapping.
+// ChatRequest body serialization lives in test/02request/ — all of it, so the
+// wire-body baseline has exactly one home.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_template_test_macros.hpp>
@@ -56,26 +58,6 @@ TEST_CASE("VeniceParameters serializes only set fields", "[types][params]") {
     REQUIRE(j["some_future_flag"] == true);
     REQUIRE(j["enable_x_search"] == true);
   }
-}
-
-// ── ChatRequest body ──────────────────────────────────────────────────────
-
-TEST_CASE("ChatRequest::to_json_body builds the wire shape", "[types]") {
-  ChatRequest r;
-  r.model = "llama-3.3-70b";
-  r.messages = {Message::user("hi")};
-  r.temperature = 0.7;
-  r.max_tokens = 64;
-  r.venice_parameters = VeniceParameters{};
-  r.venice_parameters->enable_web_search = "off";
-
-  auto j = r.to_json_body();
-  REQUIRE(j["model"] == "llama-3.3-70b");
-  REQUIRE(j["messages"].size() == 1);
-  REQUIRE(j["temperature"] == 0.7);
-  REQUIRE(j["max_tokens"] == 64);
-  REQUIRE(j["stream"] == false);
-  REQUIRE(j["venice_parameters"]["enable_web_search"] == "off");
 }
 
 // ── ChatResponse parsing (happy + failure) ───────────────────────────────
