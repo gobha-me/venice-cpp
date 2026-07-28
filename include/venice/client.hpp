@@ -134,14 +134,17 @@ class Client {
   }
 
   // ── models ────────────────────────────────────────────────────────────
+  //
+  // Only the shape of the *response* can fail here; individual entries degrade
+  // instead. The parse itself is venice::models_from_json_body, deliberately
+  // outside this class: everything interesting about it — junk entries, absent
+  // fields, wrong-typed numbers — is reachable offline in test/04models/ only
+  // because it needs no socket. This method is the transport half.
   [[nodiscard]] auto models() const -> std::expected<std::vector<Model>, Error> {
     auto res = get_json("/models");
     if (!res) return std::unexpected{std::move(res.error())};
     try {
-      std::vector<Model> out;
-      const auto& arr = res->contains("data") ? res->at("data") : *res;
-      for (const auto& m : arr) out.push_back(m.get<Model>());
-      return out;
+      return models_from_json_body(*res);
     } catch (const std::exception& e) {
       return std::unexpected{Error{ErrorKind::Parse, 0, std::string{"models parse: "} + e.what(), res->dump()}};
     }

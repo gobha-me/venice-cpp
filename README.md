@@ -20,7 +20,10 @@ right bridge.
   plus a top-level `extra` passthrough for keys this struct doesn't model.
 - **`venice_parameters`** extension — web search, citations, character,
   thinking toggles, with forward-compatible passthrough for unmodeled keys.
-- **Models list** (`/models`).
+- **Models list** (`/models`) — typed metadata per model: context window,
+  fourteen capability flags (function calling, vision, reasoning, web search,
+  …), and a full rate card with cache buckets and extended-context tiers, plus
+  the verbatim entry as `raw`.
 - **Balance / rate limits** (`/api_keys/rate_limits`).
 - **Error model** — `std::expected<T, venice::Error>`; network / HTTP / parse /
   auth / rate-limit / invalid-arg, each carrying status + raw body.
@@ -86,6 +89,58 @@ req.response_format = venice::response_format::json_schema("reply", my_schema);
 // anything the builders don't cover, assign the object yourself
 ```
 
+### Picking a model
+
+`models()` returns typed metadata, so choosing one is a filter rather than a
+second round of JSON parsing:
+
+```cpp
+for (const auto& m : *client.models()) {
+  if (m.type != "text") continue;
+  if (!m.capabilities || m.capabilities->supports_function_calling != true) continue;
+  if (!m.context_length || *m.context_length < 200000) continue;
+
+  // per-million-token input rate, if quoted
+  if (m.pricing && m.pricing->base.input && m.pricing->base.input->usd)
+    std::cout << m.id << " $" << *m.pricing->base.input->usd << '\n';
+}
+```
+
+Every field but `id` and `type` is optional, and absent means *the response did
+not say* — not `false` and not zero. `m.capabilities->supports_vision != true`
+above is deliberate: an unset flag is not a "no".
+
+Some models reprice past a context threshold, so a cost estimate picks a tier:
+
+```cpp
+const auto& p = *m.pricing;
+const venice::PriceTier& tier =
+    (p.extended && p.extended_threshold_tokens && tokens > *p.extended_threshold_tokens)
+        ? *p.extended : p.base;
+```
+
+Note that pricing carries **two** cache buckets (`cache_input` for a read,
+`cache_write` for populating it) while `Usage` reports only one
+(`cached_tokens`), so a response cannot yet be paired 1:1 with the rate card.
+
+**`Model::raw` holds the whole entry verbatim**, modeled fields included. It is
+not called `extra` because it is the opposite of the request-side hatches: it is
+never sent, and it is a superset rather than a complement — so code reading
+`m.raw["model_spec"]["betaModel"]` keeps working the release that key becomes a
+typed field. It is also how you reach anything this struct does not model:
+
+```cpp
+m.raw["model_spec"]["pricing"]["upscale"]["2x"]["usd"];  // image models
+m.raw["model_spec"]["constraints"];                      // per-model defaults
+```
+
+`model_spec` is polymorphic by model type — image models carry generation
+pricing and no context window, tts carries a voice list — so the typed surface
+is the text shape and `raw` carries the rest. Malformed entries degrade rather
+than failing the listing: an entry with no usable `id` is skipped, a
+wrong-typed field reads as absent, and only a response that is not a list at
+all comes back as `ErrorKind::Parse`.
+
 **`ChatRequest::extra` is a top-level passthrough**, same idea as
 `VeniceParameters::extra`: Venice accepts sampling keys this struct doesn't
 model (`top_k`, `min_p`, `repetition_penalty`), and `extra` reaches them without
@@ -119,7 +174,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.4.0)
+  GIT_TAG        v0.5.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
