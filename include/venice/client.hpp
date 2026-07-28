@@ -42,9 +42,7 @@ class Client {
     if (req.model.empty()) return std::unexpected{Error{ErrorKind::InvalidArg, 0, "model is empty", {}}};
     if (req.messages.empty()) return std::unexpected{Error{ErrorKind::InvalidArg, 0, "messages is empty", {}}};
 
-    ChatRequest body = req;
-    body.stream = false;
-    auto res = post_json("/chat/completions", body.to_json_body());
+    auto res = post_json("/chat/completions", req.to_json_body(/*stream=*/false));
     if (!res) return std::unexpected{std::move(res.error())};
 
     try {
@@ -66,9 +64,7 @@ class Client {
     if (req.model.empty()) return std::unexpected{Error{ErrorKind::InvalidArg, 0, "model is empty", {}}};
     if (req.messages.empty()) return std::unexpected{Error{ErrorKind::InvalidArg, 0, "messages is empty", {}}};
 
-    ChatRequest body = req;
-    body.stream = true;
-    const std::string payload = body.to_json_body().dump();
+    const std::string payload = req.to_json_body(/*stream=*/true).dump();
 
     ChatResponse assembled;
     std::string leftover;  // partial SSE line buffer across chunks

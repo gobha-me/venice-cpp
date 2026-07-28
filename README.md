@@ -70,6 +70,10 @@ auto s = client.chat_stream(req, [](std::string_view delta) {
 });
 ```
 
+Whether a request streams is decided by the method you call, not by a field on
+`ChatRequest`. If you build the wire body yourself, say so explicitly:
+`req.to_json_body(/*stream=*/false)`.
+
 **`response_format` is raw JSON, not an enum.** The API accepts both
 `{"type":"json_object"}` and a full `{"type":"json_schema", …}` block, and no
 enum can carry a schema — so the field is `std::optional<nlohmann::json>` and

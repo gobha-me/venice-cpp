@@ -144,10 +144,22 @@ struct ChatRequest {
   // repetition_penalty); without this they'd be unreachable without forking the
   // header. Modeled fields always win over a same-named key here.
   nlohmann::json extra;
-  bool stream{false};
 
-  // Serialize to the wire body. `stream` is emitted as "stream": true|false.
-  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+  // Serialize to the wire body.
+  //
+  // `stream` is a parameter, not a member: it describes how the request is
+  // *sent*, not what it is, and the two Client entry points each already know
+  // their own answer. Taking it here is what lets both serialize straight from
+  // a `const ChatRequest&` — before this, each copied the whole request,
+  // `extra`'s arbitrarily deep json tree included, to flip one bool. With no
+  // `stream` member left there is no second source of truth for that bit, and
+  // no mutable state a copy could exist to modify.
+  //
+  // No default argument, on purpose. The defect this signature retires is a bit
+  // that looks set and silently never reaches the wire; a defaulted `stream`
+  // rebuilds that shape one level up, where a hand-built SSE body would quietly
+  // say "stream": false and the server would simply not stream.
+  [[nodiscard]] auto to_json_body(bool stream) const -> nlohmann::json {
     // is_object() guard as in VeniceParameters::to_json: a default-constructed
     // json is null, and an array- or number-valued `extra` would make the
     // operator[] below throw type_error.305 straight out of a function the
@@ -155,6 +167,11 @@ struct ChatRequest {
     nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
     j["model"] = model;
     j["messages"] = messages;
+    // Assigned unconditionally after the `extra` seed, like every other modeled
+    // key: modeled fields win. An extra["stream"] never gets a vote, because it
+    // cannot change how the transport is actually driven — the Client method the
+    // caller chose already decided that, and a body claiming "stream": true
+    // under a non-SSE read is a hang, not a preference.
     j["stream"] = stream;
     if (temperature) j["temperature"] = *temperature;
     if (top_p) j["top_p"] = *top_p;

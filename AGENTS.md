@@ -53,6 +53,13 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   reachable without editing the header; modeled fields always win over a
   same-named key in `extra`, and the `is_object()` guard is load-bearing — a
   non-object `extra` would otherwise throw out of `to_json_body()`.
+  `ChatRequest` has **no `stream` member** — `to_json_body(bool stream)` takes the
+  mode, because it belongs to the call and not to the request. That is what lets
+  both `Client` entry points serialize from a `const ChatRequest&` instead of
+  copying the whole request (an arbitrarily deep `extra` tree included) to flip
+  one bool, and it leaves no second source of truth for that bit. The parameter
+  has no default, on purpose: a defaulted `stream` would rebuild the very defect
+  it retires, a bit that looks set and silently never reaches the wire.
 - **Range checking:** none, deliberately. Structural preconditions that make a
   request unsendable by construction (empty model, no messages) are
   `ErrorKind::InvalidArg`; value ranges (temperature, top_p, penalties) are the
