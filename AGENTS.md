@@ -88,6 +88,16 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   parse inside `Client::chat`'s try/catch, where a malformed body should fail as
   `ErrorKind::Parse`; a chat reply has no sibling entries to protect and
   silently zeroing a token count would hide a billing bug.
+- **Endpoint filters are caller-supplied strings, and an unset one sends no
+  query key.** `models(type)` takes Venice's modality as a string rather than an
+  enum, on the same reasoning as `response_format`: the value set is the
+  server's, and a list hardcoded here would refuse a valid value the day a
+  modality is added. `venice::detail::with_query` in `client.hpp` **skips any
+  pair whose value is empty**, so `models()` with no argument produces the bare
+  `/models` it always did — that skip is the non-breaking guarantee, pinned by
+  `test/05query/`, not a formatting nicety. Both it and `percent_encode` are
+  free functions at namespace scope so the encoding is testable without a
+  socket, the same move VC-03 made with `models_from_json_body`.
 - **Response-side escape hatches are named `raw`, not `extra`.** `Model::raw`
   holds the verbatim entry — modeled fields included — because a *subtractive*
   hatch breaks its readers every time a key graduates to a typed field. The
