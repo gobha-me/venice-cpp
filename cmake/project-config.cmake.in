@@ -59,6 +59,16 @@ set(CMAKE_PREFIX_PATH "${_venice_cpp_saved_prefix_path}")
 unset(_venice_cpp_saved_prefix_path)
 unset(_venice_cpp_vendored)
 
+# Threads came with VC-06: include/venice/options.hpp spawns a std::thread to
+# watch a CancelToken, so Threads::Threads is in our INTERFACE link line and the
+# Targets file below cannot resolve it without this.
+#
+# Outside the vendored-dependency window above, deliberately. That block exists
+# for packages we may have installed into our own prefix; Threads is a platform
+# facility located by a CMake find module and is never one of them, so widening
+# the window to cover it would misfile it as vendorable.
+find_dependency(Threads)
+
 include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@Targets.cmake")
 
 check_required_components(@PROJECT_NAME@)

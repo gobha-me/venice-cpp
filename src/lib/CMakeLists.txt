@@ -41,3 +41,17 @@ target_link_libraries(${PROJECT_NAME}_lib
   INTERFACE OpenSSL::SSL
   INTERFACE OpenSSL::Crypto
 )
+
+# Threads is a public requirement for the same reason OpenSSL is, and became one
+# with VC-06: include/venice/options.hpp spawns a std::thread of our own to
+# watch a CancelToken. cpp-httplib links Threads too, so this happens to work
+# transitively today — which is exactly the accident worth not depending on. A
+# consumer who satisfies httplib through a system find_package inherits whatever
+# that package recorded, and our own requirement should not be riding on it.
+#
+# Not a cmake/deps/ recipe and not in ${PROJECT_NAME}_DEPS: like OpenSSL this is
+# a platform facility located by a CMake find module, not a library we fetch.
+find_package(Threads REQUIRED)
+target_link_libraries(${PROJECT_NAME}_lib
+  INTERFACE Threads::Threads
+)

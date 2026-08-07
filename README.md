@@ -26,8 +26,12 @@ right bridge.
   the verbatim entry as `raw`. Filterable by modality — `models("image")`,
   `models("all")` — since the endpoint's own default is text-only.
 - **Balance / rate limits** (`/api_keys/rate_limits`).
+- **Per-request timeouts and cancellation** — every call takes an optional
+  `RequestOptions` with connect/read/write timeout overrides and a
+  `CancelToken` that aborts an in-flight request from another thread, including
+  one that has received nothing at all.
 - **Error model** — `std::expected<T, venice::Error>`; network / HTTP / parse /
-  auth / rate-limit / invalid-arg, each carrying status + raw body.
+  auth / rate-limit / invalid-arg / cancelled, each carrying status + raw body.
 
 Later phases (fed by real use): image/audio/video, TTS, embeddings,
 characters, retries/backoff, async.
@@ -174,6 +178,60 @@ offending field, before any HTTP call is made. Value-range policy belongs to the
 server, so `temperature = 5.0` is transmitted and the API decides. Values inside
 `extra` are passthrough and are not inspected, finiteness included.
 
+### Timeouts and cancellation
+
+Every entry point takes a trailing, defaulted `RequestOptions`. The defaults are
+the ones this library has always used — 300 s read, 30 s connect — because a
+chat completion can legitimately take minutes; what changed is that they are now
+a floor you can move per call rather than a property of the library:
+
+```cpp
+using namespace std::chrono_literals;
+
+auto models = client.models("all", {.connect_timeout = 5s, .read_timeout = 10s});
+```
+
+Cancellation needs a second thread, necessarily: the calling thread is blocked
+inside the transport, so nothing on it can run.
+
+```cpp
+venice::CancelToken token;
+
+std::thread ui{[&] {
+  if (user_pressed_escape()) token.cancel();   // safe from any thread
+}};
+
+auto res = client.chat(req, {.cancel = &token});
+ui.join();
+
+if (!res && res.error().kind == venice::ErrorKind::Cancelled) {
+  // our own decision coming back to us — not a failure to log
+}
+```
+
+The token is sticky and one-shot; construct one per call that needs one. It must
+outlive the call, which is why `RequestOptions::cancel` is a borrowed pointer.
+Cancelling works on a request that has received nothing yet, which is the case
+that matters and the one a callback cannot reach.
+
+**Streaming has two different ways to stop, and they mean different things:**
+
+| how | result | meaning |
+| --- | --- | --- |
+| `on_token` returns `false` | success, partial `ChatResponse` | you have what you wanted |
+| `token.cancel()` | `ErrorKind::Cancelled`, no response | you have abandoned the call |
+
+The first is unchanged from earlier releases. The second exists because the
+first cannot cover the cases worth covering: `on_token` only runs when a content
+delta arrives, so a stop wanted before the first delta, during a gap between
+frames, or while the server stalls after headers is invisible to it and waits
+out the read timeout.
+
+A cancelled call returns `ErrorKind::Cancelled` rather than `Network`. Both
+arrive as a socket that stopped working, but a dead network is a fault to report
+or retry and a cancellation is your own decision handed back — collapsing them
+would leave the difference reachable only by parsing message text.
+
 ### CMake
 
 However you acquire venice-cpp, the line you write is the same:
@@ -194,7 +252,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.6.0)
+  GIT_TAG        v0.7.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

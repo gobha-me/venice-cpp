@@ -14,6 +14,15 @@ namespace venice {
 
 // Broad category so a caller can branch on *kind* of failure without parsing
 // message text.
+//
+// Cancelled is deliberately not folded into Network even though both surface as
+// a socket that stopped working. A dead network is a fault to report, retry or
+// degrade on; a cancellation is the caller's own decision arriving back at them,
+// and nothing about it should be logged as a failure. Collapsing the two would
+// make that distinction unavailable except by parsing the message — the exact
+// thing this enum exists to avoid. Note also that Cancelled is *not* what a
+// streaming caller gets for stopping via on_token: that is a deliberate early
+// stop and still returns the partial ChatResponse (see Client::chat_stream).
 enum class ErrorKind {
   Network,      // connect/TLS/timeout — no HTTP response at all
   Http,         // got a response, non-2xx status (see status + body)
@@ -21,6 +30,7 @@ enum class ErrorKind {
   Auth,         // 401/403 — key missing/invalid/insufficient
   RateLimited,  // 429
   InvalidArg,   // caller passed something we can't send (e.g. empty prompt)
+  Cancelled,    // aborted through a RequestOptions::cancel token (VC-06)
 };
 
 struct Error {
@@ -40,6 +50,7 @@ struct Error {
     case ErrorKind::Auth: return "auth";
     case ErrorKind::RateLimited: return "rate_limited";
     case ErrorKind::InvalidArg: return "invalid_arg";
+    case ErrorKind::Cancelled: return "cancelled";
   }
   return "unknown";
 }
