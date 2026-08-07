@@ -12,6 +12,9 @@
 //   * models()                 -> expected<vector<Model>>
 //   * balance()                -> expected<json>           (rate-limit/balance)
 //
+// Every one of them takes a trailing venice::RequestOptions (defaulted) for
+// per-call timeouts and cancellation — see venice/options.hpp (VC-06).
+//
 // Not in Phase 0 (later phases, fed by real use): image/audio/video, TTS,
 // embeddings, characters, retries/backoff, async.
 
@@ -30,6 +33,7 @@
 #include <nlohmann/json.hpp>
 
 #include "venice/error.hpp"
+#include "venice/options.hpp"
 #include "venice/types.hpp"
 
 namespace venice {
@@ -131,10 +135,15 @@ class Client {
       : m_api_key(std::move(api_key)), m_base_url(std::move(base_url)) {}
 
   // ── chat (non-streaming) ──────────────────────────────────────────────
-  [[nodiscard]] auto chat(const ChatRequest& req) const -> std::expected<ChatResponse, Error> {
+  //
+  // `opts` bounds the call and can abort it from another thread; a request
+  // aborted that way comes back ErrorKind::Cancelled, never a partial response.
+  // See venice/options.hpp.
+  [[nodiscard]] auto chat(const ChatRequest& req, const RequestOptions& opts = {}) const
+      -> std::expected<ChatResponse, Error> {
     if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
 
-    auto res = post_json("/chat/completions", req.to_json_body(/*stream=*/false));
+    auto res = post_json("/chat/completions", req.to_json_body(/*stream=*/false), opts);
     if (!res) return std::unexpected{std::move(res.error())};
 
     try {
@@ -146,22 +155,42 @@ class Client {
 
   // ── chat (streaming) ──────────────────────────────────────────────────
   // on_token is invoked with each content delta as it arrives. The full
-  // assembled reply is returned at the end. Cancellation: return false from
-  // on_token to abort the stream early (result is still returned with what
-  // accumulated).
+  // assembled reply is returned at the end.
+  //
+  // There are two ways to stop a stream and they mean different things:
+  //
+  //   * return false from on_token — a deliberate early stop. The caller has
+  //     what it wanted; the partial ChatResponse is returned as success. This
+  //     is the original Phase 0 behaviour and is unchanged.
+  //   * fire opts.cancel — the caller is abandoning the call. Returns
+  //     ErrorKind::Cancelled and no response, because a caller that has stopped
+  //     caring should not have to distinguish "the assembled text so far" from
+  //     "the answer".
+  //
+  // The second exists because the first cannot cover the cases that matter:
+  // on_token only runs when a *content* delta arrives, so a stop wanted before
+  // the first delta, during a gap between frames, or while the server stalls
+  // after headers is invisible to it and waits out the read timeout. That is
+  // the gap #7 was filed for.
   [[nodiscard]] auto chat_stream(
       const ChatRequest& req,
-      const std::function<bool(std::string_view /*delta*/)>& on_token) const
-      -> std::expected<ChatResponse, Error> {
+      const std::function<bool(std::string_view /*delta*/)>& on_token,
+      const RequestOptions& opts = {}) const -> std::expected<ChatResponse, Error> {
     if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
 
     const std::string payload = req.to_json_body(/*stream=*/true).dump();
 
     ChatResponse assembled;
     std::string leftover;  // partial SSE line buffer across chunks
-    bool cancelled = false;
+    bool early_stop = false;  // on_token said stop — NOT opts.cancel; see above
 
-    auto cli = make_transport();
+    auto cli = make_transport(opts);
+    // Declared after cli and never before: the guard's watcher thread holds a
+    // reference to it, and destruction runs in reverse, so this ordering is what
+    // guarantees the thread is joined while cli is still alive.
+    const detail::CancelGuard guard{opts.cancel, cli};
+    if (guard.cancelled()) return std::unexpected{cancel_error()};
+
     httplib::Headers headers = auth_headers();
     headers.emplace("Accept", "text/event-stream");
 
@@ -191,7 +220,7 @@ class Client {
                   !c0["delta"]["content"].is_null()) {
                 const std::string delta = c0["delta"]["content"].get<std::string>();
                 assembled.content += delta;
-                if (on_token && !on_token(delta)) cancelled = true;
+                if (on_token && !on_token(delta)) early_stop = true;
               }
               if (c0.contains("finish_reason") && !c0["finish_reason"].is_null())
                 assembled.finish_reason = c0["finish_reason"].get<std::string>();
@@ -205,16 +234,24 @@ class Client {
           }
         });
       }
-      return !cancelled;  // false stops the transfer
+      return !early_stop;  // false stops the transfer
     };
 
     httplib::Response hres;
     httplib::Error herr = httplib::Error::Success;
     const bool sent = cli.send(hreq, hres, herr);
 
-    if (!sent && !cancelled)
+    // The token is tested first, ahead of both the transport error and the
+    // early stop. It has to be: a cancel is delivered by shutting the socket
+    // down, so it *arrives* as a transport failure and would otherwise be
+    // reported as a dead network. Ahead of early_stop as well, because a cancel
+    // racing an on_token stop is a caller who has abandoned the call — reading
+    // that as "here is your partial answer" would hand back a response nobody
+    // is waiting for.
+    if (guard.cancelled()) return std::unexpected{cancel_error()};
+    if (!sent && !early_stop)
       return std::unexpected{transport_error(herr)};
-    if (cancelled) return assembled;  // deliberate early stop
+    if (early_stop) return assembled;  // deliberate early stop
     if (hres.status < 200 || hres.status >= 300)
       return std::unexpected{http_error(hres.status, hres.body)};
     if (!parse_err.empty() && assembled.content.empty())
@@ -250,9 +287,9 @@ class Client {
   // The typed surface stays the text shape (VC-03). A non-text entry parses
   // with most fields absent and keeps its type-specific keys in Model::raw;
   // test/04models/ pins that with a captured image entry.
-  [[nodiscard]] auto models(std::string_view type = {}) const
+  [[nodiscard]] auto models(std::string_view type = {}, const RequestOptions& opts = {}) const
       -> std::expected<std::vector<Model>, Error> {
-    auto res = get_json(detail::with_query("/models", {{"type", type}}));
+    auto res = get_json(detail::with_query("/models", {{"type", type}}), opts);
     if (!res) return std::unexpected{std::move(res.error())};
     try {
       return models_from_json_body(*res);
@@ -262,8 +299,9 @@ class Client {
   }
 
   // ── balance / rate limits ─────────────────────────────────────────────
-  [[nodiscard]] auto balance() const -> std::expected<nlohmann::json, Error> {
-    return get_json("/api_keys/rate_limits");
+  [[nodiscard]] auto balance(const RequestOptions& opts = {}) const
+      -> std::expected<nlohmann::json, Error> {
+    return get_json("/api_keys/rate_limits", opts);
   }
 
   [[nodiscard]] auto base_url() const noexcept -> const std::string& { return m_base_url; }
@@ -343,12 +381,22 @@ class Client {
     return prefix + std::string{endpoint};
   }
 
-  [[nodiscard]] auto make_transport() const -> httplib::Client {
+  // The three defaults are the Phase 0 values and stay the defaults: a chat
+  // completion can legitimately take minutes, so a short read timeout would be
+  // a worse bug than the one VC-06 fixes. What changed is that they are now a
+  // floor a caller can move, per call, rather than a property of the library.
+  //
+  // No write timeout default — httplib's own applies. A request body here is a
+  // JSON document measured in kilobytes; there has never been a case where the
+  // write is the thing that hangs, and inventing a number for it would be
+  // asserting knowledge we do not have.
+  [[nodiscard]] auto make_transport(const RequestOptions& opts) const -> httplib::Client {
     httplib::Client cli{host()};
     cli.set_bearer_token_auth(m_api_key);
     cli.set_follow_location(true);
-    cli.set_read_timeout(300, 0);
-    cli.set_connection_timeout(30, 0);
+    cli.set_read_timeout(opts.read_timeout.value_or(std::chrono::seconds{300}));
+    cli.set_connection_timeout(opts.connect_timeout.value_or(std::chrono::seconds{30}));
+    if (opts.write_timeout) cli.set_write_timeout(*opts.write_timeout);
     return cli;
   }
 
@@ -356,17 +404,39 @@ class Client {
     return {{"Authorization", "Bearer " + m_api_key}};
   }
 
-  [[nodiscard]] auto get_json(std::string_view endpoint) const -> std::expected<nlohmann::json, Error> {
-    auto cli = make_transport();
+  // Both buffered helpers keep using httplib's convenience Get/Post rather than
+  // the lower-level send(): cancellation works by shutting the socket down from
+  // another thread, which aborts whichever call is blocked on it. Routing these
+  // through a content_receiver — one option #7 floated — would buy nothing,
+  // because a receiver only runs when bytes arrive and the case worth
+  // cancelling is precisely the one where none do.
+  //
+  // Guard placement and ordering are identical to chat_stream's; see there. The
+  // post-call test comes before the `!res` test for the same reason it does
+  // over there, and also covers the case where the cancel lands after a
+  // perfectly good response: the caller stopped waiting, so they get Cancelled
+  // rather than an answer nobody is holding a thread for.
+  [[nodiscard]] auto get_json(std::string_view endpoint, const RequestOptions& opts) const
+      -> std::expected<nlohmann::json, Error> {
+    auto cli = make_transport(opts);
+    const detail::CancelGuard guard{opts.cancel, cli};
+    if (guard.cancelled()) return std::unexpected{cancel_error()};
+
     auto res = cli.Get(path(endpoint), auth_headers());
+    if (guard.cancelled()) return std::unexpected{cancel_error()};
     if (!res) return std::unexpected{transport_error(res.error())};
     return decode_json(res->status, res->body);
   }
 
-  [[nodiscard]] auto post_json(std::string_view endpoint, const nlohmann::json& body) const
+  [[nodiscard]] auto post_json(std::string_view endpoint, const nlohmann::json& body,
+                               const RequestOptions& opts) const
       -> std::expected<nlohmann::json, Error> {
-    auto cli = make_transport();
+    auto cli = make_transport(opts);
+    const detail::CancelGuard guard{opts.cancel, cli};
+    if (guard.cancelled()) return std::unexpected{cancel_error()};
+
     auto res = cli.Post(path(endpoint), auth_headers(), body.dump(), "application/json");
+    if (guard.cancelled()) return std::unexpected{cancel_error()};
     if (!res) return std::unexpected{transport_error(res.error())};
     return decode_json(res->status, res->body);
   }
@@ -388,6 +458,12 @@ class Client {
 
   [[nodiscard]] static auto transport_error(httplib::Error e) -> Error {
     return Error{ErrorKind::Network, 0, "transport: " + httplib::to_string(e), {}};
+  }
+
+  // No status and no body, and there never can be one: the socket was shut down
+  // under the request, so whatever the server was going to say did not arrive.
+  [[nodiscard]] static auto cancel_error() -> Error {
+    return Error{ErrorKind::Cancelled, 0, "cancelled by caller", {}};
   }
 
   // Invoke fn for each "data:" payload in an SSE event block.

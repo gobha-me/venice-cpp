@@ -9,5 +9,6 @@
 // `venice-cpp::lib` CMake target.
 
 #include "venice/error.hpp"
+#include "venice/options.hpp"
 #include "venice/types.hpp"
 #include "venice/client.hpp"
