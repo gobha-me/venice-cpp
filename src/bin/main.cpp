@@ -10,20 +10,37 @@
 
 namespace {
 
-// `--models`: the live check for Model's typed metadata. Prints the fields a
-// picker would actually branch on, so a field that parses in a fixture but not
-// on the wire shows up as a blank column rather than passing quietly.
-auto list_models(const venice::Client& client) -> int {
-  const auto res = client.models();
+// `--models [type]`: the live check for Model's typed metadata and, since
+// VC-13, for the type filter. Prints the fields a picker would actually branch
+// on, so a field that parses in a fixture but not on the wire shows up as a
+// blank column rather than passing quietly.
+//
+// `type` is passed through verbatim — text, image, video, tts, embedding,
+// inpaint, music, asr, upscale, all — and an empty one sends no filter, which
+// Venice answers with text models only. The three runs worth doing:
+//
+//   --models          -> 106   (the pre-VC-13 behaviour, unchanged)
+//   --models image    ->  35
+//   --models all      -> 287
+//
+// /models answers 200 for any bearer token, so VENICE_API_KEY=unused is enough.
+auto list_models(const venice::Client& client, std::string_view type) -> int {
+  const auto res = client.models(type);
   if (!res) {
     std::cerr << "models failed [" << venice::to_string(res.error().kind) << "] "
               << res.error().message << '\n';
     return EXIT_FAILURE;
   }
 
-  std::cout << res->size() << " models\n";
+  std::cout << res->size() << " models";
+  if (!type.empty()) std::cout << " (type=" << type << ')';
+  std::cout << '\n';
+
   for (const auto& m : *res) {
-    std::cout << m.id << "  ctx=";
+    // The type column earns its place once non-text models are listable: for
+    // those, every column after it is a `?`, and without it the output reads
+    // like a parse failure rather than a different model_spec shape.
+    std::cout << m.id << "  [" << m.type << "]  ctx=";
     if (m.context_length) std::cout << *m.context_length;
     else std::cout << '?';
 
@@ -53,7 +70,8 @@ auto main(int argc, char** argv) -> int {
   }
 
   const venice::Client client{key};
-  if (argc > 1 && std::string_view{argv[1]} == "--models") return list_models(client);
+  if (argc > 1 && std::string_view{argv[1]} == "--models")
+    return list_models(client, argc > 2 ? argv[2] : "");
 
   const std::string prompt = argc > 1 ? argv[1] : "Say hello in one short sentence.";
 

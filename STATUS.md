@@ -8,8 +8,8 @@ AGENTS.md (which holds standing conventions, not state).
 **Phase 0: DONE and verified against the live API.**
 - `chat()` non-streaming completion (verified: "venice-cpp works").
 - `chat_stream()` SSE streaming via callback, cancellable (verified live).
-- `models()` list with typed per-model metadata (106 text models fetched live),
-  `balance()` rate-limit endpoint.
+- `models()` list with typed per-model metadata, filterable by modality
+  (105 text / 299 all, fetched live), `balance()` rate-limit endpoint.
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   rate_limited/invalid_arg, each carrying status + raw body.
@@ -110,8 +110,47 @@ watching the intended case go red; the fourth break restored the old container
 handling and turned all three §0 cases red at once.
 
 Additive to `Model`, but `models()` changed behaviour on malformed input, hence
-the minor bump. `?type=` (only text models are reachable today — 106 of 287) is
-filed separately as VC-13.
+the minor bump. `?type=` was filed separately as VC-13 and is now done.
+
+**VC-13 (#19, models type filter) is done** — see v0.6.0. `models()` grew a
+defaulted `std::string_view type`, and with it the client's first query-string
+encoder: `venice::detail::percent_encode` and `venice::detail::with_query`, free
+functions at namespace scope in `client.hpp` for the reason VC-03 moved the
+model parse out of `Client` — a private helper is reachable only through a
+socket, and an encoder is a pure string transform. `test/05query/` is the unit.
+
+Three things are worth knowing:
+
+- **`with_query` skips any pair whose value is empty**, so a no-argument
+  `models()` still sends the bare `/models` rather than `/models?type=`. That
+  skip *is* the non-breaking guarantee and is asserted, not asserted-in-a-
+  comment — breaking it deliberately turned four cases red, including the one
+  that mirrors the pre-VC-13 call site.
+- **The type is a caller-supplied string, not an enum**, on the same reasoning
+  `response_format` is raw JSON. An unrecognised modality is the server's 400 to
+  give; a list hardcoded in the header would refuse a valid value the day Venice
+  adds one.
+- **The signedness bug in `percent_encode` was measured, and the sanitizers
+  disagree about it.** Dropping the `unsigned char` cast makes 0xFF encode as
+  `"% F"` and `"é"` as `"%s3%t9"` — a negative index into the hex table. The
+  default build is silent, **UBSan is also silent**, and **ASan does catch it**
+  ("global-buffer-overflow ... in percent_encode"). The first draft of that
+  comment claimed only an assertion could catch it; running all three is what
+  corrected it. Worth knowing which check fails here: the property-shaped case
+  (every high byte is three characters long) stays *green* through the bug,
+  because the length is right and only the bytes are wrong.
+
+Live, all nine modalities are now reachable: 105 text, 97 video, 37 image, 20
+inpaint, 14 music, 11 tts, 9 embedding, 5 asr, 1 upscale — 299 total against the
+105 the library could see before. (The July capture read 106/287; Venice's
+catalogue moves, so the fixtures in `test/04models/` are pinned and these counts
+are not.) Purely additive, hence the minor bump.
+
+The ticket's optional companion — typed image pricing (`generation`,
+`upscale.{2x,4x}`) and `model_spec.constraints` — was deliberately left out and
+noted on the image epic (#10) instead. `Pricing` is the text shape by VC-03's
+design; making it a per-modality union is a schema decision, and #10 needs the
+constraints anyway.
 
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.

@@ -23,7 +23,8 @@ right bridge.
 - **Models list** (`/models`) — typed metadata per model: context window,
   fourteen capability flags (function calling, vision, reasoning, web search,
   …), and a full rate card with cache buckets and extended-context tiers, plus
-  the verbatim entry as `raw`.
+  the verbatim entry as `raw`. Filterable by modality — `models("image")`,
+  `models("all")` — since the endpoint's own default is text-only.
 - **Balance / rate limits** (`/api_keys/rate_limits`).
 - **Error model** — `std::expected<T, venice::Error>`; network / HTTP / parse /
   auth / rate-limit / invalid-arg, each carrying status + raw body.
@@ -96,7 +97,6 @@ second round of JSON parsing:
 
 ```cpp
 for (const auto& m : *client.models()) {
-  if (m.type != "text") continue;
   if (!m.capabilities || m.capabilities->supports_function_calling != true) continue;
   if (!m.context_length || *m.context_length < 200000) continue;
 
@@ -109,6 +109,22 @@ for (const auto& m : *client.models()) {
 Every field but `id` and `type` is optional, and absent means *the response did
 not say* — not `false` and not zero. `m.capabilities->supports_vision != true`
 above is deliberate: an unset flag is not a "no".
+
+**The bare call lists text models only** — that is Venice's default for the
+endpoint, not a choice this client makes, and it is 105 of the 299 models the
+API actually serves. Pass a type to reach the rest:
+
+```cpp
+client.models();          // no query string — text, as before
+client.models("image");   // 37
+client.models("all");     // 299: text, video, image, inpaint, music, tts,
+                          //      embedding, asr, upscale
+```
+
+The type is a plain string, not an enum, for the same reason `response_format`
+is raw JSON: the value set is Venice's, and a list hardcoded in this header
+would start refusing valid values the day a modality is added. An unrecognised
+type comes back as the server's `ErrorKind::Http` 400.
 
 Some models reprice past a context threshold, so a cost estimate picks a tier:
 
@@ -136,7 +152,11 @@ m.raw["model_spec"]["constraints"];                      // per-model defaults
 
 `model_spec` is polymorphic by model type — image models carry generation
 pricing and no context window, tts carries a voice list — so the typed surface
-is the text shape and `raw` carries the rest. Malformed entries degrade rather
+is the text shape and `raw` carries the rest. That is worth knowing before
+listing a non-text type: those entries parse, and their `name`, `description`,
+`traits` and `offline` are typed like any other, but `context_length`,
+`capabilities` and `pricing->base` come back empty because the keys behind them
+are text-only. Their rates are in `raw`, as above. Malformed entries degrade rather
 than failing the listing: an entry with no usable `id` is skipped, a
 wrong-typed field reads as absent, and only a response that is not a list at
 all comes back as `ErrorKind::Parse`.
@@ -174,7 +194,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.5.0)
+  GIT_TAG        v0.6.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -272,6 +292,7 @@ and a dirty worktree sets `dirty`, both exposed in the generated
 ## Status
 
 Phase 0 verified against the live API: chat (non-streaming + streaming),
-models list (104 models), token usage. See `AGENTS.md` for contributor/agent
+models list (105 text models, 299 across all modalities), token usage — the
+counts move as Venice's catalogue does. See `AGENTS.md` for contributor/agent
 conventions and the testing philosophy (test how it fails, not just the happy
 path).
