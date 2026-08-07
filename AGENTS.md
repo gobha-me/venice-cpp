@@ -47,7 +47,32 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
 - **Errors:** `std::expected<T, venice::Error>` everywhere fallible. Never throw
   across the public API; a transport/parse/HTTP failure is a value the caller
   inspects. Error kinds: network / http / parse / auth / rate_limited /
-  invalid_arg, each carrying `status` + raw `body`.
+  invalid_arg / cancelled, each carrying `status` + raw `body`. `cancelled` is
+  deliberately not folded into `network` (VC-06): a dead network is a fault to
+  report or retry, a cancellation is the caller's own decision arriving back at
+  them, and collapsing the two leaves the difference reachable only by parsing
+  message text.
+- **Per-call concerns go in `RequestOptions`, not on the request.** Timeout
+  overrides and the cancel token are a property of *this call* — never
+  serialized, and applying identically to `models()` and `balance()`, which have
+  no request object at all. Same reasoning that keeps `stream` off
+  `ChatRequest`. Every member of `RequestOptions` carries an explicit default
+  initializer even where the type already default-constructs empty: without
+  them `-Wmissing-field-initializers` fires once per omitted member on the
+  designated-initializer spelling the type exists for, i.e. on every correct
+  caller.
+- **Cancellation is a watcher thread, and that is measured rather than
+  stylistic.** httplib's `ClientImpl::send_` holds `socket_mutex_` only around
+  setup and teardown, so `Client::stop()` from another thread interrupts a
+  stalled read — but `create_and_connect_socket` runs under that same mutex, so
+  firing `stop()` from `CancelToken::cancel()` would block the *cancelling*
+  thread for up to the connect timeout. `detail::CancelGuard` spawns a thread
+  only when a token is supplied, and is declared after the httplib client so
+  reverse destruction joins it while the client is still alive. It also blocks
+  SIGPIPE for the request: over TLS, shutting the socket down makes OpenSSL
+  write a close_notify to a peer that is gone, and the resulting EPIPE kills the
+  process at the default disposition. Thread-scoped via `pthread_sigmask`, never
+  process-wide `signal()` — the disposition belongs to the application.
 - **Request serialization:** only serialize set fields. Both `ChatRequest` and
   `VeniceParameters` carry an `extra` json passthrough so future Venice keys are
   reachable without editing the header; modeled fields always win over a
@@ -117,6 +142,24 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
 failure matrix first (bad input, boundaries, malformed JSON, error statuses);
 the happy-path check is last. Unit tests are **offline** — no API key or
 network. A live smoke check needs `$VENICE_API_KEY`.
+
+`test/06transport/` is the one test that binds a socket, and the rule above is
+what constrains how: no API key and no *internet*, but a timeout has no offline
+form — it is by definition a property of a peer that does not answer — so it
+brings its own peer, an in-process `httplib::Server` on 127.0.0.1 at an
+ephemeral port. Two things about that fixture are worth knowing before trusting
+a green run:
+
+- **it speaks plain HTTP**, so nothing in it exercises the TLS teardown path,
+  which is where VC-06's SIGPIPE bug lived;
+- **constructing an `httplib::Server` calls `signal(SIGPIPE, SIG_IGN)`
+  process-wide** (httplib.h:6087), so merely having the fixture defuses that
+  signal for the whole binary.
+
+Both together mean the suite was green on either side of a bug that killed any
+real HTTPS caller. Anything touching socket teardown needs a live check against
+api.venice.ai as well — `/models` answers for any bearer token, so that costs
+nothing and needs no key.
 
 `test/30sanitizer-smoke/` is not a unit test — it deliberately trips the active
 sanitizer to prove the toolchain is engaged rather than a silent no-op, which is

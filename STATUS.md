@@ -8,6 +8,7 @@ AGENTS.md (which holds standing conventions, not state).
 **Phase 0: DONE and verified against the live API.**
 - `chat()` non-streaming completion (verified: "venice-cpp works").
 - `chat_stream()` SSE streaming via callback, cancellable (verified live).
+- Per-request timeouts and a `CancelToken` on every entry point (VC-06).
 - `models()` list with typed per-model metadata, filterable by modality
   (105 text / 299 all, fetched live), `balance()` rate-limit endpoint.
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
@@ -34,10 +35,15 @@ have since landed there as CT-14.
 ## Next up
 1. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
    This is the agreed next move; both foundations are proven.
-2. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
+2. **VC-05 (#6), the structured stream-delta design**, is now unblocked — it had
+   to state its cancellation semantics and could not until VC-06 existed. The
+   answer it inherits: `on_token` false stays a partial-success early stop,
+   token cancel is `ErrorKind::Cancelled`, and a delta callback should not try
+   to carry either.
+3. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
    embeddings, characters, retries/backoff, async). Driven by real use, not
    speculatively.
-3. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
+4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
 
 **VC-07 (#8, install/export) is done** — see v0.2.0. Upstream CT-04 landed the
@@ -151,6 +157,74 @@ The ticket's optional companion — typed image pricing (`generation`,
 noted on the image epic (#10) instead. `Pricing` is the text shape by VC-03's
 design; making it a per-modality union is a schema decision, and #10 needs the
 constraints anyway.
+
+**VC-06 (#7, transport timeouts + cancellation) is done** — see v0.7.0. Every
+entry point grew a trailing defaulted `venice::RequestOptions`: connect / read /
+write timeout overrides, and a borrowed `CancelToken*` that aborts a request in
+flight. New `ErrorKind::Cancelled`. The 300s read / 30s connect defaults are
+unchanged — a chat completion can legitimately take minutes — but they are a
+floor a caller can move rather than a property of the library.
+
+Four things are worth knowing, three of them measured rather than reasoned:
+
+- **Cancellation is a watcher thread, not a callback, and httplib's source is
+  why.** `ClientImpl::send_` holds `socket_mutex_` only around setup and the
+  scope_exit teardown, so `Client::stop()` from another thread does interrupt a
+  stalled read. But `create_and_connect_socket` runs under that same mutex — so
+  firing `stop()` directly from `CancelToken::cancel()` would block the
+  *cancelling* thread for up to the connect timeout, which is exactly the thread
+  (a UI's) that must not block. `detail::CancelGuard` spawns a thread only when
+  a token is supplied and joins in its destructor.
+
+- **The retry loop and the pre-send check are not redundant, and neither
+  subsumes the other.** No test covers the retry loop directly — §0's pre-send
+  check short-circuits the only case that reaches it, so reducing the loop to a
+  single `stop()` leaves the whole suite green. Removing *both* is what exposes
+  it. §0 run repeatedly against a server whose stall handler gives up after ten
+  seconds:
+
+      single stop(), no pre-send check — 6 of 10 runs took 10018ms and failed;
+        the cancel was simply lost and the call waited the server out
+      retry loop, no pre-send check    — 0 of 10 hung, all finished in 10-17ms,
+        but 2 of 10 still failed on "no request was sent"
+
+  The loop is what makes a cancel that beats the socket into existence
+  *effective*; the pre-send check is what makes a pre-cancelled token send
+  nothing at all.
+
+- **Cancelling a TLS request killed the process, and the test suite could not
+  have caught it.** Shutting a socket down under a live request makes OpenSSL's
+  teardown write a close_notify to a peer that is gone; EPIPE on a socket raises
+  SIGPIPE, which terminates by default. Live against api.venice.ai the cancel
+  case exited 141 (128+SIGPIPE) where the control and read-timeout cases
+  returned normally; with SIGPIPE ignored the same binary reported
+  `cancel over TLS: 52ms cancelled`. `test/06transport/` is structurally blind
+  to this twice over — its peer speaks plain HTTP, which has no close_notify to
+  write, and constructing an `httplib::Server` at all runs
+  `signal(SIGPIPE, SIG_IGN)` process-wide (httplib.h:6087), defusing the signal
+  for the whole binary. The fix is `detail::SigPipeBlock`: `pthread_sigmask` for
+  the request's duration plus a drain of anything left pending, thread-scoped
+  because the disposition belongs to the application. §7 pins the half that *is*
+  checkable on loopback — the mask and disposition come back as found — and its
+  first spelling was itself wrong, comparing before against after and staying
+  green with the restore deleted, because an earlier case had already leaked the
+  block. It asserts the mask is clean at both ends now.
+
+- **`test/06transport/` is the first test in the repo to bind a socket.** The
+  offline rule stands — no key, no internet — but a timeout has no offline form,
+  so the test brings its own peer. Nine cases, failure matrix first. The whole
+  file runs in 0.79s against a 300s default, which is itself the evidence that
+  cancellation is prompt.
+
+Streaming keeps both stop mechanisms, deliberately distinct: `on_token`
+returning false is still a partial-success early stop, `token.cancel()` is
+`Cancelled` with no response. §5 pins them apart. Additive to every signature,
+but a new `ErrorKind` enumerator is visible to an exhaustive switch, hence the
+minor bump. Threads is now a public CMake requirement.
+
+Validated on gcc + clang × {default, asan, tsan, ubsan}, 11/11 each; 20
+consecutive transport runs clean under TSan and under ASan; consumer harness
+3/3 on both compilers.
 
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.
