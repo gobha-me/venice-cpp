@@ -22,6 +22,12 @@
 #include <optional>
 #include <thread>
 
+#ifndef _WIN32
+#include <csignal>  // sigset_t, sigtimedwait — see detail::SigPipeBlock
+#include <ctime>    // timespec
+#include <pthread.h>
+#endif
+
 #include <httplib.h>
 
 namespace venice {
@@ -116,6 +122,87 @@ struct RequestOptions {
 
 namespace detail {
 
+// Blocks SIGPIPE on the calling thread for a scope, then drains any that became
+// pending and restores the previous mask.
+//
+// This is not defensive programming; without it the feature this header exists
+// for kills the caller's process. Cancelling works by shutting a socket down
+// under a live request, and over TLS the teardown that follows makes OpenSSL
+// write a close_notify to a peer that is gone. That write gets EPIPE, and EPIPE
+// on a socket raises SIGPIPE, whose default disposition terminates the process.
+// Reproduced against api.venice.ai before this class existed:
+//
+//   control (defaults)   : 301ms  ok  n=299
+//   read_timeout=1ms     : 156ms  network
+//   cancel over TLS      : <process died, exit 141 = 128+SIGPIPE>
+//
+// and with SIGPIPE ignored, the same binary:
+//
+//   cancel over TLS      : 52ms  cancelled
+//
+// ⚠ test/06transport/ cannot catch this, and it is worth knowing exactly why
+// before trusting a green suite here. That test needs a peer, so it constructs
+// an httplib::Server — and httplib::Server's *constructor* does
+// signal(SIGPIPE, SIG_IGN) process-wide (httplib.h:6087). Instantiating the
+// fixture disables the very signal the bug depends on. The loopback peer also
+// speaks plain HTTP, which has no close_notify to write in the first place. So
+// the suite is green either way and the only real evidence is the live TLS run
+// above. httplib's own comment at ssl_delete concedes the point: avoiding
+// SIGPIPE there is "merely a best-efforts".
+//
+// Thread-scoped via pthread_sigmask rather than process-wide signal(): a
+// library has no business changing a signal disposition the application owns,
+// and an application that deliberately handles SIGPIPE must keep seeing its own
+// pipes break. The drain is what makes the scoping honest — a blocked signal
+// stays *pending* rather than vanishing, so leaving without consuming it would
+// merely defer our SIGPIPE to whenever the caller next unblocks.
+//
+// The drain is skipped when SIGPIPE was already blocked on entry, because then
+// a pending one may predate us and belong to the caller.
+class SigPipeBlock {
+ public:
+  explicit SigPipeBlock(bool active) {
+#ifndef _WIN32
+    if (!active) return;
+    sigset_t block;
+    sigemptyset(&block);
+    sigaddset(&block, SIGPIPE);
+    if (pthread_sigmask(SIG_BLOCK, &block, &m_saved) != 0) return;
+    m_engaged = true;
+    m_was_blocked = sigismember(&m_saved, SIGPIPE) == 1;
+#else
+    (void)active;
+#endif
+  }
+
+  ~SigPipeBlock() {
+#ifndef _WIN32
+    if (!m_engaged) return;
+    if (!m_was_blocked) {
+      sigset_t only;
+      sigemptyset(&only);
+      sigaddset(&only, SIGPIPE);
+      const timespec zero{0, 0};
+      while (sigtimedwait(&only, nullptr, &zero) >= 0) {
+      }
+    }
+    pthread_sigmask(SIG_SETMASK, &m_saved, nullptr);
+#endif
+  }
+
+  SigPipeBlock(const SigPipeBlock&) = delete;
+  auto operator=(const SigPipeBlock&) -> SigPipeBlock& = delete;
+  SigPipeBlock(SigPipeBlock&&) = delete;
+  auto operator=(SigPipeBlock&&) -> SigPipeBlock& = delete;
+
+ private:
+#ifndef _WIN32
+  sigset_t m_saved{};
+  bool m_engaged = false;
+  bool m_was_blocked = false;
+#endif
+};
+
 // RAII: watches a CancelToken for the lifetime of one request and shuts the
 // transport's socket down if it fires. Constructing one with a null token costs
 // nothing and spawns no thread, which is why every entry point can install one
@@ -146,13 +233,35 @@ namespace detail {
 // instant setup releases it, i.e. immediately after the in-flight counter goes
 // up — so it lands exactly where it needs to.
 //
+// That paragraph was measured, and the measurement is the reason it is not two
+// paragraphs shorter. No test in test/06transport/ covers the loop directly:
+// §0's pre-send check in Client::get_json short-circuits the only case that
+// reaches it, so reducing this loop to a single stop() leaves the whole suite
+// green. Removing *both* is what exposes it — §0 run forty times, against a
+// server whose stall handler gives up after ten seconds:
+//
+//   single stop(), no pre-send check — 6 of 10 runs took 10018ms and failed.
+//     The cancel was simply lost and the call waited the server out.
+//   retry loop, no pre-send check    — 0 of 10 hung; every run finished in
+//     10-17ms. 2 of 10 still failed, on "no request was sent".
+//
+// So the two mechanisms are not redundant and neither subsumes the other. The
+// loop is what makes a cancel that beats the socket into existence *effective*;
+// the pre-send check is what makes a pre-cancelled token send nothing at all,
+// which the loop cannot provide because by then the request is already out.
+//
 // The guard's own "released" flag lives under the *token's* mutex rather than
 // getting a second mutex and condvar. One wait point, one notify, and a
 // destructor that cannot miss a wakeup. It does mean several guards can share
 // one token: notify_all wakes them all and each re-tests its own flag.
 class CancelGuard {
  public:
-  CancelGuard(CancelToken* token, httplib::Client& cli) : m_token(token) {
+  // The SIGPIPE block is established before the watcher is spawned, and that
+  // ordering is required rather than tidy: a new thread inherits the signal mask
+  // of the thread that created it, and the watcher is the one calling stop() —
+  // so it needs the block too. Spawn first and it inherits the unblocked mask.
+  CancelGuard(CancelToken* token, httplib::Client& cli)
+      : m_token(token), m_sigpipe(token != nullptr) {
     if (m_token == nullptr) return;
     m_thread = std::thread{[this, &cli] { watch(cli); }};
   }
@@ -202,7 +311,12 @@ class CancelGuard {
     m_thread.join();
   }
 
+  // Declaration order is the construction order above and the reverse of the
+  // teardown: the thread is joined before the mask is drained and restored, so
+  // a SIGPIPE raised by the watcher's last stop() is still blocked when it
+  // happens.
   CancelToken* m_token;
+  SigPipeBlock m_sigpipe;
   std::thread m_thread;
   bool m_released = false;  // guarded by m_token->m_mu
 };

@@ -37,6 +37,11 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#ifndef _WIN32
+#include <csignal>
+#include <pthread.h>
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -372,7 +377,78 @@ TEST_CASE("a live but unfired token leaves a normal call alone", "[transport][ca
   REQUIRE(server.models_hits() == 2);
 }
 
-// ── §7 happy path: defaults still work ────────────────────────────────────
+// ── §7 the caller's signal state survives a cancellation ──────────────────
+//
+// Cancelling shuts a socket down under a live request, and over TLS the
+// teardown that follows makes OpenSSL write a close_notify to a peer that is
+// gone — EPIPE, therefore SIGPIPE, therefore a dead process at the default
+// disposition. detail::SigPipeBlock blocks it for the request and drains it
+// afterwards.
+//
+// ⚠ This case does NOT prove the fix, and pretending otherwise would be worse
+// than not having it. Two reasons it cannot: the loopback peer speaks plain
+// HTTP, which has no close_notify to write, and constructing TestServer at all
+// runs httplib::Server's constructor, which does signal(SIGPIPE, SIG_IGN)
+// process-wide. Every test in this file therefore runs with the signal already
+// defused. The fix is evidenced by a live TLS run recorded in
+// venice/options.hpp — 43ms and Cancelled where the same binary previously
+// exited 141.
+//
+// What *is* checkable here is the other half of the contract, and it is a real
+// invariant: whatever we do to the mask, we undo. A leaked block would silently
+// swallow the application's own SIGPIPE from then on, and a skipped drain would
+// hand them ours the moment they next unblocked. Neither is hypothetical —
+// both are what the naive spelling of this class does.
+
+#ifndef _WIN32
+TEST_CASE("a cancelled call leaves the signal mask and disposition as it found them",
+          "[transport][cancel]") {
+  const TestServer server;
+  const Client client{"not-a-real-key", server.base_url()};
+
+  // Absolute, not relative to the state on entry. The first spelling of this
+  // case compared the mask before against the mask after and stayed green with
+  // the restore deliberately deleted: Catch2 had already run a cancelling case
+  // ahead of it, that case leaked the block, and "before" was therefore just as
+  // wrong as "after". Asserting the mask is *clean* at both ends is what makes
+  // the case independent of test order — and turns a leak anywhere in this file
+  // red here.
+  sigset_t mask_before{};
+  pthread_sigmask(SIG_BLOCK, nullptr, &mask_before);
+  REQUIRE(sigismember(&mask_before, SIGPIPE) == 0);
+
+  struct sigaction action_before {};
+  sigaction(SIGPIPE, nullptr, &action_before);
+
+  venice::CancelToken token;
+  std::thread canceller{[&] {
+    std::this_thread::sleep_for(50ms);
+    token.cancel();
+  }};
+  const auto res = client.balance({.cancel = &token});
+  canceller.join();
+
+  REQUIRE_FALSE(res.has_value());
+  REQUIRE(res.error().kind == ErrorKind::Cancelled);
+
+  sigset_t mask_after{};
+  pthread_sigmask(SIG_BLOCK, nullptr, &mask_after);
+  REQUIRE(sigismember(&mask_after, SIGPIPE) == 0);
+
+  // Nothing left pending for the caller to collect later.
+  sigset_t pending{};
+  sigpending(&pending);
+  REQUIRE(sigismember(&pending, SIGPIPE) == 0);
+
+  // And the disposition itself is untouched — a library changing that behind
+  // the application's back is the fix we deliberately did not take.
+  struct sigaction action_after {};
+  sigaction(SIGPIPE, nullptr, &action_after);
+  REQUIRE(action_after.sa_handler == action_before.sa_handler);
+}
+#endif
+
+// ── §8 happy path: defaults still work ────────────────────────────────────
 //
 // RequestOptions is defaulted on every entry point, so the pre-VC-06 call
 // spelling has to keep compiling and keep behaving. This case is as much a
