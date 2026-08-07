@@ -17,11 +17,16 @@ namespace {
 //
 // `type` is passed through verbatim — text, image, video, tts, embedding,
 // inpaint, music, asr, upscale, all — and an empty one sends no filter, which
-// Venice answers with text models only. The three runs worth doing:
+// Venice answers with text models only. The runs worth doing:
 //
-//   --models          -> 106   (the pre-VC-13 behaviour, unchanged)
-//   --models image    ->  35
-//   --models all      -> 287
+//   --models          the pre-VC-13 behaviour, and it must still equal
+//   --models text     this one exactly
+//   --models all      every modality; roughly three times the bare count
+//
+// Deliberately no expected numbers here: Venice's catalogue moved by twelve
+// models in the ten days between VC-03 and VC-13, so a count written into a
+// comment is wrong within the month. The bare-equals-text relation is the part
+// that holds.
 //
 // /models answers 200 for any bearer token, so VENICE_API_KEY=unused is enough.
 auto list_models(const venice::Client& client, std::string_view type) -> int {

@@ -232,10 +232,14 @@ class Client {
   //
   // `type` filters by modality (VC-13, #19). Empty — the default — sends no
   // query string at all, which is what every release before this one did and
-  // what Venice reads as type=text: 106 of the 287 models it actually serves.
-  // The other 181 (image, video, tts, embedding, inpaint, music, asr, upscale)
-  // could not be listed through this library at all until this parameter
-  // existed. "all" returns every one of them.
+  // what Venice reads as type=text: roughly a third of the models it serves.
+  // The rest (image, video, tts, embedding, inpaint, music, asr, upscale) could
+  // not be listed through this library at all until this parameter existed.
+  // "all" returns every one of them.
+  //
+  // No exact counts here on purpose — the catalogue moved by a dozen models in
+  // the ten days between VC-03 and VC-13, so a number in a comment is wrong
+  // within the month. STATUS.md carries a dated snapshot instead.
   //
   // A caller-supplied string rather than an enum, on the same reasoning that
   // made response_format raw json: the value set belongs to Venice, and a list
