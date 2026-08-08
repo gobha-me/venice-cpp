@@ -6,11 +6,17 @@
 // Errors:   std::expected<T, venice::Error>; the client never throws across
 //           its public API.
 //
-// Phase 0 surface (the ~20% everything else builds on):
-//   * chat(req)                -> expected<ChatResponse>   (non-streaming)
-//   * chat_stream(req, on_token) -> expected<ChatResponse> (SSE via callback)
-//   * models()                 -> expected<vector<Model>>
-//   * balance()                -> expected<json>           (rate-limit/balance)
+// Surface:
+//   * chat(req)                     -> expected<ChatResponse>   (non-streaming)
+//   * chat_stream(req, on_token)    -> expected<ChatResponse>   (content text)
+//   * chat_stream(req, acc[, on_delta])                         (structured)
+//   * models()                      -> expected<vector<Model>>
+//   * balance()                     -> expected<json>           (rate-limit/balance)
+//
+// A ChatResponse carries the whole assistant turn as a Message, so a reply can
+// be appended to the next request's messages and nothing is lost — thinking and
+// tool calls included (VC-05/VC-14). The streaming forms assemble into the same
+// Message; see venice/stream.hpp.
 //
 // Every one of them takes a trailing venice::RequestOptions (defaulted) for
 // per-call timeouts and cancellation — see venice/options.hpp (VC-06).
@@ -34,6 +40,7 @@
 
 #include "venice/error.hpp"
 #include "venice/options.hpp"
+#include "venice/stream.hpp"
 #include "venice/types.hpp"
 
 namespace venice {
@@ -176,13 +183,48 @@ class Client {
       const ChatRequest& req,
       const std::function<bool(std::string_view /*delta*/)>& on_token,
       const RequestOptions& opts = {}) const -> std::expected<ChatResponse, Error> {
+    // A thin adapter over the accumulator overload, and byte-identical in
+    // behaviour: on_token fires exactly when a chunk carried a `content` key
+    // that was a string — which is why StreamDelta::content is an optional
+    // rather than a plain view. An empty-string content delta still calls back,
+    // as it always did.
+    StreamAccumulator acc{/*keep_chunks=*/false};
+    return chat_stream(req, acc, [&](const StreamDelta& d) {
+      if (!d.content) return true;
+      return on_token ? on_token(*d.content) : true;
+    }, opts);
+  }
+
+  // ── chat (streaming, structured) ──────────────────────────────────────
+  //
+  // The rich form. `acc` is the caller's storage and is the reason there is no
+  // callback-only overload of this shape: a cancelled stream returns
+  // ErrorKind::Cancelled and no response — VC-06 settled that and it is right —
+  // but the accumulator is the caller's own object, so cancelling no longer
+  // destroys what arrived. The return value says "you abandoned this"; `acc`
+  // still holds every token, every thought, and every chunk.
+  //
+  // It also removes an ambiguity rather than adding one. A bare
+  // `bool(const StreamDelta&)` overload beside the string_view one makes
+  // `chat_stream(req, [](auto d){…})` and `chat_stream(req, nullptr, opts)` hard
+  // errors — a source break for code that compiles today. With the accumulator
+  // in position 2, every arity resolves.
+  //
+  // `acc` is reset only after validate() passes, so a rejected request does not
+  // wipe data the caller already had.
+  [[nodiscard]] auto chat_stream(const ChatRequest& req, StreamAccumulator& acc,
+                                 const std::function<bool(const StreamDelta&)>& on_delta,
+                                 const RequestOptions& opts = {}) const
+      -> std::expected<ChatResponse, Error> {
     if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    acc.reset();
 
     const std::string payload = req.to_json_body(/*stream=*/true).dump();
 
-    ChatResponse assembled;
-    std::string leftover;  // partial SSE line buffer across chunks
-    bool early_stop = false;  // on_token said stop — NOT opts.cancel; see above
+    bool early_stop = false;  // on_delta said stop — NOT opts.cancel; see above
+    std::string parse_err;
+    detail::SseFramer framer;
+    std::vector<ToolCall> frags;  // backing store for the span in each delta
 
     auto cli = make_transport(opts);
     // Declared after cli and never before: the guard's watcher thread holds a
@@ -201,39 +243,26 @@ class Client {
     hreq.body = payload;
     hreq.set_header("Content-Type", "application/json");
 
-    std::string parse_err;
+    // One SSE payload -> one delta -> the accumulator, then the observer.
+    // Ingest happens before the callback on purpose: a callback that stops the
+    // stream must not cost the caller the frame that made it decide to.
+    const auto on_payload = [&](std::string_view line) {
+      if (early_stop) return;  // stop at the frame, not at the end of the chunk
+      if (line == "[DONE]") return;
+      try {
+        const auto j = nlohmann::json::parse(line);
+        frags.clear();
+        const auto d = delta_from_chunk(j, frags);
+        acc.note_envelope(j);
+        acc.ingest(d);
+        if (on_delta && !on_delta(d)) early_stop = true;
+      } catch (const std::exception& e) {
+        if (parse_err.empty()) parse_err = e.what();
+      }
+    };
 
     hreq.content_receiver = [&](const char* data, size_t len, size_t /*off*/, uint64_t /*total*/) {
-      leftover.append(data, len);
-      // Process complete SSE lines ("data: ...\n\n").
-      size_t pos;
-      while ((pos = leftover.find("\n\n")) != std::string::npos) {
-        std::string event = leftover.substr(0, pos);
-        leftover.erase(0, pos + 2);
-        for_each_data_line(event, [&](std::string_view line) {
-          if (line == "[DONE]") return;
-          try {
-            const auto j = nlohmann::json::parse(line);
-            if (j.contains("choices") && !j["choices"].empty()) {
-              const auto& c0 = j["choices"][0];
-              if (c0.contains("delta") && c0["delta"].contains("content") &&
-                  !c0["delta"]["content"].is_null()) {
-                const std::string delta = c0["delta"]["content"].get<std::string>();
-                assembled.content += delta;
-                if (on_token && !on_token(delta)) early_stop = true;
-              }
-              if (c0.contains("finish_reason") && !c0["finish_reason"].is_null())
-                assembled.finish_reason = c0["finish_reason"].get<std::string>();
-            }
-            if (j.contains("model")) assembled.model = j["model"].get<std::string>();
-            if (j.contains("id")) assembled.id = j["id"].get<std::string>();
-            if (j.contains("usage") && !j["usage"].is_null())
-              assembled.usage = j["usage"].get<Usage>();
-          } catch (const std::exception& e) {
-            if (parse_err.empty()) parse_err = e.what();
-          }
-        });
-      }
+      framer.feed(std::string_view{data, len}, on_payload);
       return !early_stop;  // false stops the transfer
     };
 
@@ -241,22 +270,39 @@ class Client {
     httplib::Error herr = httplib::Error::Success;
     const bool sent = cli.send(hreq, hres, herr);
 
+    // Flush the tail. A final event not terminated by a blank line used to be
+    // dropped on the floor here, and it is frequently the usage frame — so the
+    // loss was a billing bug. Not flushed after an early stop or a cancel:
+    // both mean nobody wants more frames.
+    if (sent && !early_stop && !guard.cancelled()) framer.finish(on_payload);
+
     // The token is tested first, ahead of both the transport error and the
     // early stop. It has to be: a cancel is delivered by shutting the socket
     // down, so it *arrives* as a transport failure and would otherwise be
     // reported as a dead network. Ahead of early_stop as well, because a cancel
-    // racing an on_token stop is a caller who has abandoned the call — reading
+    // racing an on_delta stop is a caller who has abandoned the call — reading
     // that as "here is your partial answer" would hand back a response nobody
-    // is waiting for.
+    // is waiting for. What `acc` holds is unaffected either way, which is the
+    // whole point of it belonging to the caller.
     if (guard.cancelled()) return std::unexpected{cancel_error()};
     if (!sent && !early_stop)
       return std::unexpected{transport_error(herr)};
-    if (early_stop) return assembled;  // deliberate early stop
+    if (early_stop) return acc.response();  // deliberate early stop
     if (hres.status < 200 || hres.status >= 300)
       return std::unexpected{http_error(hres.status, hres.body)};
-    if (!parse_err.empty() && assembled.content.empty())
+    // "nothing arrived at all", not "no content arrived". The old test was
+    // assembled.content.empty(), which reported ErrorKind::Parse on a
+    // reasoning-only stream that had in fact been received perfectly.
+    if (!parse_err.empty() && acc.empty())
       return std::unexpected{Error{ErrorKind::Parse, hres.status, "stream parse: " + parse_err, {}}};
-    return assembled;
+    return acc.response();
+  }
+
+  // Accumulate with no observer, for a caller that only wants the storage.
+  [[nodiscard]] auto chat_stream(const ChatRequest& req, StreamAccumulator& acc,
+                                 const RequestOptions& opts = {}) const
+      -> std::expected<ChatResponse, Error> {
+    return chat_stream(req, acc, std::function<bool(const StreamDelta&)>{}, opts);
   }
 
   // ── models ────────────────────────────────────────────────────────────
@@ -466,23 +512,11 @@ class Client {
     return Error{ErrorKind::Cancelled, 0, "cancelled by caller", {}};
   }
 
-  // Invoke fn for each "data:" payload in an SSE event block.
-  static void for_each_data_line(const std::string& event, const std::function<void(std::string_view)>& fn) {
-    size_t start = 0;
-    while (start < event.size()) {
-      const auto nl = event.find('\n', start);
-      const std::string_view line = nl == std::string::npos
-                                        ? std::string_view{event}.substr(start)
-                                        : std::string_view{event}.substr(start, nl - start);
-      if (line.starts_with("data:")) {
-        auto payload = line.substr(5);
-        if (!payload.empty() && payload.front() == ' ') payload.remove_prefix(1);
-        fn(payload);
-      }
-      if (nl == std::string::npos) break;
-      start = nl + 1;
-    }
-  }
+  // SSE framing used to live here as a private static plus a "\n\n" loop inside
+  // the content_receiver, which is why #6's own acceptance criteria — partial
+  // frames across chunk boundaries, [DONE] — were unreachable without a socket.
+  // It is venice::detail::SseFramer in stream.hpp now, and three defects it was
+  // hiding are fixed there.
 };
 
 }  // namespace venice

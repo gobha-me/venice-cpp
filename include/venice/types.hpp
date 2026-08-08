@@ -8,14 +8,20 @@
 
 #include <array>
 #include <cstdint>
+#include <expected>
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+// ToolCall::parsed_arguments hands a malformed-arguments failure back rather
+// than throwing. error.hpp includes nothing from here, so this is one-way.
+#include "venice/error.hpp"
 
 namespace venice {
 
@@ -145,23 +151,243 @@ namespace detail {
 
 }  // namespace detail
 
-// ── messages ──────────────────────────────────────────────────────────────
+// ── tool calls ────────────────────────────────────────────────────────────
+//
+// The assistant's request to call a function. Modeled on the response side
+// (VC-05); the request-side `tools` array that offers functions in the first
+// place is VC-08 (#9). The split is not arbitrary — the streaming accumulator
+// cannot be specified without the merge rule, the merge rule cannot be specified
+// without this shape, so deferring it would mean redesigning the delta model
+// later. `tools` has no such coupling and defers for free.
+//
+// `arguments` is a verbatim JSON *string*, never a parsed object, and that is
+// load bearing twice over. Streamed, it arrives in fragments that are not valid
+// JSON individually (`{"loc` then `ation":"SF"}`), so there is nothing to parse
+// until the stream ends. And a model can emit malformed arguments — that is a
+// fact about the reply the caller must be able to see and handle, not a parse
+// error that costs them the rest of the turn. Same reasoning that keeps
+// `response_format` raw json. `parsed_arguments()` is the opt-in.
+struct ToolCall {
+  std::string id{};
+  std::string type{};   // "function"
+  std::string name{};   // function.name
+  std::string arguments{};
+  // Present on streaming fragments, absent on a non-streamed reply. It is the
+  // *join key* while accumulating, not an array position — see stream.hpp.
+  std::optional<int> index{};
+  nlohmann::json raw{};  // verbatim; never serialized (see Message::raw)
 
+  // The one place `arguments` is interpreted, and it hands the failure back
+  // rather than throwing: a model emitting bad JSON is a normal outcome.
+  [[nodiscard]] auto parsed_arguments() const -> std::expected<nlohmann::json, Error> {
+    try {
+      return nlohmann::json::parse(arguments);
+    } catch (const std::exception& e) {
+      return std::unexpected{
+          Error{ErrorKind::Parse, 0, std::string{"tool call arguments: "} + e.what(), arguments}};
+    }
+  }
+
+  friend void to_json(nlohmann::json& j, const ToolCall& t) {
+    j = nlohmann::json::object();
+    j["id"] = t.id;
+    j["type"] = t.type.empty() ? "function" : t.type;
+    auto fn = nlohmann::json::object();
+    fn["name"] = t.name;
+    fn["arguments"] = t.arguments;
+    j["function"] = std::move(fn);
+    // `index` is deliberately NOT emitted. It is a streaming-transport artifact
+    // — the position this fragment merges into — and replaying it on a request
+    // would assert an ordering the caller never chose.
+  }
+
+  // Total: never throws. A fragment carries `function.arguments` alone; a reply
+  // carries no `index`; a gateway may send `"name": ""` on a continuation.
+  friend void from_json(const nlohmann::json& j, ToolCall& t) {
+    if (!j.is_object()) return;
+    t.raw = j;
+    if (const auto* s = detail::opt_string_at(j, "id")) t.id = *s;
+    if (const auto* s = detail::opt_string_at(j, "type")) t.type = *s;
+    t.index = detail::opt_int(j, "index");
+    if (const auto* fn = detail::opt_object(j, "function")) {
+      if (const auto* s = detail::opt_string_at(*fn, "name")) t.name = *s;
+      if (const auto* s = detail::opt_string_at(*fn, "arguments")) t.arguments = *s;
+    }
+  }
+};
+
+// ── messages ──────────────────────────────────────────────────────────────
+//
+// A message is the only struct in this header that legitimately travels *both*
+// directions: it is what the caller sends and what the assistant replies with,
+// and the whole point of VC-05 is that a reply can become the next turn's
+// request without losing anything. That bidirectionality is why it carries two
+// escape hatches where every other type has one, and why they keep the names
+// AGENTS.md already assigned to those contracts:
+//
+//   raw   — response-side. The verbatim server object, a superset of the modeled
+//           fields. Written only by from_json. NEVER serialized.
+//   extra — request-side. Additive seed for to_json; modeled fields win.
+//
+// It is tempting to collapse these into one `raw` that also seeds to_json, so a
+// parsed reply round-trips losslessly for free. That design is wrong, and it
+// fails silently:
+//
+//     auto m = *res->message;   // assistant turn, a long answer
+//     m.content.reset();        // redact it before storing history
+//     // -> content disengaged, falls through to raw, the whole answer is resent
+//
+// Same shape, worse consequence for tool calls: execute call_a, append the
+// role:"tool" result, clear tool_calls so it is not re-issued — and the merge
+// replays it, which is a 400 for an unanswered tool_call or an infinite agent
+// loop. A rule that honours `m.content = "edited"` but ignores
+// `m.content.reset()` is more dangerous than one that honours neither, because
+// it fails precisely when the caller was being careful, and trimming history is
+// the most common thing an agent loop does. Measured, not reasoned: a probe
+// against both rules on the same redacted turn emitted the full answer under
+// seed-from-raw and `{"role":"assistant"}` under the rule below.
+//
+// It would also drag back the regression VC-11 removed. `j["messages"] =
+// messages` would then deep-copy every message's full verbatim server body on
+// every request — twenty turns of history, twenty json trees per call, each
+// growing with the reply.
+//
+// So: **to_json seeds from `extra`, then for every modeled key either assigns it
+// (engaged) or ERASES it (disengaged).** The erase branch is what makes the
+// merge total and mutation-honest. Verbatim replay of unmodeled keys stays
+// available, as one deliberate and greppable line: `m.extra = m.raw;`
+//
+// Note `Message::extra` does NOT inherit ChatRequest::extra's shadowing
+// tolerance. That one is caller-authored, so a same-named key is arguably the
+// caller's own request. This one will routinely be seeded from a response, which
+// makes shadowing the common case rather than a pathology.
+//
+// from_json is **total** — it never throws. A message sub-object's shape
+// legitimately varies (content string/null/absent/array, tool_calls present or
+// not), and the shape it varies *to* is the one that matters most:
+// {"role":"assistant","content":null,"tool_calls":[...]} is the canonical
+// tool-call reply and the old two-key parse threw type_error.302 on it, so
+// Message was not usable as a parse target for a real assistant message at all.
+// This totality is deliberately NOT extended to ChatResponse::from_json_body,
+// whose top-level shape is a contract — see there.
 struct Message {
-  std::string role;     // "system" | "user" | "assistant" | "tool"
-  std::string content;
+  std::string role{};  // "system" | "user" | "assistant" | "tool"
+
+  // Four wire states, one type. std::optional<std::string> can express only
+  // three of them and none of the interesting ones:
+  //
+  //   nullopt          key omitted entirely
+  //   nullptr          "content": null   — what a tool-call-only reply sends
+  //   "text"           "content": "text"
+  //   json::array({…}) multimodal parts, verbatim
+  //
+  // Being json is what makes to_json rule-free (`if (content) assign else
+  // erase`) and what makes the parts form expressible at all, in both
+  // directions. `text()` flattens it for the common case.
+  //
+  // The nlohmann pin still applies with full force: dereference before handing
+  // it over. `j["content"] = content;` (no star) fails to compile on the pinned
+  // 3.11.3 and silently emits null on a 3.12 system copy.
+  std::optional<nlohmann::json> content{};
+
+  // The thinking stream, kept so it can be fed back. Some models require the
+  // prior turn's reasoning to be replayed; without a field for it that is
+  // simply unexpressible, which is what filed VC-05 in this shape.
+  std::optional<std::string> reasoning_content{};
+
+  // optional<vector>, not a bare vector, for the reason ChatRequest::stop is:
+  // engaged-but-empty must emit `[]` and disengaged must omit the key, and a
+  // bare vector collapses those two into one.
+  std::optional<std::vector<ToolCall>> tool_calls{};
+
+  std::optional<std::string> tool_call_id{};  // required when role == "tool"
+  std::optional<std::string> name{};
+  std::optional<std::string> refusal{};
+
+  nlohmann::json raw{};    // response-side, verbatim, never serialized
+  nlohmann::json extra{};  // request-side, additive seed
+
+  // The content as text, whatever shape it arrived in: the string itself, the
+  // concatenated `text` of a parts array, or "" for null/absent/anything else.
+  // Not an error channel — a flattening. It is also what populates the
+  // ChatResponse::content convenience snapshot.
+  [[nodiscard]] auto text() const -> std::string {
+    if (!content) return {};
+    if (content->is_string()) return content->get<std::string>();
+    if (content->is_array()) {
+      std::string out;
+      for (const auto& part : *content)
+        if (part.is_object())
+          if (const auto* s = detail::opt_string_at(part, "text")) out += *s;
+      return out;
+    }
+    return {};
+  }
 
   friend void to_json(nlohmann::json& j, const Message& m) {
-    j = nlohmann::json{{"role", m.role}, {"content", m.content}};
-  }
-  friend void from_json(const nlohmann::json& j, Message& m) {
-    j.at("role").get_to(m.role);
-    j.at("content").get_to(m.content);
+    // is_object() guard as everywhere else in this header: a default-constructed
+    // json is null, and an array-valued one would make the operator[] below
+    // throw type_error.305 out of a function called with no try/catch. It also
+    // means `m.extra = some_array` degrades to "no seed" rather than to a throw.
+    j = m.extra.is_object() ? m.extra : nlohmann::json::object();
+    j["role"] = m.role;
+
+    // Assign-or-erase, every modeled key. erase() on an absent key is a no-op
+    // and is safe here because j is guaranteed an object by the line above.
+    if (m.content) j["content"] = *m.content; else j.erase("content");
+    if (m.reasoning_content) j["reasoning_content"] = *m.reasoning_content;
+    else j.erase("reasoning_content");
+    if (m.tool_calls) j["tool_calls"] = *m.tool_calls; else j.erase("tool_calls");
+    if (m.tool_call_id) j["tool_call_id"] = *m.tool_call_id; else j.erase("tool_call_id");
+    if (m.name) j["name"] = *m.name; else j.erase("name");
+    if (m.refusal) j["refusal"] = *m.refusal; else j.erase("refusal");
   }
 
-  static auto system(std::string c) -> Message { return {"system", std::move(c)}; }
-  static auto user(std::string c) -> Message { return {"user", std::move(c)}; }
-  static auto assistant(std::string c) -> Message { return {"assistant", std::move(c)}; }
+  friend void from_json(const nlohmann::json& j, Message& m) {
+    if (!j.is_object()) return;
+    m.raw = j;
+    if (const auto* s = detail::opt_string_at(j, "role")) m.role = *s;
+    // Distinguishing absent from null is the entire point, so this is a find()
+    // rather than any of the opt_ helpers — all of which collapse both to
+    // nullopt.
+    if (const auto it = j.find("content"); it != j.end()) m.content = *it;
+    m.reasoning_content = detail::opt_string(j, "reasoning_content");
+    m.tool_call_id = detail::opt_string(j, "tool_call_id");
+    m.name = detail::opt_string(j, "name");
+    m.refusal = detail::opt_string(j, "refusal");
+    if (const auto* arr = detail::opt_array(j, "tool_calls")) {
+      std::vector<ToolCall> calls;
+      calls.reserve(arr->size());
+      for (const auto& e : *arr) calls.push_back(e.get<ToolCall>());
+      m.tool_calls = std::move(calls);
+    }
+  }
+
+  static auto system(std::string c) -> Message { return with_content("system", std::move(c)); }
+  static auto user(std::string c) -> Message { return with_content("user", std::move(c)); }
+  static auto assistant(std::string c) -> Message { return with_content("assistant", std::move(c)); }
+
+  // The reply half of tool calling. Three lines, and without them the round trip
+  // is only half told — a caller could send tool_calls back but never answer
+  // them, which leaves the whole feature untestable end to end.
+  static auto tool(std::string call_id, std::string c) -> Message {
+    auto m = with_content("tool", std::move(c));
+    m.tool_call_id = std::move(call_id);
+    return m;
+  }
+
+ private:
+  // Named rather than brace-init: `return {"user", std::move(c)};` stops
+  // compiling cleanly under -Wextra the moment this struct grows a member
+  // without a default member initializer (-Wmissing-field-initializers), the
+  // same trap AGENTS.md records for RequestOptions. Every member above has one,
+  // and this keeps the builders indifferent to the next field added.
+  static auto with_content(std::string role, std::string c) -> Message {
+    Message m;
+    m.role = std::move(role);
+    m.content = std::move(c);
+    return m;
+  }
 };
 
 // ── venice_parameters (the Venice extension block) ───────────────────────
@@ -327,36 +553,113 @@ struct Usage {
   int prompt_tokens{0};
   int completion_tokens{0};
   int total_tokens{0};
-  std::optional<int> cached_tokens;  // cache-read tokens, when reported
+  std::optional<int> cached_tokens{};  // cache-read tokens, when reported
+  // Of completion_tokens, how many went to thinking. Without this a reasoning
+  // model's actual cost is invisible: the tokens are billed inside
+  // completion_tokens with nothing saying what fraction was reasoning.
+  std::optional<int> reasoning_tokens{};
 
+  friend auto operator==(const Usage&, const Usage&) -> bool = default;
+
+  // Loud, deliberately — these parse inside Client::chat's try/catch, where a
+  // malformed body *should* fail as ErrorKind::Parse. The tolerant detail::opt_*
+  // helpers are for listings, where one odd entry must not cost the caller the
+  // other hundred; a chat reply has no siblings to protect and silently zeroing
+  // a token count would hide a billing bug.
+  //
+  // One distinction that rule does not currently draw, and this parse needs:
+  //
+  //   * a wrong-typed *value* stays loud. "prompt_tokens": "many" is
+  //     corruption; throw, and let the caller see ErrorKind::Parse.
+  //   * a missing or null nested *object* is structural, not corruption.
+  //     "prompt_tokens_details": null is a shape variation between gateways,
+  //     and letting it throw would turn a metadata nicety into a failed chat
+  //     completion. detail::opt_object is a pure structural predicate, so it is
+  //     the right tool for the container while .get<int>() stays strict inside.
   friend void from_json(const nlohmann::json& j, Usage& u) {
     if (j.contains("prompt_tokens")) j.at("prompt_tokens").get_to(u.prompt_tokens);
     if (j.contains("completion_tokens")) j.at("completion_tokens").get_to(u.completion_tokens);
     if (j.contains("total_tokens")) j.at("total_tokens").get_to(u.total_tokens);
+
+    // Read flat first, then let the nested location override. Both are honoured
+    // because the flat key is what this library has always read and
+    // test/01client/ pins it; nested wins on disagreement because
+    // prompt_tokens_details.cached_tokens is the OpenAI-canonical location and
+    // the flat one is the compatibility shim. Reading only the flat key — which
+    // is what every release through v0.7.0 did — very likely reported nullopt
+    // against real Venice for the whole life of the field.
     if (j.contains("cached_tokens")) u.cached_tokens = j.at("cached_tokens").get<int>();
+    if (const auto* pd = detail::opt_object(j, "prompt_tokens_details"))
+      if (pd->contains("cached_tokens")) u.cached_tokens = pd->at("cached_tokens").get<int>();
+
+    if (const auto* cd = detail::opt_object(j, "completion_tokens_details"))
+      if (cd->contains("reasoning_tokens")) u.reasoning_tokens = cd->at("reasoning_tokens").get<int>();
+    // completion_tokens_details also carries audio_tokens,
+    // accepted_prediction_tokens and rejected_prediction_tokens. They ride in
+    // ChatResponse::raw rather than growing this struct speculatively — this
+    // ticket is about reasoning, and raw is what makes leaving them untyped
+    // honest rather than lossy.
   }
 };
 
 // ── chat response ─────────────────────────────────────────────────────────
 
 struct ChatResponse {
-  std::string id;
-  std::string model;
-  std::string content;          // assistant message text (choices[0].message.content)
-  std::string finish_reason;    // "stop" | "length" | ...
-  std::optional<Usage> usage;
+  std::string id{};
+  std::string model{};
+  std::string content{};        // assistant message text — a snapshot; see below
+  std::string finish_reason{};  // "stop" | "length" | ...
+  std::optional<Usage> usage{};
+
+  // The whole assistant turn, complete enough to send back as the next message.
+  // Optional because "choices": [] is a real body and a pinned non-throwing
+  // case: a default-constructed Message would carry role == "" straight into a
+  // caller's history and onto the wire.
+  std::optional<Message> message{};
+
+  // The verbatim body. Everything this struct does not model is here —
+  // choices[1..n], logprobs, the completion_tokens_details buckets Usage
+  // leaves untyped, and whatever Venice adds next. It is what makes deferring
+  // those typings honest rather than lossy, and it is never sent anywhere.
+  nlohmann::json raw{};
+
+  std::optional<std::int64_t> created{};
+  std::optional<std::string> system_fingerprint{};
+  // What Venice reports it actually applied — web search state, character, and
+  // so on. Echoed back on the response and previously discarded, so a caller
+  // could not tell whether the venice_parameters they asked for took effect.
+  std::optional<nlohmann::json> venice_parameters{};
 
   // Parse the non-streaming /chat/completions response body. Throws
   // nlohmann::json exceptions on malformed input — callers wrap in expected.
+  //
+  // This stays LOUD while Message::from_json became total, and the split is
+  // deliberate rather than an inconsistency. A message sub-object's shape
+  // legitimately varies, so refusing to parse one is wrong. The top-level shape
+  // of a completion body is a contract: `j.at("choices")` throwing on a body
+  // with no choices is exactly what Client::chat's try/catch turns into
+  // ErrorKind::Parse, and test/01client/ pins it. Do not make both total.
   static auto from_json_body(const nlohmann::json& j) -> ChatResponse {
     ChatResponse r;
+    r.raw = j;
     if (j.contains("id")) r.id = j.at("id").get<std::string>();
     if (j.contains("model")) r.model = j.at("model").get<std::string>();
+    r.created = detail::opt_i64(j, "created");
+    r.system_fingerprint = detail::opt_string(j, "system_fingerprint");
+    if (const auto* vp = detail::opt_object(j, "venice_parameters")) r.venice_parameters = *vp;
+
     const auto& choices = j.at("choices");
     if (!choices.empty()) {
       const auto& c0 = choices.at(0);
-      if (c0.contains("message") && c0.at("message").contains("content"))
-        r.content = c0.at("message").at("content").get<std::string>();
+      if (c0.contains("message")) {
+        r.message = c0.at("message").get<Message>();
+        // A derived snapshot, populated once here and never read by the
+        // library. It exists so `res->content` keeps working; mutating it
+        // changes nothing about what a later request sends. The invariant
+        // r.content == r.message->text() is asserted in test/07stream/ so the
+        // duplication is policed rather than merely documented.
+        r.content = r.message->text();
+      }
       if (c0.contains("finish_reason") && !c0.at("finish_reason").is_null())
         r.finish_reason = c0.at("finish_reason").get<std::string>();
     }

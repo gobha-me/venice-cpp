@@ -7,7 +7,11 @@ AGENTS.md (which holds standing conventions, not state).
 
 **Phase 0: DONE and verified against the live API.**
 - `chat()` non-streaming completion (verified: "venice-cpp works").
-- `chat_stream()` SSE streaming via callback, cancellable (verified live).
+- `chat_stream()` SSE streaming, three forms: a content-text callback and two
+  that assemble into a caller-owned `StreamAccumulator`. Cancellable.
+- A reply is a `Message` and a `Message` is what you send — reasoning_content,
+  tool_calls, tool_call_id, refusal, multimodal content parts, all
+  round-trippable, all individually withholdable.
 - Per-request timeouts and a `CancelToken` on every entry point (VC-06).
 - `models()` list with typed per-model metadata, filterable by modality
   (105 text / 299 all, fetched live), `balance()` rate-limit endpoint.
@@ -33,14 +37,23 @@ was blinded by any comment mentioning a package name. Both were upstream bugs an
 have since landed there as CT-14.
 
 ## Next up
-1. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
-   This is the agreed next move; both foundations are proven.
-2. **VC-05 (#6), the structured stream-delta design**, is now unblocked — it had
-   to state its cancellation semantics and could not until VC-06 existed. The
-   answer it inherits: `on_token` false stays a partial-success early stop,
-   token cancel is `ErrorKind::Cancelled`, and a delta callback should not try
-   to carry either.
-3. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
+1. **A live capture of a streaming reply.** VC-05 shipped with its wire shapes
+   taken from Venice's published docs rather than a capture — `/models` answers
+   for any bearer token but chat does not, and the implementing environment had
+   no key. `venice-cpp --stream` exists to settle it: it reports whether
+   `reasoning_content`, `completion_tokens_details.reasoning_tokens` and
+   `prompt_tokens_details.cached_tokens` land where the fixtures in
+   `test/07stream/` say. If one disagrees, the fixture is what needs correcting;
+   `Message::raw` / `ChatResponse::raw` / `acc.chunks()` are why a wrong guess
+   is recoverable rather than lossy.
+2. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
+   Both foundations are proven.
+3. **VC-08 (#9), request-side tool calling** — `ChatRequest::tools`,
+   `tool_choice`, `parallel_tool_calls` and the function-spec builders. The
+   response-side data model (`ToolCall`, `Message::tool_calls`, the streaming
+   fragment merge) already landed in VC-05, because the accumulator could not be
+   specified without it.
+4. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
    embeddings, characters, retries/backoff, async). Driven by real use, not
    speculatively.
 4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
@@ -225,6 +238,79 @@ minor bump. Threads is now a public CMake requirement.
 Validated on gcc + clang × {default, asan, tsan, ubsan}, 11/11 each; 20
 consecutive transport runs clean under TSan and under ASan; consumer harness
 3/3 on both compilers.
+
+**VC-05 (#6) and VC-14 (#22) are done** — see v0.8.0, shipped together because
+the streaming accumulator assembles *into* the types VC-14 adds. The ticket was
+filed as "structured delta callback" and that framing was wrong: the callback is
+a symptom, the defect was that the library could not represent an assistant
+turn. `Message` was `{role, content}` — the only wire-facing struct in
+`types.hpp` with no passthrough at all — so refeeding a reasoning model's
+thinking was unexpressible, and `ChatResponse` reached *through*
+`choices[0].message` for content alone, discarding role, tool_calls,
+reasoning_content, refusal, the `venice_parameters` echo and `choices[1..n]`
+with no `raw` to recover them from.
+
+Five things are worth knowing, four of them measured rather than reasoned:
+
+- **The tempting design is silently wrong, and "the round trip works" does not
+  catch it.** One dual-purpose `raw` seeding `to_json` makes a parsed reply
+  round-trip losslessly for free. It also honours `m.content = "edited"` while
+  ignoring `m.content.reset()` — so a caller redacting history resends the
+  answer, and a caller clearing an already-executed `tool_calls` re-issues the
+  call. Both rules implemented side by side over the same redacted turn:
+  seed-from-raw emitted the full answer plus the tool call, assign-or-erase
+  emitted `{"role":"assistant"}`. The rule is therefore **two hatches** (`raw`
+  never serialized, `extra` additive) and **assign-or-ERASE** for every modeled
+  key. Installing the wrong rule turned four cases red and left 22 green — and
+  the one that stayed green was §6, replay fidelity, which a design that merely
+  echoes satisfies trivially. That is why the failure matrix opens with the
+  negative.
+
+- **A test can be green on both sides of the bug it was written for.** The CRLF
+  framing case fed one frame and let `finish()` flush at end of stream, so a
+  frame that never dispatched from the framing loop still came out of the flush.
+  Deleting the CRLF branch entirely left all 49 cases passing. It now feeds two
+  frames with `finish=false`, because streaming means a frame dispatches when it
+  arrives, not when the body ends. This is the second time the "confirm the test
+  *could* see it" prerequisite has bitten here, after VC-06's SIGPIPE fixture.
+
+- **Three defects were hiding behind the socket.** Extracting `detail::SseFramer`
+  to namespace scope — the third time this repo has made that move, after
+  VC-03's `models_from_json_body` and VC-13's `percent_encode` — exposed them:
+  CRLF frames never dispatched at all (measured 1 payload for LF, 0 for CRLF);
+  the trailing unterminated frame was dropped, and it is frequently the *usage*
+  frame, so the loss was a billing bug; and the leftover buffer was unbounded.
+  Two more went with them: the fatal-parse test was `content.empty()`, which
+  reported `ErrorKind::Parse` on a reasoning-only stream that had arrived
+  perfectly, and an early stop kept parsing frames already in the buffer.
+
+- **`Usage::cached_tokens` was very likely always `nullopt` against real
+  Venice.** It read a *flat* `usage.cached_tokens`, while OpenAI-compatible
+  bodies nest it at `prompt_tokens_details.cached_tokens`. Both are read now,
+  nested winning on disagreement. `reasoning_tokens` was unreachable entirely,
+  which made a reasoning model's actual cost invisible.
+
+- **The overload set is shaped by an ambiguity, and the shape turned out to be
+  the better design.** A bare `bool(const StreamDelta&)` overload beside the
+  `string_view` one makes `chat_stream(req, [](auto d){...})` and
+  `chat_stream(req, nullptr, opts)` hard errors — a source break for code that
+  compiles today. Requiring a caller-owned `StreamAccumulator` for the
+  structured forms resolves it *and* makes the promise structural: you cannot
+  ask for the rich stream without supplying storage that survives a cancel.
+  VC-06's contract is untouched (`Cancelled`, no response), but abandoning a
+  call no longer destroys what arrived — `test/06transport/` §7b pins that
+  through a real socket, and breaking it by resetting the accumulator on cancel
+  turns it red.
+
+Public API break: `Message::content` is now `std::optional<nlohmann::json>` (the
+only type expressing absent / null / text / multimodal parts) and `ChatResponse`
+gained `optional<Message>`. Taken on VC-11's grounds — a `content` you cannot
+clear is a defect. `test/02request/`'s `kBaseline` is byte-identical and
+untouched.
+
+The wire shapes come from Venice's published docs, **not a capture** — there was
+no `VENICE_API_KEY` in the implementing environment. `venice-cpp --stream` is
+the live check; see "Next up".
 
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.
