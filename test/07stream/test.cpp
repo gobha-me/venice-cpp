@@ -463,3 +463,444 @@ TEST_CASE("thinking can be refed or withheld, per turn", "[message][replay]") {
   m.reasoning_content = "step one, step two";
   REQUIRE(nlohmann::json(m).at("reasoning_content") == "step one, step two");
 }
+
+// ── §7 SSE framing ────────────────────────────────────────────────────────
+//
+// Unreachable offline until VC-05 — the framing lived inside a content_receiver
+// lambda, so this ticket's own acceptance criteria (partial frames across chunk
+// boundaries, [DONE]) could only ever have been checked through a socket. Three
+// of the cases below were measured red against a verbatim copy of the old loop
+// before the framer was written; two of those were total silence rather than a
+// wrong answer, which is the kind of bug a green suite hides best.
+
+namespace {
+
+// Feed a chunk sequence and collect the payloads that come out, in order.
+auto framed(const std::vector<std::string>& chunks, bool finish = true)
+    -> std::vector<std::string> {
+  venice::detail::SseFramer f;
+  std::vector<std::string> seen;
+  const auto sink = [&](std::string_view p) { seen.emplace_back(p); };
+  for (const auto& c : chunks) f.feed(c, sink);
+  if (finish) f.finish(sink);
+  return seen;
+}
+
+constexpr auto kFrame = R"(data: {"choices":[{"delta":{"content":"hi"}}]})";
+
+}  // namespace
+
+TEST_CASE("CRLF frames are delivered", "[stream][framer][failure]") {
+  // Measured against the pre-VC-05 loop: LF gave 1 payload, CRLF gave 0. The
+  // old split was on "\n\n", and "\r\n\r\n" contains no such substring, so a
+  // spec-legal peer produced an entirely empty stream with no error anywhere.
+  // finish=false is load bearing, and the first spelling of this case got it
+  // wrong. With the flush enabled, a CRLF frame that never dispatched from the
+  // framing loop still came out of finish() at end of stream, so the assertion
+  // stayed green with the CRLF branch deleted — it was measuring the flush, not
+  // the framing. Verified by deleting that branch and watching this case pass.
+  //
+  // Streaming is the whole point: a frame must dispatch when it arrives, not
+  // when the body ends. Feeding two frames with no flush is what pins that.
+  const auto lf = framed({std::string{kFrame} + "\n\n" + kFrame + "\n\n"}, /*finish=*/false);
+  const auto crlf = framed({std::string{kFrame} + "\r\n\r\n" + kFrame + "\r\n\r\n"},
+                           /*finish=*/false);
+
+  REQUIRE(lf.size() == 2);
+  REQUIRE(crlf.size() == 2);
+  REQUIRE(crlf.at(0) == lf.at(0));
+  // and the payload is parseable — a trailing \r would break json::parse
+  REQUIRE_NOTHROW(nlohmann::json::parse(crlf.at(0)).dump());
+}
+
+TEST_CASE("a mixed-ending stream still frames", "[stream][framer][failure]") {
+  const auto seen = framed({std::string{kFrame} + "\r\n\r\n" + kFrame + "\n\n"});
+  REQUIRE(seen.size() == 2);
+  REQUIRE(seen.at(0) == seen.at(1));
+}
+
+TEST_CASE("the final unterminated frame is not dropped", "[stream][framer][failure]") {
+  // Measured against the old loop: 1 of 2 payloads delivered. `leftover` was a
+  // local of the receiver lambda and was discarded when send() returned. The
+  // lost frame is frequently the usage frame, so this was a billing bug.
+  const auto seen = framed({std::string{kFrame} + "\n\n" + kFrame});
+  REQUIRE(seen.size() == 2);
+
+  SECTION("without finish() it is still pending, which is what the old code did") {
+    const auto without = framed({std::string{kFrame} + "\n\n" + kFrame}, /*finish=*/false);
+    REQUIRE(without.size() == 1);
+  }
+}
+
+TEST_CASE("a frame split across chunk boundaries is reassembled", "[stream][framer][failure]") {
+  const std::string whole = std::string{kFrame} + "\n\n";
+
+  SECTION("split at every single byte offset") {
+    for (size_t i = 1; i < whole.size(); ++i) {
+      INFO("split at " << i);
+      const auto seen = framed({whole.substr(0, i), whole.substr(i)});
+      REQUIRE(seen.size() == 1);
+      REQUIRE_NOTHROW(nlohmann::json::parse(seen.at(0)).dump());
+    }
+  }
+  SECTION("one byte at a time") {
+    std::vector<std::string> bytes;
+    for (const char c : whole) bytes.emplace_back(1, c);
+    const auto seen = framed(bytes);
+    REQUIRE(seen.size() == 1);
+  }
+}
+
+TEST_CASE("lines that are not data: are ignored", "[stream][framer][failure]") {
+  SECTION("an event with no data line yields nothing") {
+    REQUIRE(framed({": keep-alive comment\n\n"}).empty());
+    REQUIRE(framed({"event: message\nid: 7\n\n"}).empty());
+  }
+  SECTION("a data line with no space keeps its whole payload") {
+    REQUIRE(framed({"data:{\"a\":1}\n\n"}).at(0) == R"({"a":1})");
+  }
+  SECTION("only one leading space is stripped, the rest is payload") {
+    REQUIRE(framed({"data:   x\n\n"}).at(0) == "  x");
+  }
+  SECTION("multiple data lines in one event each dispatch") {
+    const auto seen = framed({"data: one\ndata: two\n\n"});
+    REQUIRE(seen.size() == 2);
+    REQUIRE(seen.at(0) == "one");
+    REQUIRE(seen.at(1) == "two");
+  }
+  SECTION("an empty stream yields nothing and does not fault") {
+    REQUIRE(framed({}).empty());
+    REQUIRE(framed({""}).empty());
+  }
+}
+
+TEST_CASE("the buffer is bounded", "[stream][framer][failure]") {
+  // A peer that never sends a blank line used to buffer its entire response.
+  venice::detail::SseFramer f;
+  const std::string big(venice::detail::SseFramer::kMaxEvent + 1, 'x');
+  const auto ok = f.feed(big, [](std::string_view) {});
+  REQUIRE_FALSE(ok);
+  REQUIRE(f.overflowed());
+}
+
+// ── §8 delta_from_chunk ───────────────────────────────────────────────────
+
+namespace {
+
+auto delta_of(const char* body, std::vector<ToolCall>& frags) -> venice::StreamDelta {
+  static nlohmann::json held;
+  held = nlohmann::json::parse(body);
+  return venice::delta_from_chunk(held, frags);
+}
+
+}  // namespace
+
+TEST_CASE("delta_from_chunk never throws", "[stream][delta][failure]") {
+  const auto shapes = std::vector<std::string>{
+      R"({})",
+      R"([])",
+      R"(null)",
+      R"({"choices":[]})",
+      R"({"choices":"not an array"})",
+      R"({"choices":[{}]})",
+      R"({"choices":[{"delta":"not an object"}]})",
+      R"({"choices":[{"delta":{"content":null}}]})",
+      R"({"choices":[{"delta":{"content":123}}]})",
+      R"({"choices":[{"finish_reason":null}]})",
+      R"({"usage":null})",
+  };
+  for (const auto& s : shapes) {
+    INFO("shape: " << s);
+    std::vector<ToolCall> frags;
+    REQUIRE_NOTHROW(delta_of(s.c_str(), frags));
+  }
+}
+
+TEST_CASE("an absent content key differs from an empty one", "[stream][delta][failure]") {
+  // This is the guarantee the string_view adapter rests on: on_token fires when
+  // a chunk carried a content string, including "". A plain string_view could
+  // not tell those apart and an empty-content frame would stop reaching
+  // existing callers.
+  std::vector<ToolCall> frags;
+
+  REQUIRE_FALSE(delta_of(R"({"choices":[{"delta":{"role":"assistant"}}]})", frags).content);
+  REQUIRE_FALSE(delta_of(R"({"choices":[{"delta":{"content":null}}]})", frags).content);
+
+  const auto empty = delta_of(R"({"choices":[{"delta":{"content":""}}]})", frags);
+  REQUIRE(empty.content.has_value());
+  REQUIRE(empty.content->empty());
+}
+
+TEST_CASE("a usage-only frame with empty choices is still read", "[stream][delta][failure]") {
+  // Venice sends the usage frame after finish_reason, with "choices": [].
+  std::vector<ToolCall> frags;
+  const auto d = delta_of(R"({"choices":[],"usage":{"prompt_tokens":3}})", frags);
+  REQUIRE(d.usage != nullptr);
+  REQUIRE_FALSE(d.empty());
+}
+
+// ── §9 the accumulator ────────────────────────────────────────────────────
+
+namespace {
+
+// Drive an accumulator over a list of chunk bodies.
+auto accumulate(const std::vector<std::string>& chunks) -> venice::StreamAccumulator {
+  venice::StreamAccumulator acc;
+  for (const auto& c : chunks) {
+    const auto j = nlohmann::json::parse(c);
+    acc.note_envelope(j);
+    acc.ingest(j);
+  }
+  return acc;
+}
+
+}  // namespace
+
+// The static_assert the overload set depends on. A call operator on
+// StreamAccumulator would make it convertible to std::function and silently
+// reintroduce the ambiguity chat_stream is shaped to avoid.
+static_assert(!std::is_convertible_v<venice::StreamAccumulator&,
+                                     std::function<bool(std::string_view)>>,
+              "StreamAccumulator must not be callable — see Client::chat_stream");
+static_assert(!std::is_convertible_v<venice::StreamAccumulator&,
+                                     std::function<bool(const venice::StreamDelta&)>>,
+              "StreamAccumulator must not be callable — see Client::chat_stream");
+
+TEST_CASE("tool-call fragments merge by index, not by position",
+          "[stream][accumulator][failure]") {
+  // The canonical bug: a chunk carrying only the second call sends a
+  // one-element array with "index": 1. Merging by array position concatenates
+  // two calls' arguments into one and looks entirely plausible.
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function",
+           "function":{"name":"f","arguments":"{\"x\":"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function",
+           "function":{"name":"g","arguments":"{\"y\":"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"2}"}}]}}]})",
+  });
+
+  const auto calls = *acc.message().tool_calls;
+  REQUIRE(calls.size() == 2);
+  REQUIRE(calls.at(0).id == "call_a");
+  REQUIRE(calls.at(0).name == "f");
+  REQUIRE(calls.at(0).arguments == R"({"x":1})");
+  REQUIRE(calls.at(1).id == "call_b");
+  REQUIRE(calls.at(1).name == "g");
+  REQUIRE(calls.at(1).arguments == R"({"y":2})");
+}
+
+TEST_CASE("out-of-order indices emit in index order", "[stream][accumulator][failure]") {
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"tool_calls":[{"index":2,"id":"c","function":{"name":"third"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"first"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"b","function":{"name":"second"}}]}}]})",
+  });
+  const auto calls = *acc.message().tool_calls;
+  REQUIRE(calls.size() == 3);
+  REQUIRE(calls.at(0).name == "first");
+  REQUIRE(calls.at(1).name == "second");
+  REQUIRE(calls.at(2).name == "third");
+}
+
+TEST_CASE("a gap in the indices is not filled in", "[stream][accumulator][failure]") {
+  // vector[index] would either fault or invent an empty call at 1.
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a"}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":7,"id":"h"}]}}]})",
+  });
+  const auto calls = *acc.message().tool_calls;
+  REQUIRE(calls.size() == 2);
+  REQUIRE(calls.at(0).id == "a");
+  REQUIRE(calls.at(1).id == "h");
+}
+
+TEST_CASE("a continuation does not clobber the scalars", "[stream][accumulator][failure]") {
+  // Some gateways send "name": "" on continuation fragments. An unguarded
+  // assignment loses the id and the name on fragment two.
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function",
+           "function":{"name":"get_weather","arguments":"{"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","type":"",
+           "function":{"name":"","arguments":"}"}}]}}]})",
+  });
+  const auto m = acc.message();  // by value: a reference into the temporary would dangle
+  const auto& call = m.tool_calls->at(0);
+  REQUIRE(call.id == "call_a");
+  REQUIRE(call.type == "function");
+  REQUIRE(call.name == "get_weather");
+  REQUIRE(call.arguments == "{}");
+}
+
+TEST_CASE("two calls in a single chunk are both taken", "[stream][accumulator][failure]") {
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"tool_calls":[
+           {"index":0,"id":"a","function":{"name":"f","arguments":"{}"}},
+           {"index":1,"id":"b","function":{"name":"g","arguments":"[]"}}]}}]})",
+  });
+  REQUIRE(acc.message().tool_calls->size() == 2);
+}
+
+TEST_CASE("argument fragments are concatenated verbatim", "[stream][accumulator][failure]") {
+  // Individually none of these is valid JSON, and the whitespace inside the
+  // string literal is significant — a trim would corrupt the value.
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":\" a "}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":" b \"}"}}]}}]})",
+  });
+  const auto m = acc.message();  // by value: a reference into the temporary would dangle
+  const auto& call = m.tool_calls->at(0);
+  REQUIRE(call.arguments == "{\"q\":\" a  b \"}");
+  REQUIRE(call.parsed_arguments()->at("q") == " a  b ");
+}
+
+TEST_CASE("content and reasoning are independent streams", "[stream][accumulator][failure]") {
+  // Interleaved in both directions, including a return to reasoning after
+  // content has started. A state machine would drop one of them.
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"role":"assistant"}}]})",
+      R"({"choices":[{"delta":{"reasoning_content":"think1 "}}]})",
+      R"({"choices":[{"delta":{"content":"ans1 "}}]})",
+      R"({"choices":[{"delta":{"reasoning_content":"think2 "}}]})",
+      R"({"choices":[{"delta":{"content":"ans2","reasoning_content":"think3"}}]})",
+  });
+  const auto m = acc.message();
+  REQUIRE(m.role == "assistant");
+  REQUIRE(m.text() == "ans1 ans2");
+  REQUIRE(m.reasoning_content == "think1 think2 think3");
+}
+
+TEST_CASE("accumulation continues past finish_reason", "[stream][accumulator][failure]") {
+  // finish_reason can arrive before the last argument fragment, and the usage
+  // frame always arrives after it.
+  const auto acc = accumulate({
+      R"({"choices":[{"finish_reason":"tool_calls","delta":{"tool_calls":[
+           {"index":0,"id":"a","function":{"arguments":"{"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]})",
+      R"({"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}})",
+  });
+  const auto r = acc.response();
+  REQUIRE(r.finish_reason == "tool_calls");
+  REQUIRE(r.message->tool_calls->at(0).arguments == "{}");
+  REQUIRE(r.usage->total_tokens == 3);
+}
+
+TEST_CASE("every chunk is retained verbatim by default", "[stream][accumulator]") {
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"content":"a"}}],"unmodeled_future_key":{"x":1}})",
+      R"({"choices":[{"delta":{"content":"b"}}]})",
+  });
+  REQUIRE(acc.chunks().size() == 2);
+  // Nothing received is discarded — including a key no version of this library
+  // has ever heard of.
+  REQUIRE(acc.chunks().at(0).at("unmodeled_future_key").at("x") == 1);
+}
+
+TEST_CASE("retention can be turned off without losing the assembly", "[stream][accumulator]") {
+  venice::StreamAccumulator acc{/*keep_chunks=*/false};
+  acc.ingest(nlohmann::json::parse(R"({"choices":[{"delta":{"content":"a"}}]})"));
+  REQUIRE(acc.chunks().empty());
+  REQUIRE(acc.message().text() == "a");
+}
+
+TEST_CASE("empty() distinguishes nothing-arrived from no-content-arrived",
+          "[stream][accumulator][failure]") {
+  // The old fatal-parse test was "content is empty", which reported
+  // ErrorKind::Parse on a reasoning-only stream that had arrived perfectly.
+  REQUIRE(venice::StreamAccumulator{}.empty());
+  REQUIRE(accumulate({R"({"choices":[{"delta":{}}]})"}).empty());
+  REQUIRE_FALSE(accumulate({R"({"choices":[{"delta":{"reasoning_content":"t"}}]})"}).empty());
+}
+
+TEST_CASE("reset clears everything but the retention setting", "[stream][accumulator]") {
+  venice::StreamAccumulator acc{/*keep_chunks=*/false};
+  acc.ingest(nlohmann::json::parse(R"({"choices":[{"delta":{"content":"a"}}]})"));
+  acc.reset();
+  REQUIRE(acc.empty());
+  REQUIRE(acc.message().text().empty());
+
+  acc.ingest(nlohmann::json::parse(R"({"choices":[{"delta":{"content":"b"}}]})"));
+  REQUIRE(acc.chunks().empty());  // still off
+  REQUIRE(acc.message().text() == "b");
+}
+
+// ── §10 streamed and non-streamed converge — happy path, last ─────────────
+//
+// The payoff assertion. If the two paths produce the same Message on the wire,
+// then everything the non-streamed parse keeps, the stream keeps too — and the
+// stream's own extra plumbing (framing, fragment merge, two text buffers) has
+// not quietly dropped or reordered anything.
+
+TEST_CASE("a streamed reply assembles to the same message as a non-streamed one",
+          "[stream][accumulator][converge]") {
+  const auto non_streamed = ChatResponse::from_json_body(nlohmann::json::parse(R"({
+    "id":"chatcmpl-1","model":"deepseek-r1",
+    "choices":[{"index":0,"finish_reason":"tool_calls","message":{
+      "role":"assistant","reasoning_content":"step one, step two",
+      "content":"partial answer",
+      "tool_calls":[{"id":"call_a","type":"function",
+                     "function":{"name":"get_weather","arguments":"{\"location\":\"SF\"}"}},
+                    {"id":"call_b","type":"function",
+                     "function":{"name":"clock","arguments":"{}"}}]}}],
+    "usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,
+             "prompt_tokens_details":{"cached_tokens":4},
+             "completion_tokens_details":{"reasoning_tokens":15}}})"));
+
+  // The same reply as chunks: mid-word content splits, a two-fragment
+  // arguments, an id present only in the opening fragment, the second call
+  // arriving before the first is finished, and a trailing usage frame.
+  const auto acc = accumulate({
+      R"({"id":"chatcmpl-1","model":"deepseek-r1","choices":[{"delta":{"role":"assistant"}}]})",
+      R"({"choices":[{"delta":{"reasoning_content":"step one, "}}]})",
+      R"({"choices":[{"delta":{"reasoning_content":"step two"}}]})",
+      R"({"choices":[{"delta":{"content":"parti"}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function",
+           "function":{"name":"get_weather","arguments":"{\"location\":"}}]}}]})",
+      R"({"choices":[{"delta":{"content":"al answer"}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function",
+           "function":{"name":"clock","arguments":"{}"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"SF\"}"}}]}}]})",
+      R"({"choices":[{"finish_reason":"tool_calls","delta":{}}]})",
+      R"({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,
+           "prompt_tokens_details":{"cached_tokens":4},
+           "completion_tokens_details":{"reasoning_tokens":15}}})",
+  });
+  const auto streamed = acc.response();
+
+  // Wire-level equality rather than a Message::operator==: it compares the
+  // thing that actually matters — what the next request would carry — and
+  // sidesteps committing to a semantics for `raw` in equality.
+  REQUIRE(nlohmann::json(*streamed.message) == nlohmann::json(*non_streamed.message));
+
+  REQUIRE(streamed.id == non_streamed.id);
+  REQUIRE(streamed.model == non_streamed.model);
+  REQUIRE(streamed.finish_reason == non_streamed.finish_reason);
+  REQUIRE(streamed.usage == non_streamed.usage);
+  REQUIRE(streamed.content == non_streamed.content);
+
+  // And they must NOT be equal in raw — a streamed body is a different wire
+  // object from a completion body, and asserting otherwise would invite
+  // "fixing" a failure by making raw equal.
+  REQUIRE(streamed.raw != non_streamed.raw);
+}
+
+TEST_CASE("the converged turn replays into the next request", "[stream][accumulator][converge]") {
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"role":"assistant","reasoning_content":"thought"}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function",
+           "function":{"name":"f","arguments":"{}"}}]}}]})",
+  });
+
+  ChatRequest next;
+  next.model = "m";
+  next.messages = {Message::user("q"), acc.message(), Message::tool("call_a", "42")};
+
+  const auto sent = next.to_json_body(false).at("messages");
+  REQUIRE(sent.at(1).at("role") == "assistant");
+  REQUIRE(sent.at(1).at("reasoning_content") == "thought");
+  REQUIRE(sent.at(1).at("tool_calls").at(0).at("id") == "call_a");
+  // No content key at all: a tool-call-only turn has none, and emitting "" here
+  // would differ from what the non-streamed parse produces for the same reply.
+  REQUIRE_FALSE(sent.at(1).contains("content"));
+  REQUIRE(sent.at(2).at("tool_call_id") == "call_a");
+}

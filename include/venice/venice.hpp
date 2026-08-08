@@ -11,4 +11,5 @@
 #include "venice/error.hpp"
 #include "venice/options.hpp"
 #include "venice/types.hpp"
+#include "venice/stream.hpp"
 #include "venice/client.hpp"
