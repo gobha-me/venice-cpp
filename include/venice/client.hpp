@@ -384,6 +384,22 @@ class Client {
   // walked: validating an arbitrary json tree per call is the exact cost VC-11
   // just removed, and "something in extra is not finite" would be no more
   // actionable than the 400 it replaces.
+  //
+  // `tools` is not walked either (VC-08), and that is the same decision rather
+  // than a new one. Refusing a tool with an empty name looks like it belongs
+  // beside "model is empty" — both are representable in JSON and rejected
+  // anyway — but the decisive precedent is one line down: `messages` is checked
+  // for emptiness and never entered, so Message::role is unvalidated and a
+  // request carrying `{Message{}}` — role "", a guaranteed 400 — already sails
+  // through. Guarding tools[i].name while ignoring messages[i].role is a coin
+  // flip, not a line.
+  //
+  // The property everything above has and this would not: the server's 400
+  // cannot tell you. nlohmann collapses NaN to null and Venice's rejection never
+  // mentions NaN, which is the whole reason the sweep exists; a 400 for a
+  // nameless tool says tools[0].function.name. And for a 0.x library the
+  // asymmetry decides it — adding a guard later is additive, removing one is a
+  // behaviour break. Pinned in test/03guards/ so it reads as a decision.
   [[nodiscard]] static auto validate(const ChatRequest& req) -> std::expected<void, Error> {
     // Pointer-to-member, so name and field travel together and a future double
     // field is one line. Members rather than references into `req`: the table

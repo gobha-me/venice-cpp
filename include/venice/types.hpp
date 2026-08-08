@@ -446,9 +446,15 @@ inline auto json_object() -> nlohmann::json {
   return j;
 }
 
-// Field-by-field assignment, not a brace-init list: an array-valued `schema`
-// makes the outer initializer-list ambiguous and nlohmann reads the whole
-// thing as an array.
+// Field-by-field assignment rather than a brace-init list. The rationale
+// originally recorded here — that an array-valued `schema` makes the outer
+// initializer-list ambiguous and nlohmann reads the whole thing as an array —
+// did not survive being measured (VC-08): rewriting this body as a single
+// brace-init leaves every case in test/02request/ green on the pinned 3.11.3,
+// array-valued schema included. The style stays, because it is unambiguous by
+// construction and does not depend on nlohmann's init-list heuristic holding.
+// The real brace hazard is one level down and is documented under the tool
+// builders below: a json *scalar* built with braces becomes a one-element array.
 inline auto json_schema(std::string name, nlohmann::json schema, bool strict = true)
     -> nlohmann::json {
   auto inner = nlohmann::json::object();
@@ -463,6 +469,116 @@ inline auto json_schema(std::string name, nlohmann::json schema, bool strict = t
 }
 
 }  // namespace response_format
+
+// ── tool / tool_choice builders ───────────────────────────────────────────
+//
+// `ChatRequest::tools` holds raw json *elements* rather than a typed Tool, and
+// `tool_choice` holds raw json, for the reason response_format above does and
+// models(type) does: the value set — here the *shape* set — belongs to the
+// server.
+//
+// The tempting alternative is a Tool struct mirroring ToolCall: flat members,
+// a to_json that re-nests name/description/parameters under "function". It is
+// tempting because ToolCall sits 250 lines up and the symmetry is obvious. But
+// ToolCall may nest unconditionally because it re-serializes something the
+// server *sent*; `tools` is authored by the caller. A Tool that always nests
+// hardcodes exactly one shape, and would emit
+// {"type":"web_search","function":{"name":""}} the day Venice accepts a tool
+// entry that is not a function.
+//
+// It would also break the escape hatch rather than merely omit it.
+// response_format's documented escape is "assign the object directly"; a typed
+// Tool inside optional<vector<Tool>> leaves only extra["tools"], which LOSES
+// whenever `tools` is engaged and works only when it is disengaged. A hatch
+// whose behaviour flips on an unrelated field is worse than no hatch. With json
+// elements there is nothing to escape from:
+//
+//     r.tools = {venice::tools::function("f", "d", schema)};
+//     r.tools->push_back(nlohmann::json::parse(R"({"type":"web_search"})"));
+//     (*r.tools)[0]["function"]["strict"] = true;   // or any unmodeled sub-key
+//
+// which is also why `strict` is not a parameter below: Venice documents it on
+// response_format.json_schema, not on tools, and a parameter for an undocumented
+// key is this header speculating.
+//
+// Parentheses, never braces, when building a json SCALAR — and that is the only
+// brace rule here that is load bearing. Measured against the pinned 3.11.3:
+//
+//     nlohmann::json{"auto"}  ->  ["auto"]     (an array)
+//     nlohmann::json("auto")  ->  "auto"
+//
+// Both spellings compile, so nothing but an assertion on the type catches the
+// wrong one; test/02request/ asserts is_string() for exactly that reason.
+//
+// The *object* builders below assign field by field for consistency with
+// response_format and because it stays readable, NOT because brace-init would
+// mis-parse them. That was checked rather than assumed, and the check corrected
+// the belief: six spellings were measured on 3.11.3 — nested one-shot,
+// array-valued values, runtime-variable values, inline two-string arrays — and
+// every one produced the correct object. Rebuilding json_schema above as a
+// single brace-init left all 115 cases in test/02request/ green, which means the
+// "an array-valued schema makes the outer list ambiguous" rationale that used to
+// sit there described a hazard this pin does not have. The rule survives; the
+// citation for it did not.
+
+namespace tools {
+
+// One entry for ChatRequest::tools.
+//
+// An empty `description` and a null `parameters` are OMITTED. A plain (non-
+// optional) parameter has no "unset" state, so the degenerate value is the only
+// way a caller can say "no" — the same convention detail::with_query uses for an
+// empty query value. Omitting `parameters` is also the documented way to declare
+// a function that takes no arguments, where "parameters": null is a 400. This
+// does not contradict the engaged-optional rule below ChatRequest: there is no
+// optional here to have engaged.
+//
+// `name` is emitted even when empty, deliberately. A nameless tool is the
+// caller's error to see in the server's answer — which names the offending entry
+// — and dropping the key would produce a different, less legible 400.
+// Client::validate does not check it either; see test/03guards/.
+inline auto function(std::string name, std::string description = {},
+                     nlohmann::json parameters = nlohmann::json()) -> nlohmann::json {
+  auto fn = nlohmann::json::object();
+  fn["name"] = std::move(name);
+  if (!description.empty()) fn["description"] = std::move(description);
+  if (!parameters.is_null()) fn["parameters"] = std::move(parameters);
+
+  auto j = nlohmann::json::object();
+  j["type"] = "function";
+  j["function"] = std::move(fn);
+  return j;
+}
+
+}  // namespace tools
+
+namespace tool_choice {
+
+// The wire value is the string "auto"; `auto` is a keyword, so the builder is
+// not. `automatic` rather than `auto_` because a trailing underscore is a purely
+// lexical dodge that carries no information, and its one supposed advantage —
+// greppability — is false in a C++23 codebase where `auto` is on nearly every
+// line. And rather than `any` because `any` is Anthropic's name for what OpenAI
+// calls `required`: a caller who knows one API would read it as the other.
+// none() and required() keep their wire spelling, so exactly one builder
+// diverges from the string it emits.
+inline auto automatic() -> nlohmann::json { return nlohmann::json("auto"); }
+inline auto none() -> nlohmann::json { return nlohmann::json("none"); }
+inline auto required() -> nlohmann::json { return nlohmann::json("required"); }
+
+// Naming a specific function. Same nesting as a tools entry, minus everything
+// the server already knows from the declaration.
+inline auto function(std::string name) -> nlohmann::json {
+  auto fn = nlohmann::json::object();
+  fn["name"] = std::move(name);
+
+  auto j = nlohmann::json::object();
+  j["type"] = "function";
+  j["function"] = std::move(fn);
+  return j;
+}
+
+}  // namespace tool_choice
 
 // ── chat request ──────────────────────────────────────────────────────────
 //
@@ -495,6 +611,23 @@ struct ChatRequest {
   // stays int.
   std::optional<std::int64_t> seed;
   std::optional<nlohmann::json> response_format;  // see the builders above
+  // optional<vector>, not a bare vector, for the reason `stop` and
+  // Message::tool_calls are: engaged-but-empty must emit "tools": [] and
+  // disengaged must omit the key, and a bare vector collapses those two.
+  //
+  // The element type is raw json — see the builders above. Note that
+  // std::vector<nlohmann::json> IS nlohmann::json::array_t for the default json
+  // alias (measured, not assumed), so this is optional-of-the-array-type and
+  // nothing converts on the way to the wire. That also rules out the other near
+  // miss, optional<json>: `r.tools = venice::tools::function("f")` would compile
+  // and send a bare object where the API wants an array.
+  std::optional<std::vector<nlohmann::json>> tools;
+  // "auto" | "none" | "required" (json *strings*) or
+  // {"type":"function","function":{"name":"..."}}. Genuinely polymorphic across
+  // scalar and object, which is a stronger case for raw json than
+  // response_format has — that one is at least always an object.
+  std::optional<nlohmann::json> tool_choice;
+  std::optional<bool> parallel_tool_calls;
   std::optional<VeniceParameters> venice_parameters;
   // Forward-compatible top-level passthrough, mirroring VeniceParameters::extra.
   // Venice accepts sampling keys this struct doesn't model (top_k, min_p,
@@ -538,6 +671,15 @@ struct ChatRequest {
     if (presence_penalty) j["presence_penalty"] = *presence_penalty;
     if (seed) j["seed"] = *seed;
     if (response_format) j["response_format"] = *response_format;
+    if (tools) j["tools"] = *tools;
+    if (tool_choice) j["tool_choice"] = *tool_choice;
+    // `if (parallel_tool_calls)`, NOT `if (*parallel_tool_calls)`. The second
+    // compiles clean under -Wall -Wextra -pedantic and makes `= false`
+    // indistinguishable from unset — and false is the interesting value here: a
+    // caller disables parallel calls precisely when their agent loop cannot
+    // execute two at once. Worse than wrong, in fact: dereferencing the unset
+    // case is UB, which is why breaking this line reddens the baseline too.
+    if (parallel_tool_calls) j["parallel_tool_calls"] = *parallel_tool_calls;
     if (venice_parameters) j["venice_parameters"] = *venice_parameters;
     return j;
   }

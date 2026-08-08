@@ -129,6 +129,9 @@ TEST_CASE("a non-finite double is rejected however rich the rest of the request 
   r.seed = 7;
   r.stop = std::vector<std::string>{"\n"};
   r.response_format = venice::response_format::json_object();
+  r.tools = std::vector<nlohmann::json>{venice::tools::function("f")};
+  r.tool_choice = venice::tool_choice::required();
+  r.parallel_tool_calls = false;
   r.venice_parameters = VeniceParameters{};
   r.venice_parameters->disable_thinking = true;
   r.extra = nlohmann::json::parse(R"({"top_k":40})");
@@ -225,6 +228,29 @@ TEST_CASE("a non-finite value inside extra is deliberately not inspected",
   REQUIRE_FALSE(res.has_value());
   REQUIRE(res.error().message == "model is empty");
   REQUIRE(res.error().message.find("min_p") == std::string::npos);
+}
+
+TEST_CASE("tools is deliberately not walked either", "[guards][tools][failure]") {
+  // Same boundary as extra above, and the same decision rather than a new one
+  // (VC-08). Refusing a nameless tool looks like it belongs beside "model is
+  // empty" — both are representable in JSON and rejected anyway — but
+  // Client::validate checks `messages` for emptiness and never enters it, so
+  // Message::role is unvalidated and the request below already sails through on
+  // that count. Guarding tools[i].name while ignoring messages[i].role would be
+  // a coin flip, not a line; and the server's 400 names the offending entry,
+  // which is the property the isfinite sweep has and this would not.
+  //
+  // Paired with an empty model to stay offline, exactly as the extra case is:
+  // what comes back is the structural message, never a complaint about tools.
+  ChatRequest r;
+  r.messages = {Message::user("hi")};
+  r.tools = std::vector<nlohmann::json>{venice::tools::function("")};
+  r.tool_choice = venice::tool_choice::function("also-not-declared");
+
+  const auto res = kClient.chat(r);
+  REQUIRE_FALSE(res.has_value());
+  REQUIRE(res.error().message == "model is empty");
+  REQUIRE(res.error().message.find("tool") == std::string::npos);
 }
 
 // ── precedence, and the happy path ────────────────────────────────────────

@@ -142,6 +142,106 @@ auto stream_report(const venice::Client& client, const std::string& prompt) -> i
   return EXIT_SUCCESS;
 }
 
+// `--tools [model]`: the live check VC-08 could not run offline, for the same
+// reason --stream exists. Every offline case in test/02request/ asserts what
+// to_json_body *emits*; none of them can assert that Venice *accepts* it. The
+// nesting under "function", the spelling of tool_choice, whether
+// parallel_tool_calls is even honoured on this API — all of it is read off
+// Venice's published docs.
+//
+//     VENICE_API_KEY=... venice-cpp --tools
+//
+// Two legs, and the second is the one that matters. Leg one offers a function
+// and sees whether a tool_call comes back — that alone proves the `tools` shape
+// parsed. Leg two answers the call and sends the whole history back, which is
+// the only thing that proves the assistant turn plus a tool result is a
+// conversation Venice will continue. A run that stops after leg one has checked
+// half the round trip.
+//
+// If a field disagrees with the fixtures, the fixture is what needs correcting;
+// ChatResponse::raw and Message::raw are why a wrong guess here is recoverable.
+auto tools_report(const venice::Client& client, std::string_view model) -> int {
+  std::string chosen{model};
+  if (chosen.empty()) {
+    // Pick a model that claims to support this, which also gives VC-03's
+    // supports_function_calling flag its first live use — a flag nothing has
+    // ever branched on is a flag nobody knows is parsed.
+    const auto models = client.models("text");
+    if (!models) {
+      std::cerr << "models failed [" << venice::to_string(models.error().kind) << "] "
+                << models.error().message << '\n';
+      return EXIT_FAILURE;
+    }
+    for (const auto& m : *models)
+      if (m.capabilities && m.capabilities->supports_function_calling &&
+          *m.capabilities->supports_function_calling) {
+        chosen = m.id;
+        break;
+      }
+    if (chosen.empty()) {
+      std::cerr << "no text model reported supports_function_calling -- either none does,"
+                   " or that flag is not where Model expects it\n";
+      return EXIT_FAILURE;
+    }
+  }
+
+  venice::ChatRequest req;
+  req.model = chosen;
+  req.messages = {venice::Message::user("What is the weather in San Francisco?")};
+  req.tools = std::vector<nlohmann::json>{venice::tools::function(
+      "get_weather", "Look up the current weather for a city",
+      nlohmann::json::parse(R"({"type":"object",
+                                "properties":{"city":{"type":"string"}},
+                                "required":["city"]})"))};
+  req.tool_choice = venice::tool_choice::automatic();
+  req.parallel_tool_calls = false;
+
+  std::cerr << "model: " << chosen << "\n\n-- leg 1: the body actually sent --\n"
+            << req.to_json_body(false).dump(2) << '\n';
+
+  const auto first = client.chat(req);
+  if (!first) {
+    std::cerr << "\nchat failed [" << venice::to_string(first.error().kind) << "] "
+              << first.error().message << "\nbody: " << first.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+
+  const auto calls = first->message && first->message->tool_calls ? first->message->tool_calls->size() : 0;
+  std::cerr << "\n-- leg 1: what came back --\n"
+            << "finish_reason      : " << first->finish_reason << '\n'
+            << "tool calls         : " << calls;
+  if (calls == 0)
+    std::cerr << "   <-- ZERO: the request was accepted but nothing was called."
+                 " Either the model declined, or `tools` is not reaching it\n";
+  else
+    std::cerr << '\n';
+
+  if (calls == 0) return EXIT_SUCCESS;
+
+  const auto& call = first->message->tool_calls->front();
+  std::cerr << "id / name          : " << call.id << " / " << call.name << '\n'
+            << "arguments          : " << call.arguments << '\n';
+  if (const auto parsed = call.parsed_arguments(); !parsed)
+    std::cerr << "arguments DID NOT PARSE: " << parsed.error().message << '\n';
+
+  // Leg two. Replay the assistant turn verbatim, then answer the call.
+  req.messages.push_back(*first->message);
+  req.messages.push_back(venice::Message::tool(call.id, R"({"temp_f":68,"sky":"fog"})"));
+
+  const auto second = client.chat(req);
+  if (!second) {
+    std::cerr << "\n-- leg 2 REJECTED --\n[" << venice::to_string(second.error().kind) << "] "
+              << second.error().message << "\nbody: " << second.error().body
+              << "\n\nThis is the half no fixture can settle: the turn assembled here is not"
+                 " something Venice will take back.\n";
+    return EXIT_FAILURE;
+  }
+
+  std::cerr << "\n-- leg 2: the tool result was accepted --\n";
+  std::cout << second->content << '\n';
+  return EXIT_SUCCESS;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -157,6 +257,8 @@ auto main(int argc, char** argv) -> int {
   if (argc > 1 && std::string_view{argv[1]} == "--stream")
     return stream_report(client, argc > 2 ? argv[2]
                                           : "Think step by step: what is 17 * 23?");
+  if (argc > 1 && std::string_view{argv[1]} == "--tools")
+    return tools_report(client, argc > 2 ? argv[2] : "");
 
   const std::string prompt = argc > 1 ? argv[1] : "Say hello in one short sentence.";
 
