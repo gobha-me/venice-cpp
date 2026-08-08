@@ -25,6 +25,10 @@ right bridge.
 - **Sampling and control parameters** — `temperature`, `top_p`, `max_tokens`,
   `stop`, `frequency_penalty`, `presence_penalty`, `seed`, `response_format`,
   plus a top-level `extra` passthrough for keys this struct doesn't model.
+- **Tool / function calling, both directions** — declare functions with `tools`,
+  steer with `tool_choice` and `parallel_tool_calls`; read the model's request
+  back as typed `ToolCall`s and answer it with `Message::tool()`. Tool-call
+  argument fragments are merged across a stream by index, never by position.
 - **`venice_parameters`** extension — web search, citations, character,
   thinking toggles, with forward-compatible passthrough for unmodeled keys.
 - **Models list** (`/models`) — typed metadata per model: context window,
@@ -70,6 +74,10 @@ req.top_p = 0.9;
 req.stop = std::vector<std::string>{"\n\n"};
 req.seed = 42;
 req.response_format = venice::response_format::json_object();
+
+// offering functions — see "Declaring tools" below
+req.tools = std::vector<nlohmann::json>{venice::tools::function("get_weather")};
+req.tool_choice = venice::tool_choice::automatic();
 
 // non-streaming
 if (auto res = client.chat(req)) {
@@ -329,6 +337,51 @@ wire has four states and only that type holds all of them: absent (`nullopt`),
 `null` (`= nullptr`), text, and a multimodal parts array. `text()` flattens it
 when you just want the words.
 
+### Declaring tools
+
+The section above answers a tool call. This is where the function was offered in
+the first place, which closes the loop:
+
+```cpp
+req.tools = std::vector<nlohmann::json>{
+    venice::tools::function("get_weather", "Look up the current weather",
+                            nlohmann::json::parse(R"({
+                              "type": "object",
+                              "properties": {"city": {"type": "string"}},
+                              "required": ["city"]
+                            })"))};
+
+req.tool_choice = venice::tool_choice::automatic();   // or none() / required()
+                                                      // or function("get_weather")
+req.parallel_tool_calls = false;                      // one call at a time
+```
+
+**`tools` holds raw JSON elements, not a typed `Tool`.** A struct that re-nested
+`name`/`description`/`parameters` under `"function"` would hardcode exactly one
+tool shape — and would emit `{"type":"web_search","function":{"name":""}}` the
+day Venice accepts an entry that is not a function. `ToolCall` on the response
+side may nest unconditionally because it re-serializes what the server *sent*;
+`tools` is yours to author. So the builders supply the ergonomics and anything
+they don't cover you assign yourself, exactly as with `response_format`:
+
+```cpp
+req.tools->push_back(nlohmann::json::parse(R"({"type":"web_search"})"));
+(*req.tools)[0]["function"]["strict"] = true;   // any unmodeled sub-key
+```
+
+Two details worth knowing:
+
+- **`venice::tool_choice::automatic()` emits the string `"auto"`.** The builder
+  is not spelled `auto` because that is a keyword, and not `any` because `any`
+  is Anthropic's name for what OpenAI calls `required` — a caller who knew one
+  API would read it as the other. `none()` and `required()` keep their wire
+  spelling.
+- **Nothing here is validated client-side, tool names included.** An empty name
+  or a `tool_choice` naming a function you never declared is transmitted, and
+  Venice's 400 names the offending entry — which is more than this library could
+  say. That is the same boundary `extra` sits behind, and the same reason
+  `messages` is checked for emptiness but never entered.
+
 ### CMake
 
 However you acquire venice-cpp, the line you write is the same:
@@ -349,7 +402,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.8.0)
+  GIT_TAG        v0.9.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -450,15 +503,25 @@ Phase 0 verified against the live API: chat (non-streaming + streaming),
 models list (105 text models, 299 across all modalities), token usage — the
 counts move as Venice's catalogue does.
 
-One caveat worth stating plainly: the **v0.8.0 wire shapes are documented, not
-measured**. Where `reasoning_content` sits, where `cached_tokens` is nested, how
-tool-call fragments are keyed — all of it came from Venice's published docs
-rather than a capture, because `/models` answers for any bearer token but chat
-does not, and the implementing environment had no key. Run
-`VENICE_API_KEY=... venice-cpp --stream "..."` to check it against the live API;
-if something disagrees, the fixture in `test/07stream/` is what needs
-correcting. `Message::raw`, `ChatResponse::raw` and `acc.chunks()` are why a
-wrong guess there is recoverable rather than lossy.
+One caveat worth stating plainly, and it now covers two releases: the **v0.8.0
+and v0.9.0 wire shapes are documented, not measured**. Where `reasoning_content`
+sits, where `cached_tokens` is nested, how tool-call fragments are keyed, and now
+how `tools` / `tool_choice` / `parallel_tool_calls` are spelled on the way out —
+all of it came from Venice's published docs rather than a capture, because
+`/models` answers for any bearer token but chat does not, and the implementing
+environment had no key. Two commands settle it against the live API:
+
+```bash
+VENICE_API_KEY=... venice-cpp --stream "..."   # v0.8.0: the reply shapes
+VENICE_API_KEY=... venice-cpp --tools          # v0.9.0: the request shape
+```
+
+`--tools` runs two legs, and the second is the one that matters: leg one proves
+`tools` parsed, leg two answers the call and proves the assembled turn is a
+conversation Venice will continue. If something disagrees, the fixture in
+`test/07stream/` or `test/02request/` is what needs correcting. `Message::raw`,
+`ChatResponse::raw` and `acc.chunks()` are why a wrong guess there is
+recoverable rather than lossy.
 
 See `AGENTS.md` for contributor/agent conventions and the testing philosophy
 (test how it fails, not just the happy path).
