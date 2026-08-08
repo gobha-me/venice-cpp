@@ -312,8 +312,12 @@ class StreamAccumulator {
   }
 
   // Also accepts a chunk directly, for a caller driving their own transport.
+  // Takes the envelope too, so this overload is complete on its own — the
+  // delta view deliberately does not model id/model, and a caller who only had
+  // this entry point would otherwise silently lose them.
   void ingest(const nlohmann::json& chunk) {
     std::vector<ToolCall> frags;
+    note_envelope(chunk);
     ingest(delta_from_chunk(chunk, frags));
   }
 

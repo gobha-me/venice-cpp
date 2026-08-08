@@ -812,6 +812,22 @@ TEST_CASE("empty() distinguishes nothing-arrived from no-content-arrived",
   REQUIRE_FALSE(accumulate({R"({"choices":[{"delta":{"reasoning_content":"t"}}]})"}).empty());
 }
 
+TEST_CASE("ingest(chunk) is complete on its own", "[stream][accumulator][failure]") {
+  // The chunk overload is the entry point for a caller driving their own
+  // transport. StreamDelta deliberately does not model id/model — they are
+  // envelope fields, not deltas — so this overload has to take them itself or
+  // that caller silently loses them. The accumulate() helper above calls
+  // note_envelope separately and would not have caught this.
+  venice::StreamAccumulator acc;
+  acc.ingest(nlohmann::json::parse(
+      R"({"id":"chatcmpl-9","model":"m","choices":[{"delta":{"content":"x"}}]})"));
+
+  const auto r = acc.response();
+  REQUIRE(r.id == "chatcmpl-9");
+  REQUIRE(r.model == "m");
+  REQUIRE(r.content == "x");
+}
+
 TEST_CASE("reset clears everything but the retention setting", "[stream][accumulator]") {
   venice::StreamAccumulator acc{/*keep_chunks=*/false};
   acc.ingest(nlohmann::json::parse(R"({"choices":[{"delta":{"content":"a"}}]})"));
