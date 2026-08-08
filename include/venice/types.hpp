@@ -493,9 +493,16 @@ inline auto json_schema(std::string name, nlohmann::json schema, bool strict = t
 // whose behaviour flips on an unrelated field is worse than no hatch. With json
 // elements there is nothing to escape from:
 //
-//     r.tools = {venice::tools::function("f", "d", schema)};
+//     r.tools = std::vector<nlohmann::json>{venice::tools::function("f", "d", schema)};
 //     r.tools->push_back(nlohmann::json::parse(R"({"type":"web_search"})"));
 //     (*r.tools)[0]["function"]["strict"] = true;   // or any unmodeled sub-key
+//
+// The element type is spelled out in that first line because it has to be:
+// `r.tools = {venice::tools::function("f")}` is an *ambiguous overload* and does
+// not compile — a braced list can match optional's converting assignment, its
+// nullopt_t overload, and both copy and move assignment at once. Every call site
+// in this repo already used the explicit form, which is exactly why the suite
+// stayed green while this comment did not compile (VC-08).
 //
 // which is also why `strict` is not a parameter below: Venice documents it on
 // response_format.json_schema, not on tools, and a parameter for an undocumented

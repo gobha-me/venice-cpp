@@ -206,19 +206,27 @@ auto tools_report(const venice::Client& client, std::string_view model) -> int {
     return EXIT_FAILURE;
   }
 
-  const auto calls = first->message && first->message->tool_calls ? first->message->tool_calls->size() : 0;
+  // Borrowed, not copied, and it outlives every use below — `first` is alive to
+  // the end of the function. nullptr covers three different absences at once: no
+  // message, no tool_calls, or an engaged-but-empty list, and that last one is
+  // why the count rather than the optional decides. front() on an empty vector
+  // would be UB, and a gateway echoing "tool_calls": [] is not far-fetched.
+  const auto* calls = first->message && first->message->tool_calls
+                          ? &*first->message->tool_calls
+                          : nullptr;
+  const auto count = calls != nullptr ? calls->size() : 0;
+
   std::cerr << "\n-- leg 1: what came back --\n"
             << "finish_reason      : " << first->finish_reason << '\n'
-            << "tool calls         : " << calls;
-  if (calls == 0)
+            << "tool calls         : " << count;
+  if (count == 0) {
     std::cerr << "   <-- ZERO: the request was accepted but nothing was called."
                  " Either the model declined, or `tools` is not reaching it\n";
-  else
-    std::cerr << '\n';
+    return EXIT_SUCCESS;
+  }
+  std::cerr << '\n';
 
-  if (calls == 0) return EXIT_SUCCESS;
-
-  const auto& call = first->message->tool_calls->front();
+  const auto& call = calls->front();
   std::cerr << "id / name          : " << call.id << " / " << call.name << '\n'
             << "arguments          : " << call.arguments << '\n';
   if (const auto parsed = call.parsed_arguments(); !parsed)
