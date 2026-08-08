@@ -48,11 +48,8 @@ have since landed there as CT-14.
    is recoverable rather than lossy.
 2. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
    Both foundations are proven.
-3. **VC-08 (#9), request-side tool calling** — `ChatRequest::tools`,
-   `tool_choice`, `parallel_tool_calls` and the function-spec builders. The
-   response-side data model (`ToolCall`, `Message::tool_calls`, the streaming
-   fragment merge) already landed in VC-05, because the accumulator could not be
-   specified without it.
+3. **A live capture of a tool call**, the VC-08 half of the same gap.
+   `venice-cpp --tools` runs it in two legs; see the VC-08 entry below.
 4. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
    embeddings, characters, retries/backoff, async). Driven by real use, not
    speculatively.
@@ -311,6 +308,67 @@ untouched.
 The wire shapes come from Venice's published docs, **not a capture** — there was
 no `VENICE_API_KEY` in the implementing environment. `venice-cpp --stream` is
 the live check; see "Next up".
+
+**VC-08 (#9, request-side tool calling) is done** — see v0.9.0, and it closes the
+epic. `ChatRequest` gained `tools`, `tool_choice` and `parallel_tool_calls` plus
+`venice::tools::` and `venice::tool_choice::` builders. Purely additive: the
+`kBaseline` body in `test/02request/` is byte-identical and untouched, which is
+the acceptance criterion the whole ticket reduces to. Stages 2 and 3 of the epic
+had already landed in VC-05/VC-14, because the accumulator could not be specified
+without them.
+
+Four things are worth knowing, three of them measured rather than reasoned:
+
+- **`tools` holds raw json *elements*, not a typed `Tool`.** The tempting design
+  mirrors `ToolCall` 250 lines up — flat members, a `to_json` re-nesting under
+  `"function"` — and it fails the way an enum fails: it hardcodes one *shape*,
+  and emits `{"type":"web_search","function":{"name":""}}` the day Venice accepts
+  an entry that is not a function. `ToolCall` may nest unconditionally because it
+  re-serializes what the server *sent*; `tools` is caller-authored. It also
+  breaks the escape hatch rather than omitting it — a typed element leaves only
+  `extra["tools"]`, which *loses* whenever `tools` is engaged, so the hatch's
+  behaviour would flip on an unrelated field. The container stays typed so
+  engaged-but-empty still emits `[]`.
+
+- **A comment this repo had trusted for four releases was wrong, and finding it
+  cost one break that came back green.** `response_format::json_schema` carried
+  "an array-valued `schema` makes the outer initializer-list ambiguous and
+  nlohmann reads the whole thing as an array", and `test/02request/` had a case
+  claiming to pin it. Rebuilding `json_schema` as a single brace-init left all
+  115 cases green; six further spellings were then measured on the pinned 3.11.3
+  — nested one-shot, array-valued, runtime-variable, inline two-string arrays —
+  and every one produced the correct object. The real hazard is one level down
+  and is about *scalars*: `nlohmann::json{"auto"}` is `["auto"]` while
+  `nlohmann::json("auto")` is `"auto"`, both compile, and only a type assertion
+  catches it. Field-by-field assignment stays because it does not depend on
+  nlohmann's init-list heuristic; the citation for it was corrected in both
+  places, and the old test's claim was rewritten to say what it actually checks.
+  This is the third time here that "confirm the test *could* see it" has paid,
+  after VC-06's SIGPIPE fixture and VC-05's CRLF case.
+
+- **`if (*parallel_tool_calls)` is worse than the wrong answer it looks like.**
+  The bug an `optional<bool>` invites is treating `= false` as unset — and false
+  is the interesting value, set precisely when an agent loop cannot run two calls
+  at once. But dereferencing the *unset* case is UB, so breaking that one line
+  reddened seven cases including the baseline, and the red set varied between
+  runs. The guard is the same `if (opt)` the penalties case has pinned since
+  VC-02.
+
+- **Nothing tool-shaped is validated, and `Message::role` is why.** Refusing an
+  empty tool name looks like it belongs beside "model is empty" — both are
+  representable in JSON and refused anyway. But `Client::validate` checks
+  `messages` for emptiness and never *enters* it, so a request carrying
+  `{Message{}}` already sails through on a guaranteed 400. Guarding
+  `tools[i].name` while ignoring `messages[i].role` is a coin flip, not a line;
+  and the server's 400 names the offending entry, which is the property the
+  non-finite sweep has and this would not. Pinned in `test/03guards/` as a
+  decision, next to the identical `extra` boundary.
+
+Eight breaks were run, each reverted; seven went red where intended and the
+eighth is the finding above. The wire shapes come from Venice's published docs,
+**not a capture** — still no `VENICE_API_KEY` in the implementing environment.
+`venice-cpp --tools` is the live check, in two legs, and only the second (answer
+the call, send the history back) proves the turn is one Venice will continue.
 
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.

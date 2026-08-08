@@ -96,7 +96,31 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   because a bound hardcoded here goes stale when Venice widens it. The guard
   covers modeled fields only; `extra` is passthrough and is not walked. The
   non-finite sweep runs *first*, which is what makes the guard's passing path
-  testable offline — see `test/03guards/`.
+  testable offline — see `test/03guards/`. `tools` is not walked either (VC-08),
+  and that is the same decision rather than a new one: `messages` is checked for
+  emptiness and never *entered*, so `Message::role` is already unvalidated, and
+  guarding `tools[i].name` while ignoring `messages[i].role` would be a coin flip
+  rather than a line. The server's 400 names the offending tool entry, which is
+  the property the non-finite sweep has and this would not.
+- **Caller-authored polymorphic fields are raw json with builders, never a typed
+  struct.** `response_format`, `tool_choice`, and the *elements* of `tools` are
+  all `nlohmann::json`. The recurring temptation is a `Tool` struct mirroring
+  `ToolCall` — flat members, a `to_json` that re-nests under `"function"`. It
+  hardcodes a *shape* set the way an enum hardcodes a value set, and would emit
+  `{"type":"web_search","function":{"name":""}}` the day Venice accepts a tool
+  entry that is not a function. `ToolCall` may nest unconditionally because it
+  re-serializes what the server *sent*. It would also break the escape hatch
+  rather than merely omit it: a typed element leaves only `extra["tools"]`, which
+  *loses* whenever `tools` is engaged, so the hatch's behaviour would flip on an
+  unrelated field. The container stays typed
+  (`optional<vector<nlohmann::json>>`) so engaged-but-empty can emit `[]`.
+- **Braces build arrays, parentheses build scalars.** `nlohmann::json{"auto"}` is
+  `["auto"]`; `nlohmann::json("auto")` is `"auto"`. Both compile, so only an
+  `is_string()`-style assertion catches the wrong one. The *object* builders
+  assign field by field for readability and not because brace-init mis-parses
+  them — VC-08 measured six spellings on the pinned 3.11.3, including the
+  array-valued-schema case a comment had long blamed, and every one produced the
+  correct object. The style survived; its stated rationale did not.
 - **Response parsing: tolerant for listings, loud for everything else.**
   `venice::detail::opt_bool` / `opt_int` / `opt_i64` / `opt_double` /
   `opt_string` / `opt_object` / `opt_array` / `string_array` in `types.hpp` read
