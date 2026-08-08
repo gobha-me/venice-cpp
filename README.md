@@ -13,8 +13,15 @@ right bridge.
 
 ## Features (Phase 0)
 
-- **Chat completions** (`/chat/completions`) — non-streaming and streaming
-  (SSE via callback).
+- **Chat completions** (`/chat/completions`) — non-streaming, and streaming in
+  three forms: a content-text callback, or a `StreamAccumulator` you own that
+  assembles the reply and survives a cancel.
+- **A reply is a `Message`, and a `Message` is what you send.** The whole
+  assistant turn round-trips — `reasoning_content` (so a reasoning model's
+  thinking can be fed back), `tool_calls`, `tool_call_id`, `refusal`, multimodal
+  content parts — and every field can be individually **withheld**, because an
+  unset one is erased from the body rather than falling back to what the server
+  sent.
 - **Sampling and control parameters** — `temperature`, `top_p`, `max_tokens`,
   `stop`, `frequency_penalty`, `presence_penalty`, `seed`, `response_format`,
   plus a top-level `extra` passthrough for keys this struct doesn't model.
@@ -441,6 +448,17 @@ and a dirty worktree sets `dirty`, both exposed in the generated
 
 Phase 0 verified against the live API: chat (non-streaming + streaming),
 models list (105 text models, 299 across all modalities), token usage — the
-counts move as Venice's catalogue does. See `AGENTS.md` for contributor/agent
-conventions and the testing philosophy (test how it fails, not just the happy
-path).
+counts move as Venice's catalogue does.
+
+One caveat worth stating plainly: the **v0.8.0 wire shapes are documented, not
+measured**. Where `reasoning_content` sits, where `cached_tokens` is nested, how
+tool-call fragments are keyed — all of it came from Venice's published docs
+rather than a capture, because `/models` answers for any bearer token but chat
+does not, and the implementing environment had no key. Run
+`VENICE_API_KEY=... venice-cpp --stream "..."` to check it against the live API;
+if something disagrees, the fixture in `test/07stream/` is what needs
+correcting. `Message::raw`, `ChatResponse::raw` and `acc.chunks()` are why a
+wrong guess there is recoverable rather than lossy.
+
+See `AGENTS.md` for contributor/agent conventions and the testing philosophy
+(test how it fails, not just the happy path).
