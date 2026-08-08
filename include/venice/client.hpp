@@ -6,11 +6,17 @@
 // Errors:   std::expected<T, venice::Error>; the client never throws across
 //           its public API.
 //
-// Phase 0 surface (the ~20% everything else builds on):
-//   * chat(req)                -> expected<ChatResponse>   (non-streaming)
-//   * chat_stream(req, on_token) -> expected<ChatResponse> (SSE via callback)
-//   * models()                 -> expected<vector<Model>>
-//   * balance()                -> expected<json>           (rate-limit/balance)
+// Surface:
+//   * chat(req)                     -> expected<ChatResponse>   (non-streaming)
+//   * chat_stream(req, on_token)    -> expected<ChatResponse>   (content text)
+//   * chat_stream(req, acc[, on_delta])                         (structured)
+//   * models()                      -> expected<vector<Model>>
+//   * balance()                     -> expected<json>           (rate-limit/balance)
+//
+// A ChatResponse carries the whole assistant turn as a Message, so a reply can
+// be appended to the next request's messages and nothing is lost — thinking and
+// tool calls included (VC-05/VC-14). The streaming forms assemble into the same
+// Message; see venice/stream.hpp.
 //
 // Every one of them takes a trailing venice::RequestOptions (defaulted) for
 // per-call timeouts and cancellation — see venice/options.hpp (VC-06).

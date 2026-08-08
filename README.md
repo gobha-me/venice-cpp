@@ -71,11 +71,20 @@ if (auto res = client.chat(req)) {
   // res.error().kind, .status, .message, .body
 }
 
-// streaming (SSE): on_token returns false to cancel early
+// streaming (SSE): on_token returns false to stop early
 auto s = client.chat_stream(req, [](std::string_view delta) {
   // print/handle delta
   return true;
 });
+
+// streaming, structured: you supply the storage, so nothing is dropped
+venice::StreamAccumulator acc;
+auto s2 = client.chat_stream(req, acc, [](const venice::StreamDelta& d) {
+  if (d.reasoning_content) render_thinking(*d.reasoning_content);
+  if (d.content)           render_answer(*d.content);
+  return true;
+});
+// acc.message() is the whole assistant turn; acc.chunks() is every frame verbatim
 ```
 
 Whether a request streams is decided by the method you call, not by a field on
@@ -232,6 +241,87 @@ arrive as a socket that stopped working, but a dead network is a fault to report
 or retry and a cancellation is your own decision handed back — collapsing them
 would leave the difference reachable only by parsing message text.
 
+**Cancelling loses the response, not the data.** A cancelled `chat_stream` still
+returns no `ChatResponse` — that part is deliberate — but if you passed a
+`StreamAccumulator`, it is *your* object and it still holds every token, every
+thought and every verbatim chunk that arrived before you gave up:
+
+```cpp
+venice::StreamAccumulator acc;
+auto res = client.chat_stream(req, acc, {.cancel = &token});
+
+if (!res && res.error().kind == venice::ErrorKind::Cancelled) {
+  auto partial = acc.message();   // everything that did arrive
+}
+```
+
+### Streaming structure, and feeding it back
+
+`chat_stream` has three forms. The `std::string_view` one is unchanged and is
+now a thin adapter; the other two take a `StreamAccumulator` you own:
+
+```cpp
+chat_stream(req, on_token,      opts = {})   // content text only
+chat_stream(req, acc,           opts = {})   // accumulate, no callback
+chat_stream(req, acc, on_delta, opts = {})   // accumulate + observe
+```
+
+There is no callback-only structured overload on purpose. Beside the
+`string_view` one it would make `chat_stream(req, [](auto d){ ... })` ambiguous —
+a source break for code that compiles today — and requiring the accumulator is
+what guarantees you cannot ask for the rich stream and then lose it.
+
+A `StreamDelta` is one SSE frame: `content`, `reasoning_content`, `role`,
+`finish_reason`, `refusal`, tool-call fragments, `usage`, and `chunk` pointing at
+the whole verbatim frame. Every field is optional because a frame carries some
+of them, and it is a struct rather than a variant so that a future field is
+additive instead of an ABI break. **It is a view** — valid only for the duration
+of the callback. Anything worth keeping is already in the accumulator.
+
+### Round-tripping a turn
+
+A reply is a `Message`, and a `Message` is what you send. That is the whole
+contract: nothing received is discarded, anything received can be sent back —
+and anything received can be **withheld**.
+
+```cpp
+auto res = client.chat(req);
+
+req.messages.push_back(*res->message);          // replay the turn verbatim,
+                                                // thinking and tool calls included
+req.messages.push_back(venice::Message::tool("call_a", R"({"temp_f":68})"));
+```
+
+Some reasoning models need the prior turn's thinking replayed; others must not
+see it. Both are one line, because every modeled field is optional and an unset
+one is **erased** from the body rather than falling back to what the server
+originally sent:
+
+```cpp
+auto turn = *res->message;
+turn.reasoning_content.reset();   // this turn goes without it
+turn.tool_calls.reset();          // and does not re-issue an executed call
+```
+
+That erase-on-clear rule is the reason `Message` carries two escape hatches
+where every other type here carries one:
+
+| field | direction | contract |
+| --- | --- | --- |
+| `raw` | response-side | the verbatim server object, a superset. **Never serialized.** |
+| `extra` | request-side | additive seed for the body; modeled fields win. |
+
+Collapsing them into a single `raw` that also seeds serialization looks
+attractive — a parsed reply would round-trip for free — but it honours
+`turn.content = "edited"` while silently ignoring `turn.content.reset()`, which
+resends the answer you just redacted. Verbatim replay of unmodeled keys is still
+one deliberate line: `turn.extra = turn.raw;`
+
+`content` is `std::optional<nlohmann::json>` rather than a string, because the
+wire has four states and only that type holds all of them: absent (`nullopt`),
+`null` (`= nullptr`), text, and a multimodal parts array. `text()` flattens it
+when you just want the words.
+
 ### CMake
 
 However you acquire venice-cpp, the line you write is the same:
@@ -252,7 +342,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.7.0)
+  GIT_TAG        v0.8.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

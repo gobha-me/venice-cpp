@@ -44,6 +44,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <expected>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -52,6 +53,7 @@
 #include <vector>
 
 #include <httplib.h>
+#include <nlohmann/json.hpp>
 
 #include <venice/venice.hpp>
 
@@ -447,6 +449,80 @@ TEST_CASE("a cancelled call leaves the signal mask and disposition as it found t
   REQUIRE(action_after.sa_handler == action_before.sa_handler);
 }
 #endif
+
+// ── §7b a cancelled stream loses the response, not the data (VC-05) ───────
+//
+// The payoff of making StreamAccumulator the caller's object rather than a
+// local inside chat_stream, and the one thing that needs a real socket: the
+// frames have to actually arrive, mid-flight, before the cancel lands.
+//
+// VC-06's contract is unchanged and still right — a cancelled call returns
+// ErrorKind::Cancelled and no response, because a caller who has stopped
+// waiting should not have to tell "the text so far" from "the answer". What
+// changes is that abandoning the call no longer *destroys* what arrived. The
+// return value says "you abandoned this"; the accumulator still holds every
+// token and every verbatim chunk.
+//
+// The server writes two content frames and then stalls, so the cancel fires
+// during the quiet gap — exactly the shape on_token alone cannot escape, which
+// is why #7 existed.
+
+TEST_CASE("a cancelled stream leaves the accumulator holding what arrived",
+          "[transport][cancel][stream]") {
+  const TestServer server;
+  const Client client{"not-a-real-key", server.base_url()};
+
+  venice::CancelToken token;
+  venice::StreamAccumulator acc;
+
+  std::expected<venice::ChatResponse, venice::Error> res;
+  const auto elapsed = timed([&] {
+    res = client.chat_stream(minimal_chat(), acc,
+                             [&](const venice::StreamDelta&) {
+                               // Cancel once both frames are in. The delta is
+                               // already accumulated by the time this runs, so
+                               // the frame that triggered the cancel is kept.
+                               if (acc.message().text() == "hello") token.cancel();
+                               return true;
+                             },
+                             {.cancel = &token});
+  });
+
+  // The call reports the abandonment, and reports it as Cancelled rather than
+  // Network — the socket was shut down, so it *arrives* as a transport failure.
+  REQUIRE_FALSE(res.has_value());
+  REQUIRE(res.error().kind == ErrorKind::Cancelled);
+  REQUIRE(elapsed < kPromptly);
+
+  // ...and none of that cost the caller the two frames that did arrive.
+  REQUIRE(acc.message().text() == "hello");
+  REQUIRE(acc.chunks().size() == TestServer::kFrames);
+  REQUIRE_FALSE(acc.empty());
+}
+
+// The same object, on the path that is not a cancel: a stream that completes
+// normally must put the same thing in the accumulator as it returns.
+TEST_CASE("the accumulator and the returned response agree", "[transport][stream]") {
+  const TestServer server;
+  const Client client{"not-a-real-key", server.base_url()};
+
+  venice::CancelToken token;
+  venice::StreamAccumulator acc;
+
+  // The endpoint stalls after its two frames, so stop at the second one rather
+  // than waiting the handler out. An on_delta false is a deliberate early stop:
+  // partial success, response returned.
+  const auto res = client.chat_stream(minimal_chat(), acc,
+                                      [&](const venice::StreamDelta&) {
+                                        return acc.message().text() != "hello";
+                                      },
+                                      {.cancel = &token});
+
+  REQUIRE(res.has_value());
+  REQUIRE(res->content == "hello");
+  REQUIRE(res->content == acc.message().text());
+  REQUIRE(nlohmann::json(*res->message) == nlohmann::json(acc.message()));
+}
 
 // ── §8 happy path: defaults still work ────────────────────────────────────
 //

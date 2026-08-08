@@ -129,6 +129,39 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   request-side `extra` on `ChatRequest` / `VeniceParameters` is the opposite
   contract (additive, merged into the wire body, modeled fields win), so it
   keeps the opposite name.
+- **`Message` carries BOTH `raw` and `extra`, and one field cannot serve both.**
+  It is the only struct here that legitimately travels in both directions, so it
+  gets both contracts: `raw` is the verbatim server object and is **never
+  serialized**; `extra` is the additive request-side seed. Collapsing them into
+  one `raw` that also seeds `to_json` makes a parsed reply round-trip for free
+  and is why it keeps getting proposed — it is also silently wrong. It honours
+  `m.content = "edited"` but ignores `m.content.reset()`, so a caller redacting
+  history resends the answer, and a caller clearing an executed `tool_calls`
+  re-issues the call (a 400 for an unanswered tool_call, or an infinite agent
+  loop). Measured on the same redacted turn: seed-from-raw emitted the full
+  answer and the tool call, assign-or-erase emitted `{"role":"assistant"}`. It
+  would also restore the deep-copy-per-request regression VC-11 removed, since
+  `j["messages"] = messages` would then copy every message's verbatim server
+  body on every call. Verbatim replay stays available as one deliberate line:
+  `m.extra = m.raw;`
+- **The merge rule is assign-or-ERASE, and `Message::extra` does not shadow.**
+  `Message::to_json` seeds from `extra`, then for every modeled key either
+  assigns it (engaged) or **erases** it (disengaged). The erase branch is what
+  makes the merge total and mutation-honest; without it two fields have the same
+  bug as one. Note this deliberately does *not* inherit `ChatRequest::extra`'s
+  tolerance for a same-named key: that one is caller-authored, so shadowing is
+  arguably the caller's own request, while `Message::extra` will routinely be
+  seeded from a response, which makes shadowing the common case rather than a
+  pathology.
+- **`Message::from_json` is total; `ChatResponse::from_json_body` is loud. Do
+  not unify them.** A message sub-object's shape legitimately varies — content
+  string/null/absent/parts-array, tool_calls present or not — and the old
+  two-key parse threw `type_error.302` on
+  `{"role":"assistant","content":null,"tool_calls":[...]}`, the canonical
+  tool-call reply, so `Message` was not usable as a parse target at all. A
+  completion body's *top-level* shape is a contract: `j.at("choices")` must keep
+  throwing, because that is what `Client::chat`'s try/catch turns into
+  `ErrorKind::Parse` and `test/01client/` pins it.
 - **Usage/cost metadata:** keep cache buckets distinct (cached vs uncached
   tokens price differently — see venice-cli #75). Model *pricing* has two cache
   buckets (`cache_input` read, `cache_write` write) where `Usage` reports one,
