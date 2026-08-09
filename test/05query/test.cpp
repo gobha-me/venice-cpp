@@ -1,10 +1,13 @@
 // URL query construction — offline, no API key or network.
 //
-// Charter: venice::detail::percent_encode and venice::detail::with_query, the
-// request half of Client::models's type filter (VC-13, #19). The response half
-// — what a /models body parses into — is test/04models/ and is not touched
-// here; request *bodies* are test/02request/; precondition guards are
-// test/03guards/. Nothing in this file builds a Model or opens a socket.
+// Charter: venice::detail::percent_encode and venice::detail::with_query — the
+// request half of Client::models's type filter (VC-13, #19) and, since VC-04
+// (#5), of Client::characters's query too. The response half — what a /models
+// body parses into — is test/04models/ and is not touched here; a
+// CharacterQuery's flattening is test/08characters/ because the field set is
+// the character endpoint's, not the encoder's; request *bodies* are
+// test/02request/; precondition guards are test/03guards/. Nothing in this file
+// builds a Model or opens a socket.
 //
 // These are free functions at namespace scope rather than Client members
 // precisely so this file can exist. A private path helper would be reachable
@@ -18,6 +21,8 @@
 
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <venice/venice.hpp>
 
@@ -175,4 +180,56 @@ TEST_CASE("with_query builds the /models endpoints", "[query]") {
   REQUIRE(with_query("/models", {{"type", ""}}) == "/models");
   REQUIRE(with_query("/models", {{"type", "all"}}) == "/models?type=all");
   REQUIRE(with_query("/models", {{"type", "image"}}) == "/models?type=image");
+}
+
+// ── §5 the owning overload (VC-04, #5) ────────────────────────────────────
+//
+// Client::characters builds its parameters at runtime, so it cannot use the
+// initializer_list form: a limit becomes text only via std::to_string, and a
+// QueryParam holding a string_view into that temporary dangles before the
+// request is sent. The second overload takes owned strings instead.
+//
+// This section is last rather than first because §0-§4 are the contract the
+// *older* overload must keep — the refactor that introduced append_param moved
+// their shared body, and their staying green is the assertion that the skip did
+// not fork into two copies that can drift. Failure cases first within the
+// section, as everywhere else.
+
+TEST_CASE("the owning with_query skips empty values too", "[query][failure]") {
+  using Params = std::vector<std::pair<std::string, std::string>>;
+
+  SECTION("an empty list is inert — this is what characters() sends by default") {
+    REQUIRE(with_query("/characters", Params{}) == "/characters");
+  }
+
+  SECTION("a skipped leading pair does not consume the '?'") {
+    const Params p{{"unset", ""}, {"limit", "100"}};
+    REQUIRE(with_query("/characters", p) == "/characters?limit=100");
+  }
+
+  SECTION("a skipped trailing pair leaves no dangling '&'") {
+    const Params p{{"limit", "100"}, {"unset", ""}};
+    REQUIRE(with_query("/characters", p) == "/characters?limit=100");
+  }
+}
+
+TEST_CASE("the owning with_query encodes and joins like the other one", "[query]") {
+  using Params = std::vector<std::pair<std::string, std::string>>;
+
+  SECTION("both halves are encoded") {
+    const Params p{{"search", "a b&c"}};
+    REQUIRE(with_query("/characters", p) == "/characters?search=a%20b%26c");
+  }
+
+  SECTION("multiple pairs join with '&', in the order given") {
+    const Params p{{"search", "alan"}, {"limit", "100"}, {"offset", "50"}};
+    REQUIRE(with_query("/characters", p) == "/characters?search=alan&limit=100&offset=50");
+  }
+
+  SECTION("the two overloads agree on the same pairs") {
+    // The one assertion that would catch append_param being applied by only
+    // one of them.
+    const Params p{{"type", "image"}, {"page", "2"}};
+    REQUIRE(with_query("/models", p) == with_query("/models", {{"type", "image"}, {"page", "2"}}));
+  }
 }

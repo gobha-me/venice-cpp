@@ -11,6 +11,7 @@
 //   * chat_stream(req, on_token)    -> expected<ChatResponse>   (content text)
 //   * chat_stream(req, acc[, on_delta])                         (structured)
 //   * models()                      -> expected<vector<Model>>
+//   * characters()                  -> expected<vector<Character>>
 //   * balance()                     -> expected<json>           (rate-limit/balance)
 //
 // A ChatResponse carries the whole assistant turn as a Message, so a reply can
@@ -22,7 +23,7 @@
 // per-call timeouts and cancellation — see venice/options.hpp (VC-06).
 //
 // Not in Phase 0 (later phases, fed by real use): image/audio/video, TTS,
-// embeddings, characters, retries/backoff, async.
+// embeddings, retries/backoff, async.
 
 #include <array>
 #include <cmath>
@@ -30,6 +31,7 @@
 #include <functional>
 #include <initializer_list>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -116,18 +118,42 @@ using QueryParam = std::pair<std::string_view, std::string_view>;
 // Keys are encoded as well as values. No caller passes a key that needs it, and
 // that is precisely why it happens here — the alternative is an assumption
 // waiting for the first caller who does.
+//
+// The skip lives here, in one function, rather than in each with_query overload
+// below. Two copies of it is exactly the drift that would let one endpoint keep
+// the byte-identical guarantee while another quietly loses it.
+inline void append_param(std::string& out, char& sep, std::string_view key,
+                         std::string_view value) {
+  if (value.empty()) return;
+  out.push_back(sep);
+  sep = '&';
+  out += percent_encode(key);
+  out.push_back('=');
+  out += percent_encode(value);
+}
+
 [[nodiscard]] inline auto with_query(std::string_view path,
                                      std::initializer_list<QueryParam> params) -> std::string {
   std::string out{path};
   char sep = '?';
-  for (const auto& [key, value] : params) {
-    if (value.empty()) continue;
-    out.push_back(sep);
-    sep = '&';
-    out += percent_encode(key);
-    out.push_back('=');
-    out += percent_encode(value);
-  }
+  for (const auto& [key, value] : params) append_param(out, sep, key, value);
+  return out;
+}
+
+// The owning overload, for a query built at runtime rather than spelled out at
+// the call site (VC-04, #5: venice::character_query_params).
+//
+// It takes owned strings and not QueryParam for a lifetime reason, not a
+// stylistic one: a CharacterQuery's limit becomes a string only via
+// std::to_string, and a QueryParam built from that temporary holds a
+// string_view into a buffer that is already gone. Making the caller own the
+// values is what makes that unrepresentable.
+[[nodiscard]] inline auto with_query(std::string_view path,
+                                     std::span<const std::pair<std::string, std::string>> params)
+    -> std::string {
+  std::string out{path};
+  char sep = '?';
+  for (const auto& [key, value] : params) append_param(out, sep, key, value);
   return out;
 }
 
@@ -341,6 +367,50 @@ class Client {
       return models_from_json_body(*res);
     } catch (const std::exception& e) {
       return std::unexpected{Error{ErrorKind::Parse, 0, std::string{"models parse: "} + e.what(), res->dump()}};
+    }
+  }
+
+  // ── characters ────────────────────────────────────────────────────────
+  //
+  // The discovery half of `venice_parameters.character_slug` (VC-04, #5). Same
+  // division of labour as models(): this is the transport, the parse is
+  // venice::characters_from_json_body and the query build is
+  // venice::character_query_params, both free so test/08characters/ can reach
+  // the whole failure matrix without a socket.
+  //
+  // A default-constructed query sends the bare /characters, byte-identical to
+  // what a no-argument call would have sent if this type did not exist.
+  //
+  // **The endpoint pages, and the default page is 50.** It caps at 100 and the
+  // response carries no total, so listing everything means asking for the next
+  // page until a short one comes back:
+  //
+  //   venice::CharacterQuery q;
+  //   q.limit = 100;
+  //   for (q.offset = 0; ; *q.offset += 100) {
+  //     const auto page = client.characters(q);
+  //     if (!page || page->size() < 100) break;
+  //   }
+  //
+  // Not wrapped in an all-pages helper here: that loop needs a policy for a
+  // failed page mid-walk — abandon, retry, or return what it has — and every
+  // answer is wrong for someone. Retries are a later phase (AGENTS.md).
+  //
+  // Unlike /models, this endpoint needs a real key: it answers 402 to an
+  // unauthenticated request and 401 to a junk bearer, both measured. Venice
+  // documents it as a preview API that may change, which is why Character::raw
+  // matters more here than elsewhere.
+  [[nodiscard]] auto characters(const CharacterQuery& query = {},
+                                const RequestOptions& opts = {}) const
+      -> std::expected<std::vector<Character>, Error> {
+    const auto params = character_query_params(query);
+    auto res = get_json(detail::with_query("/characters", params), opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      return characters_from_json_body(*res);
+    } catch (const std::exception& e) {
+      return std::unexpected{
+          Error{ErrorKind::Parse, 0, std::string{"characters parse: "} + e.what(), res->dump()}};
     }
   }
 

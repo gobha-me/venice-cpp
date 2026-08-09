@@ -69,6 +69,72 @@ auto list_models(const venice::Client& client, std::string_view type) -> int {
   return EXIT_SUCCESS;
 }
 
+// `--characters [search]`: the live check VC-04 could not run offline, and the
+// reason its PR says "documented, not captured".
+//
+// test/08characters/ pins the shape Venice's OpenAPI document describes, but
+// nothing there has been on a wire: unlike /models, this endpoint answers 402
+// unauthenticated and 401 to a junk bearer, so no fixture could be captured
+// without a real key. The columns below are exactly the fields a TUI picker
+// would branch on, and an absent one prints '?' — so a key that parses in the
+// fixture and not in reality shows up as a blank column rather than passing
+// quietly. If one disagrees, the fixture is what needs correcting;
+// Character::raw is why that is recoverable.
+//
+// Two things this leg is specifically watching for, both of them guesses until
+// it runs:
+//
+//   * that `slug` really is always present, since the parse skips entries
+//     without one — a listing that comes back short is that guess being wrong.
+//   * that the page really is 50 by default. The count printed below against a
+//     `--characters` with no search is the whole evidence for the pagination
+//     paragraph in client.hpp.
+//
+// The optional argument is a search term, which is also the cheapest way to see
+// that a query parameter survives encoding: `--characters "alan watts"`.
+auto list_characters(const venice::Client& client, std::string_view search) -> int {
+  venice::CharacterQuery q;
+  if (!search.empty()) q.search = std::string{search};
+
+  const auto res = client.characters(q);
+  if (!res) {
+    std::cerr << "characters failed [" << venice::to_string(res.error().kind) << "] "
+              << res.error().message << '\n';
+    return EXIT_FAILURE;
+  }
+
+  std::cout << res->size() << " characters";
+  if (!search.empty()) std::cout << " (search=" << search << ')';
+  std::cout << '\n';
+  if (res->empty()) {
+    std::cout << "   <-- ZERO: either the account sees no characters, or every "
+                 "entry was skipped for want of a slug\n";
+  }
+
+  for (const auto& c : *res) {
+    std::cout << c.slug << "  model=";
+    if (c.model_id) std::cout << *c.model_id;
+    else std::cout << '?';
+
+    std::cout << "  web=";
+    if (c.web_enabled) std::cout << (*c.web_enabled ? "yes" : "no");
+    else std::cout << '?';
+
+    std::cout << "  adult=";
+    if (c.adult) std::cout << (*c.adult ? "yes" : "no");
+    else std::cout << '?';
+
+    std::cout << "  rating=";
+    if (c.stats && c.stats->average_rating) std::cout << *c.stats->average_rating;
+    else std::cout << '?';
+
+    std::cout << "  tags=" << c.tags.size();
+    if (c.name) std::cout << "  (" << *c.name << ')';
+    std::cout << '\n';
+  }
+  return EXIT_SUCCESS;
+}
+
 // The live check VC-05 could not run offline, and the reason the PR says
 // "documented, not measured".
 //
@@ -262,6 +328,8 @@ auto main(int argc, char** argv) -> int {
   const venice::Client client{key};
   if (argc > 1 && std::string_view{argv[1]} == "--models")
     return list_models(client, argc > 2 ? argv[2] : "");
+  if (argc > 1 && std::string_view{argv[1]} == "--characters")
+    return list_characters(client, argc > 2 ? argv[2] : "");
   if (argc > 1 && std::string_view{argv[1]} == "--stream")
     return stream_report(client, argc > 2 ? argv[2]
                                           : "Think step by step: what is 17 * 23?");
