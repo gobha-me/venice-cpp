@@ -62,7 +62,7 @@ have since landed there as CT-14.
 5. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
    embeddings, retries/backoff, async). Driven by real use, not
    speculatively.
-4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
+6. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
 
 **VC-07 (#8, install/export) is done** — see v0.2.0. Upstream CT-04 landed the
@@ -477,14 +477,14 @@ Six things are worth knowing, four of them measured rather than reasoned:
   and was left alone: fixing it belongs to a change that can test it.
 
 Three things were left out on purpose. `GET /characters/{slug}` is the same
-struct behind a different path and belongs to whoever needs a single fetch. The
+struct behind a different path and is filed as VC-16 (#26). The
 README's FetchContent `GIT_TAG` was bumped by hand again, which is the drive-by
 VC-12 (#17) exists to abolish. And **402 still maps to `ErrorKind::Http`, not
 `Auth`** — this endpoint answers 402 to a credential-less call, and
 `kind_for_status` only maps 401/403, so a consumer branching on `Auth` to
 re-prompt will not fire. Widening that mapping changes the error model for every
-endpoint and is filed separately rather than smuggled into an endpoint PR;
-`client.hpp` says so where a caller will read it.
+endpoint, so it is VC-15 (#25) rather than something smuggled into an endpoint
+PR; `client.hpp` says so where a caller will read it.
 
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.
