@@ -760,19 +760,38 @@ struct Usage {
     if (j.contains("completion_tokens")) j.at("completion_tokens").get_to(u.completion_tokens);
     if (j.contains("total_tokens")) j.at("total_tokens").get_to(u.total_tokens);
 
-    // Read flat first, then let the nested location override. Both are honoured
-    // because the flat key is what this library has always read and
-    // test/01client/ pins it; nested wins on disagreement because
-    // prompt_tokens_details.cached_tokens is the OpenAI-canonical location and
-    // the flat one is the compatibility shim. Reading only the flat key — which
-    // is what every release through v0.7.0 did — very likely reported nullopt
-    // against real Venice for the whole life of the field.
+    // Read flat first, then let the nested location override; nested wins on
+    // disagreement because prompt_tokens_details.cached_tokens is the
+    // OpenAI-canonical location and the flat one is a compatibility shim.
+    //
+    // Both halves of that are now measured (VC-17, 21 captures on 2026-08-09 —
+    // `venice-cpp --usage`). The nested read is the one that earns its keep: 5
+    // of 7 model families send it, so reading only the flat key, which is what
+    // every release through v0.7.0 did, really did report nullopt against real
+    // Venice for the whole life of the field. The flat key itself has **never
+    // been seen**. What Venice sends flat, beside the nested one and never
+    // instead of it, is `cache_read_input_tokens` — a different key, carrying
+    // the same number in every capture, which is why it stays untyped rather
+    // than becoming a third read of one fact.
     if (j.contains("cached_tokens")) u.cached_tokens = j.at("cached_tokens").get<int>();
     if (const auto* pd = detail::opt_object(j, "prompt_tokens_details"))
       if (pd->contains("cached_tokens")) u.cached_tokens = pd->at("cached_tokens").get<int>();
 
+    // opt_object here is intent, not protection, and that was measured rather
+    // than assumed: swapping it for a plain `contains` leaves the whole suite
+    // green, because nlohmann's contains() answers false for a null or an array
+    // just as the predicate does. What is load bearing is that *some* guard
+    // exists — dropping both and reaching straight through turns the null and
+    // empty-object shapes below red. Keep a guard; which one is style.
     if (const auto* cd = detail::opt_object(j, "completion_tokens_details"))
       if (cd->contains("reasoning_tokens")) u.reasoning_tokens = cd->at("reasoning_tokens").get<int>();
+    // Both details objects are per-family, not universal: gemini-3-6-flash and
+    // qwen3-235b-a22b-thinking-2507 send neither, and both *claim*
+    // supportsReasoning. So an absent reasoning_tokens is not evidence of a
+    // parse bug, and #28 was filed believing it was — off a run against the
+    // first of those two. `venice-cpp --usage <id>` prints the verbatim object
+    // beside the parse, which is the only thing that separates the two cases.
+    //
     // completion_tokens_details also carries audio_tokens,
     // accepted_prediction_tokens and rejected_prediction_tokens. They ride in
     // ChatResponse::raw rather than growing this struct speculatively — this
