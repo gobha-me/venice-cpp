@@ -435,16 +435,21 @@ TEST_CASE("character query fields use the wire's own spelling", "[characters][qu
             "&categories=roleplay&categories=philosophy");
   }
 
-  SECTION("a value containing a comma stays one filter") {
-    // The case comma-joining could not express: joined, `{"a,b"}` and
-    // `{"a","b"}` are byte-identical on the wire, and the server's documented
-    // comma-splitting would turn one filter into two with nothing to say so.
+  SECTION("a value containing a comma is one parameter on the wire") {
+    // What this pins is the *client* half only: `{"a, b"}` produces one
+    // repetition and `{"a"," b"}` produces two, so the two are distinguishable
+    // in what we send. It deliberately does NOT claim the server treats them
+    // differently — measured 2026-08-09, it splits on commas inside a value
+    // too, so a comma-containing tag is inexpressible either way. An earlier
+    // version of this comment claimed the round-trip was preserved; it is not,
+    // and the CharacterQuery::tags note carries the numbers.
     CharacterQuery q;
     q.categories = {"science, fiction"};
     REQUIRE(query_string(q) == "/characters?categories=science%2C%20fiction");
 
     CharacterQuery two;
     two.categories = {"science", " fiction"};
+    REQUIRE(query_string(two) == "/characters?categories=science&categories=%20fiction");
     REQUIRE(query_string(two) != query_string(q));
   }
 

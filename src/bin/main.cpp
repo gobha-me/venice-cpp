@@ -163,8 +163,36 @@ auto list_characters(const venice::Client& client, std::string_view search) -> i
 // against a hand-written fixture; if one disagrees with the live API, the
 // fixture in test/07stream/ is what needs correcting.
 auto stream_report(const venice::Client& client, const std::string& prompt) -> int {
+  // The model is chosen from the live list by capability, not hardcoded. This
+  // leg used to name `deepseek-r1-671b` and by 2026-08-09 that model was gone
+  // from the catalogue, so the one command that settles VC-05 answered HTTP 404
+  // instead — a live check that cannot run is worse than no live check, because
+  // it looks like a failure of the thing under test. It is the same hazard the
+  // --models leg records about hardcoded *counts*, and a model id ages faster.
+  // Picking on supports_reasoning also gives that VC-03 flag a live use, the
+  // way tools_report does for supports_function_calling.
+  const auto models = client.models("text");
+  if (!models) {
+    std::cerr << "models failed [" << venice::to_string(models.error().kind) << "] "
+              << models.error().message << '\n';
+    return EXIT_FAILURE;
+  }
+  std::string chosen;
+  for (const auto& m : *models)
+    if (m.capabilities && m.capabilities->supports_reasoning &&
+        *m.capabilities->supports_reasoning) {
+      chosen = m.id;
+      break;
+    }
+  if (chosen.empty()) {
+    std::cerr << "no text model reported supports_reasoning -- either none does, or that"
+                 " flag is not where Model expects it\n";
+    return EXIT_FAILURE;
+  }
+  std::cerr << "(streaming from " << chosen << ")\n";
+
   venice::ChatRequest req;
-  req.model = "deepseek-r1-671b";  // a reasoning model, so thinking has somewhere to come from
+  req.model = chosen;  // a reasoning model, so thinking has somewhere to come from
   req.messages = {venice::Message::user(prompt)};
 
   venice::StreamAccumulator acc;
