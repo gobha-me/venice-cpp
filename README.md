@@ -269,8 +269,12 @@ each answer is wrong for somebody. The one above abandons; yours may not want to
 one — the value set is Venice's (`featured`, `highestRating`,
 `highlyRated`, `highlyRatedAndRecent`, `imports`, `mostRecent`, `ratingCount`),
 and a list hardcoded here would refuse a valid value the day one is added.
-`tags`, `categories` and `model_id` each repeat their key once per element
-rather than comma-joining, so a value containing a comma stays one filter.
+`tags`, `categories` and `model_id` each repeat their key once per element —
+`tags=helpful&tags=productivity`, which the endpoint documents as the primary
+form and which is measured to mean OR rather than last-wins. Note what it does
+*not* buy you: the server also splits on commas inside a single value, so a tag
+containing a comma cannot be expressed by any spelling and is the endpoint's
+constraint rather than this client's.
 `CharacterQuery::extra` reaches any filter this struct does not model, and a
 modeled field that is set wins the key rather than sending it twice.
 
@@ -497,7 +501,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.10.0)
+  GIT_TAG        v0.10.1)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -598,8 +602,17 @@ Phase 0 verified against the live API: chat (non-streaming + streaming),
 models list (105 text models, 299 across all modalities), token usage — the
 counts move as Venice's catalogue does.
 
-One caveat worth stating plainly, and it now covers three releases: the
-**v0.8.0, v0.9.0 and v0.10.0 wire shapes are documented, not measured**. Where
+**All four smoke legs have now been run against the live API** (2026-08-09), so
+the "documented, not measured" caveat that covered v0.8.0 through v0.10.0 is
+retired. `--characters` confirmed every modeled key, its types and the 50-entry
+default page; `--stream` confirmed where `reasoning_content` sits and that the
+turn replays; `--tools` confirmed a tool call round-trips and is accepted back.
+Two things the runs opened rather than closed are filed as #28 (`Usage`'s nested
+detail objects are modeled but never sent) and #29 (a replayed tool turn is
+rejected by Gemini-family models, accepted by others).
+
+The original caveat, for the record: the
+**v0.8.0, v0.9.0 and v0.10.0 wire shapes were documented, not measured**. Where
 `reasoning_content` sits, where `cached_tokens` is nested, how tool-call
 fragments are keyed, how `tools` / `tool_choice` / `parallel_tool_calls` are
 spelled on the way out, and now what a `/characters` entry contains — none of it

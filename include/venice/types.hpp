@@ -1320,12 +1320,25 @@ struct CharacterQuery {
   std::optional<bool> is_web_enabled;
 
   // Each element is sent as its own repetition of the key —
-  // `?tags=helpful&tags=productivity`. The endpoint documents that form as the
-  // primary one and comma-joining as also accepted, and comma-joining is the
-  // one that cannot round-trip: a single tag containing a comma would arrive
-  // as two filters with nothing to distinguish it. The pair list
-  // character_query_params returns is already a multimap, so repetition costs
-  // nothing.
+  // `?tags=helpful&tags=productivity`, which the endpoint documents as the
+  // primary form and which was measured against the live API on 2026-08-09:
+  // repetition is honoured and means OR, not last-wins.
+  //
+  //   tags=Buddhism                 -> 2   {alan-watts, alan-watts-2}
+  //   tags=mythology                -> 2   {loki, talos}
+  //   tags=Buddhism&tags=mythology  -> 4   the union of both
+  //
+  // What that same run refuted, and it was this comment's original claim: that
+  // repetition is what lets a value containing a comma survive. It does not.
+  // `tags=Buddhism%2Cmythology` — one repetition, one percent-encoded comma —
+  // also returned 4, so the server splits on commas *inside* a value and a tag
+  // containing one cannot be expressed by any spelling this client could
+  // choose. That is the endpoint's behaviour, not the encoder's, and no
+  // comment here should promise otherwise.
+  //
+  // Repetition stays, on the two grounds that survived: it is the documented
+  // primary form, and it does not depend on the server's comma-splitting
+  // continuing to behave this way.
   std::vector<std::string> tags;
   std::vector<std::string> categories;
   std::vector<std::string> model_id;

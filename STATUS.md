@@ -16,8 +16,8 @@ AGENTS.md (which holds standing conventions, not state).
 - `models()` list with typed per-model metadata, filterable by modality
   (105 text / 299 all, fetched live), `balance()` rate-limit endpoint.
 - `characters()` list with typed per-character metadata and a `CharacterQuery`
-  carrying the endpoint's filters and its pagination (VC-04). Parsed offline
-  only — see the caveat in that entry below.
+  carrying the endpoint's filters and its pagination (VC-04). Verified live on
+  2026-08-09: every modeled key present, no unmodeled key, default page 50.
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   rate_limited/invalid_arg, each carrying status + raw body.
@@ -40,29 +40,28 @@ was blinded by any comment mentioning a package name. Both were upstream bugs an
 have since landed there as CT-14.
 
 ## Next up
-1. **A live capture of a streaming reply.** VC-05 shipped with its wire shapes
-   taken from Venice's published docs rather than a capture — `/models` answers
-   for any bearer token but chat does not, and the implementing environment had
-   no key. `venice-cpp --stream` exists to settle it: it reports whether
-   `reasoning_content`, `completion_tokens_details.reasoning_tokens` and
-   `prompt_tokens_details.cached_tokens` land where the fixtures in
-   `test/07stream/` say. If one disagrees, the fixture is what needs correcting;
-   `Message::raw` / `ChatResponse::raw` / `acc.chunks()` are why a wrong guess
-   is recoverable rather than lossy.
-2. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
-   Both foundations are proven.
-3. **A live capture of a tool call**, the VC-08 half of the same gap.
-   `venice-cpp --tools` runs it in two legs; see the VC-08 entry below.
-4. **A live capture of a character entry**, the VC-04 half. `venice-cpp
-   --characters` is the check, and unlike `--models` it needs a real key:
-   /characters answers 402 unauthenticated and 401 to a junk bearer. Two things
-   it settles that are currently guesses — that `slug` is always present (the
-   parse skips entries without one, so a short listing is that guess failing),
-   and that the default page really is 50.
-5. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
+
+**The three live captures are done.** A key was available on 2026-08-09 and all
+of `--models`, `--stream`, `--tools` and `--characters` were run against the
+live API. What they settled is recorded in each ticket's entry below; what they
+*opened* is filed:
+
+1. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
+   Both foundations are proven, and now measured rather than assumed.
+2. **VC-17 (#28): `Usage`'s nested detail objects never arrive.**
+   `completion_tokens_details.reasoning_tokens` and
+   `prompt_tokens_details.cached_tokens` are modeled and fixture-pinned, and a
+   live `usage` carries only `prompt_tokens` / `completion_tokens` /
+   `total_tokens`. Nothing is broken — absent parses as absent — but
+   `test/07stream/` asserts a shape the API does not send.
+3. **VC-18 (#29): a replayed tool turn is rejected by Gemini-family models.**
+   Leg two of `--tools` comes back 400 asking for a `thought_signature` in the
+   functionCall part. The same turn is accepted by `zai-org-glm-4.7`, so the
+   assembly is right and something model-specific is not being carried.
+4. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
    embeddings, retries/backoff, async). Driven by real use, not
    speculatively.
-6. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
+5. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
 
 **VC-07 (#8, install/export) is done** — see v0.2.0. Upstream CT-04 landed the
@@ -418,18 +417,30 @@ Six things are worth knowing, four of them measured rather than reasoned:
   [[information-model-before-api-surface]] again: the bug was that the type
   could not hold the fact, and no amount of fixing the loop would have helped.
 
-- **A comment justified a design with a constraint that did not exist, for the
-  second release running.** `tags` / `categories` / `model_id` were
-  comma-joined, on the stated grounds that comma "is the one a query string can
-  express without `with_query` growing a multimap". The owning `with_query`
-  overload added in the same change takes a `vector<pair>` and loops it with no
-  dedup — it *is* a multimap, and `{{"tags","a"},{"tags","b"}}` emits
-  `?tags=a&tags=b` today, which was measured. So the rationale was false and
-  the cost was real: comma-joining made `{"a,b"}` and `{"a","b"}` byte-identical
-  on the wire, silently turning one filter into two. They now repeat the key,
-  which is the form the endpoint documents as primary anyway. Exactly VC-08's
-  `response_format::json_schema` finding, and the lesson generalises: a comment
-  asserting "X is impossible" is a claim to test, not a reason to accept.
+- **A comment justified a design with a constraint that did not exist — and its
+  replacement then over-claimed, which took a live run to catch.** `tags` /
+  `categories` / `model_id` were comma-joined, on the stated grounds that comma
+  "is the one a query string can express without `with_query` growing a
+  multimap". False: the owning overload added in the same change takes a
+  `vector<pair>` and loops it with no dedup, so `{{"tags","a"},{"tags","b"}}`
+  emits `?tags=a&tags=b`. They now repeat the key, and live measurement confirms
+  repetition is honoured and means OR — `tags=Buddhism` → 2, `tags=mythology` →
+  2, both together → 4, the union.
+
+  **But the reason given for the switch was itself wrong.** The new comment said
+  repetition is what lets a value containing a comma survive. It is not:
+  `tags=Buddhism%2Cmythology` — one repetition, one encoded comma — also
+  returned 4, so the server splits on commas *inside* a value and no client-side
+  spelling can express a comma-containing tag. Repetition still stands, on the
+  two grounds that survived contact: it is the documented primary form, and it
+  does not depend on that splitting behaviour continuing. Corrected in
+  `types.hpp`, README and the test's own claim in v0.10.1.
+
+  Twice in one ticket, then, and the second time the replacement rationale went
+  out in a release. The lesson is not "check comments" but something narrower:
+  a claim about what *the server* does cannot be settled by reading this
+  codebase, and writing one down without a measurement is how folklore starts.
+  VC-08's `json_schema` finding was the same shape.
 
 - **A break came back green, and the reason is worth recording.** Removing the
   empty-value skip from `detail::append_param` left all 107 assertions in
@@ -443,7 +454,25 @@ Six things are worth knowing, four of them measured rather than reasoned:
   guard reddened §0's four assertions, dropping the slug skip reddened two
   cases, and letting `extra` beat a set modeled field reddened one.
 
-- **The fixtures are not a capture, and this time the endpoint said so out
+- **The fixtures were not a capture when this shipped — they have since been
+  checked against one, and they hold.** With a key available on 2026-08-09 the
+  live payload was compared key-for-key against what `Character` models: the
+  union of entry keys across a 50-entry page is exactly the fifteen modeled
+  fields, no more and no less, every one present in every entry, and every type
+  as the parse expects. Two details vindicate specific choices. `averageRating`
+  arrives as **both float and int** across entries, which is why it reads
+  through `opt_double` (`is_number()`) — `is_number_float()` would have silently
+  dropped every whole rating. `userRating` is `null` on every entry, matching
+  the nullable-means-absent reading. The envelope is `{data, object}` with no
+  total, as the pagination design assumed, and `50 usable of 50 returned`
+  settles both open guesses at once: the default page really is 50, and `slug`
+  really is always present. The query half was exercised too — `limit=3`/`100`
+  honoured, `limit=5000` a clean 400, `offset` paging with zero overlap,
+  `search` and `isWebEnabled` filtering correctly, and a bogus `sortBy` a 400,
+  which is the "the value set belongs to Venice" decision earning itself.
+  The original wording follows, because it is what was true at release:
+
+  **The fixtures are not a capture, and this time the endpoint said so out
   loud.** `/models` answers 200 for any bearer token, which is how
   `test/04models/` pinned itself to a real payload. `/characters` answers **402**
   unauthenticated and **401** to a junk bearer — both measured on 2026-08-09 —
