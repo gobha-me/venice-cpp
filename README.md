@@ -36,6 +36,10 @@ right bridge.
   …), and a full rate card with cache buckets and extended-context tiers, plus
   the verbatim entry as `raw`. Filterable by modality — `models("image")`,
   `models("all")` — since the endpoint's own default is text-only.
+- **Characters list** (`/characters`) — the discovery half of
+  `venice_parameters.character_slug`: slug, name, description, tags, the model
+  a character runs on, and its rating stats, plus the verbatim entry as `raw`.
+  Filterable and, because the endpoint pages at 50, pageable.
 - **Balance / rate limits** (`/api_keys/rate_limits`).
 - **Per-request timeouts and cancellation** — every call takes an optional
   `RequestOptions` with connect/read/write timeout overrides and a
@@ -45,7 +49,7 @@ right bridge.
   auth / rate-limit / invalid-arg / cancelled, each carrying status + raw body.
 
 Later phases (fed by real use): image/audio/video, TTS, embeddings,
-characters, retries/backoff, async.
+retries/backoff, async.
 
 ## Dependencies
 
@@ -188,6 +192,68 @@ are text-only. Their rates are in `raw`, as above. Malformed entries degrade rat
 than failing the listing: an entry with no usable `id` is skipped, a
 wrong-typed field reads as absent, and only a response that is not a list at
 all comes back as `ErrorKind::Parse`.
+
+### Picking a character
+
+`venice_parameters.character_slug` selects a persona, and `characters()` is how
+you find one to select:
+
+```cpp
+venice::CharacterQuery q;
+q.search = "philosophy";
+q.tags = {"helpful"};
+q.is_web_enabled = true;
+
+for (const auto& c : *client.characters(q)) {
+  std::cout << c.slug;
+  if (c.name) std::cout << "  " << *c.name;
+  if (c.stats && c.stats->average_rating) std::cout << "  " << *c.stats->average_rating;
+  std::cout << '\n';
+}
+```
+
+A default-constructed query sends the bare `/characters`. Every filter is
+optional and an unset one contributes no query key at all, so building a query
+up conditionally never changes the shape of what the other filters send.
+
+**The endpoint pages, and the default page is 50.** It caps at 100 and the
+response carries no total, so a complete listing means asking until a short page
+comes back:
+
+```cpp
+venice::CharacterQuery q;
+q.limit = 100;
+std::vector<venice::Character> all;
+for (q.offset = 0; ; *q.offset += 100) {
+  auto page = client.characters(q);
+  if (!page) break;                       // inspect page.error()
+  const bool last = page->size() < 100;
+  all.insert(all.end(), std::make_move_iterator(page->begin()),
+             std::make_move_iterator(page->end()));
+  if (last) break;
+}
+```
+
+There is no all-pages helper here on purpose: that loop needs a policy for a
+page that fails halfway through — abandon, retry, or return what it has — and
+each answer is wrong for somebody. The one above abandons; yours may not want to.
+
+`sort_by` and `sort_order` are plain strings for the reason `models(type)` is
+one — the value set is Venice's (`featured`, `highestRating`,
+`highlyRated`, `highlyRatedAndRecent`, `imports`, `mostRecent`, `ratingCount`),
+and a list hardcoded here would refuse a valid value the day one is added.
+`CharacterQuery::extra` reaches any filter this struct does not model, and a
+modeled field that is set wins the key rather than sending it twice.
+
+Only `slug` is a plain string; everything else is optional and absent means *the
+response did not say*. Degradation matches `models()`: an entry with no usable
+slug is skipped, a wrong-typed field reads as absent, and only a body that is
+not a list at all is an `ErrorKind::Parse`. `Character::raw` holds the whole
+entry verbatim — worth more here than elsewhere, because Venice documents
+`/characters` as a preview API that may change.
+
+Unlike `/models`, this endpoint needs a real key: it answers 402 with no
+credentials and 401 with a bad one.
 
 **`ChatRequest::extra` is a top-level passthrough**, same idea as
 `VeniceParameters::extra`: Venice accepts sampling keys this struct doesn't
@@ -402,7 +468,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.9.0)
+  GIT_TAG        v0.10.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -503,25 +569,31 @@ Phase 0 verified against the live API: chat (non-streaming + streaming),
 models list (105 text models, 299 across all modalities), token usage — the
 counts move as Venice's catalogue does.
 
-One caveat worth stating plainly, and it now covers two releases: the **v0.8.0
-and v0.9.0 wire shapes are documented, not measured**. Where `reasoning_content`
-sits, where `cached_tokens` is nested, how tool-call fragments are keyed, and now
-how `tools` / `tool_choice` / `parallel_tool_calls` are spelled on the way out —
-all of it came from Venice's published docs rather than a capture, because
-`/models` answers for any bearer token but chat does not, and the implementing
-environment had no key. Two commands settle it against the live API:
+One caveat worth stating plainly, and it now covers three releases: the
+**v0.8.0, v0.9.0 and v0.10.0 wire shapes are documented, not measured**. Where
+`reasoning_content` sits, where `cached_tokens` is nested, how tool-call
+fragments are keyed, how `tools` / `tool_choice` / `parallel_tool_calls` are
+spelled on the way out, and now what a `/characters` entry contains — none of it
+came from a capture. `/models` answers for any bearer token; chat and
+`/characters` do not, and the implementing environment had no key.
+(`/characters` was measured far enough to know that: 402 with no credentials,
+401 with a junk bearer.) Three commands settle the rest against the live API:
 
 ```bash
 VENICE_API_KEY=... venice-cpp --stream "..."   # v0.8.0: the reply shapes
 VENICE_API_KEY=... venice-cpp --tools          # v0.9.0: the request shape
+VENICE_API_KEY=... venice-cpp --characters     # v0.10.0: the character entry
 ```
 
 `--tools` runs two legs, and the second is the one that matters: leg one proves
 `tools` parsed, leg two answers the call and proves the assembled turn is a
-conversation Venice will continue. If something disagrees, the fixture in
-`test/07stream/` or `test/02request/` is what needs correcting. `Message::raw`,
-`ChatResponse::raw` and `acc.chunks()` are why a wrong guess there is
-recoverable rather than lossy.
+conversation Venice will continue. `--characters` prints the columns a picker
+would branch on, so a key that parses in the fixture and not in reality shows up
+as a blank column; its count is also the only evidence for the claim that the
+page defaults to 50. If something disagrees, the fixture in `test/07stream/`,
+`test/02request/` or `test/08characters/` is what needs correcting.
+`Message::raw`, `ChatResponse::raw`, `Character::raw` and `acc.chunks()` are why
+a wrong guess there is recoverable rather than lossy.
 
 See `AGENTS.md` for contributor/agent conventions and the testing philosophy
 (test how it fails, not just the happy path).

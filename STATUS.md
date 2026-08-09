@@ -15,6 +15,9 @@ AGENTS.md (which holds standing conventions, not state).
 - Per-request timeouts and a `CancelToken` on every entry point (VC-06).
 - `models()` list with typed per-model metadata, filterable by modality
   (105 text / 299 all, fetched live), `balance()` rate-limit endpoint.
+- `characters()` list with typed per-character metadata and a `CharacterQuery`
+  carrying the endpoint's filters and its pagination (VC-04). Parsed offline
+  only — see the caveat in that entry below.
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   rate_limited/invalid_arg, each carrying status + raw body.
@@ -50,8 +53,14 @@ have since landed there as CT-14.
    Both foundations are proven.
 3. **A live capture of a tool call**, the VC-08 half of the same gap.
    `venice-cpp --tools` runs it in two legs; see the VC-08 entry below.
-4. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
-   embeddings, characters, retries/backoff, async). Driven by real use, not
+4. **A live capture of a character entry**, the VC-04 half. `venice-cpp
+   --characters` is the check, and unlike `--models` it needs a real key:
+   /characters answers 402 unauthenticated and 401 to a junk bearer. Two things
+   it settles that are currently guesses — that `slug` is always present (the
+   parse skips entries without one, so a short listing is that guess failing),
+   and that the default page really is 50.
+5. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
+   embeddings, retries/backoff, async). Driven by real use, not
    speculatively.
 4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
@@ -369,6 +378,60 @@ eighth is the finding above. The wire shapes come from Venice's published docs,
 **not a capture** — still no `VENICE_API_KEY` in the implementing environment.
 `venice-cpp --tools` is the live check, in two legs, and only the second (answer
 the call, send the history back) proves the turn is one Venice will continue.
+
+**VC-04 (#5, characters endpoint) is done** — see v0.10.0. `characters()`
+returns a typed listing, `Character` carries slug/name/description/tags/stats
+plus the verbatim entry as `raw`, and `CharacterQuery` carries the endpoint's
+filters. As with VC-03 the parse left `Client` —
+`venice::characters_from_json_body` and `venice::character_query_params` are
+free functions in `types.hpp`, so the whole failure matrix is offline in
+`test/08characters/`. Purely additive; `test/02request/`'s `kBaseline` and every
+`/models` case are untouched.
+
+Four things are worth knowing, three of them measured rather than reasoned:
+
+- **The ticket asked for `extra` and it shipped as `raw`.** The same correction
+  VC-03 made against its own wording, for the same reason: a response-side hatch
+  is a superset and is never sent, while `extra` is additive and merged into the
+  wire body. `CharacterQuery` does get an `extra`, correctly — it is request-side
+  and it is sent.
+
+- **`CharacterQuery` exists because the endpoint pages, which the ticket does
+  not mention.** `limit` defaults to 50, caps at 100, and the response carries
+  no total. A `characters()` with nothing to say would have answered the first
+  50 of N and called it the list — this ticket's own defect ("you cannot
+  discover what exists") one layer down. There is deliberately no all-pages
+  helper: that loop needs a policy for a page that fails halfway, and abandon /
+  retry / return-what-we-have are each wrong for someone. The loop is written
+  out in `client.hpp` and README instead.
+
+- **A break came back green, and the reason is worth recording.** Removing the
+  empty-value skip from `detail::append_param` left all 107 assertions in
+  `test/08characters/` passing and turned six red in `test/05query/`. Not a gap:
+  `character_query_params` drops empty values before the encoder ever sees one,
+  so the character tests assert the right end-to-end behaviour and are
+  structurally blind to which of the two layers produces it. `test/05query/` is
+  the only file that can see that skip, which is precisely why the refactor put
+  both `with_query` overloads on one shared `append_param` rather than copying
+  it. The other three breaks went red where intended: dropping the `is_array()`
+  guard reddened §0's four assertions, dropping the slug skip reddened two
+  cases, and letting `extra` beat a set modeled field reddened one.
+
+- **The fixtures are not a capture, and this time the endpoint said so out
+  loud.** `/models` answers 200 for any bearer token, which is how
+  `test/04models/` pinned itself to a real payload. `/characters` answers **402**
+  unauthenticated and **401** to a junk bearer — both measured on 2026-08-09 —
+  and there was no `VENICE_API_KEY` in the implementing environment. The fixture
+  comes from Venice's published OpenAPI document instead
+  (`api.venice.ai/doc/api/swagger.yaml`), which is a machine-readable schema with
+  a per-field example rather than prose, so the keys and their types are the
+  API's own; the *combination* has still never been on a wire. `venice-cpp
+  --characters` is the live check and is item 4 in "Next up".
+
+Two things were left out on purpose. `GET /characters/{slug}` is the same struct
+behind a different path and belongs to whoever needs a single fetch; and the
+README's FetchContent `GIT_TAG` was bumped by hand again, which is the drive-by
+VC-12 (#17) exists to abolish.
 
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.

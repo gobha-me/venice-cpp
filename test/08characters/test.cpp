@@ -234,7 +234,9 @@ TEST_CASE("wrong-typed character fields degrade to absent", "[characters][failur
   SECTION("a rating quoted as a whole number is still a number") {
     // The mistake test/04models/ was written against: Venice sends whole
     // values as JSON integers, and is_number_float() would read 5 as absent.
-    REQUIRE(one(R"({"slug":"s","stats":{"averageRating":5}})").stats->average_rating == 5.0);
+    const auto c = one(R"({"slug":"s","stats":{"averageRating":5}})");
+    REQUIRE(c.stats.has_value());
+    REQUIRE(c.stats->average_rating == 5.0);
   }
 }
 
