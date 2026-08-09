@@ -1199,6 +1199,16 @@ struct Character {
   nlohmann::json raw;
 
   friend void from_json(const nlohmann::json& j, Character& c) {
+    // Cleared rather than left alone, unlike Model::from_json's `id`. Every
+    // other field here is assigned unconditionally — opt_string on an absent
+    // key assigns nullopt — so leaving these two conditional would make a
+    // re-parse into a used object keep the *previous* entry's slug and stats
+    // beside the new entry's everything-else. The slug is the field that
+    // selects a persona, so the failure is chatting with the wrong one while
+    // every other field on screen says otherwise.
+    c.slug.clear();
+    c.stats.reset();
+
     if (const auto* s = detail::opt_string_at(j, "slug")) c.slug = *s;
 
     c.raw = j;
@@ -1222,26 +1232,55 @@ struct Character {
   }
 };
 
-// Parse a /characters response body into a listing. Same contract as
+// One page of /characters.
+//
+// A page and not a bare vector, which is where this type differs from
+// models() — and the difference is forced by the endpoint, not chosen. Venice
+// pages /characters and /models is unpaginated, so a caller here has to answer
+// "was that the last page?" and `entries.size()` cannot tell them: the parse
+// skips entries it cannot use, so a full page containing one slug-less entry
+// comes back short and a size-versus-limit test ends the walk early, reporting
+// a truncated catalogue as a complete one. `returned` is the server's own count
+// and is the only honest thing to compare a limit against.
+//
+// `raw` is the whole envelope, on Character::raw's reasoning applied one level
+// up. The documented body is `{data, object}` with no total and no cursor —
+// but that shape has never been seen on a wire here (see the STATUS entry), and
+// a total appearing later must be an additive field a caller can already reach
+// rather than a breaking change to this signature.
+struct CharacterPage {
+  // Usable characters. An entry the parse could not use is not here and *is*
+  // counted in `returned`.
+  std::vector<Character> entries;
+
+  // How many elements the server put in `data`, before any skipping. Compare
+  // this against CharacterQuery::limit to decide whether to ask for more.
+  std::size_t returned{0};
+
+  nlohmann::json raw;
+};
+
+// Parse a /characters response body into a page. Same contract as
 // models_from_json_body, for the same reasons and with the same one fatal case:
 // a body that is not a list has nothing to degrade to, and without the
 // is_array() check a `{"data":{...}}` quietly becomes a vector of characters
 // built out of whatever the values happened to be.
-[[nodiscard]] inline auto characters_from_json_body(const nlohmann::json& j)
-    -> std::vector<Character> {
+[[nodiscard]] inline auto characters_from_json_body(const nlohmann::json& j) -> CharacterPage {
   const auto* data = detail::opt_array(j, "data");
   const nlohmann::json& arr = data != nullptr ? *data : j;
   if (!arr.is_array())
     throw std::runtime_error{"characters: response is not a list"};
 
-  std::vector<Character> out;
+  CharacterPage page;
+  page.raw = j;
+  page.returned = arr.size();
   for (const auto& e : arr) {
     if (!e.is_object()) continue;
     const auto* slug = detail::opt_string_at(e, "slug");
     if (slug == nullptr || slug->empty()) continue;
-    out.push_back(e.get<Character>());
+    page.entries.push_back(e.get<Character>());
   }
-  return out;
+  return page;
 }
 
 // The filters /characters accepts.
@@ -1280,31 +1319,19 @@ struct CharacterQuery {
   std::optional<bool> is_pro;
   std::optional<bool> is_web_enabled;
 
-  // Comma-joined into one parameter. The spec accepts either that or the
-  // repeated form; comma is the one a query string can express without
-  // with_query growing a multimap.
+  // Each element is sent as its own repetition of the key —
+  // `?tags=helpful&tags=productivity`. The endpoint documents that form as the
+  // primary one and comma-joining as also accepted, and comma-joining is the
+  // one that cannot round-trip: a single tag containing a comma would arrive
+  // as two filters with nothing to distinguish it. The pair list
+  // character_query_params returns is already a multimap, so repetition costs
+  // nothing.
   std::vector<std::string> tags;
   std::vector<std::string> categories;
   std::vector<std::string> model_id;
 
   std::vector<std::pair<std::string, std::string>> extra;
 };
-
-namespace detail {
-
-// Join into one comma-separated value, skipping empty elements so a stray ""
-// contributes a stray comma rather than a filter nobody asked for.
-[[nodiscard]] inline auto join_csv(const std::vector<std::string>& values) -> std::string {
-  std::string out;
-  for (const auto& v : values) {
-    if (v.empty()) continue;
-    if (!out.empty()) out.push_back(',');
-    out += v;
-  }
-  return out;
-}
-
-}  // namespace detail
 
 // Flatten a CharacterQuery into ordered key/value pairs, ready for
 // detail::with_query to encode.
@@ -1329,6 +1356,11 @@ namespace detail {
   const auto add_bool = [&add](const char* key, const std::optional<bool>& v) {
     if (v) add(key, *v ? "true" : "false");
   };
+  // One repetition of the key per element, empty elements skipped. See the
+  // note on CharacterQuery::tags for why this is not comma-joined.
+  const auto add_each = [&add](const char* key, const std::vector<std::string>& values) {
+    for (const auto& v : values) add(key, v);
+  };
 
   if (q.search) add("search", *q.search);
   if (q.sort_by) add("sortBy", *q.sort_by);
@@ -1338,9 +1370,9 @@ namespace detail {
   add_bool("isAdult", q.is_adult);
   add_bool("isPro", q.is_pro);
   add_bool("isWebEnabled", q.is_web_enabled);
-  add("tags", detail::join_csv(q.tags));
-  add("categories", detail::join_csv(q.categories));
-  add("modelId", detail::join_csv(q.model_id));
+  add_each("tags", q.tags);
+  add_each("categories", q.categories);
+  add_each("modelId", q.model_id);
 
   for (const auto& [key, value] : q.extra) {
     if (key.empty() || value.empty()) continue;

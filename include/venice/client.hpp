@@ -11,7 +11,7 @@
 //   * chat_stream(req, on_token)    -> expected<ChatResponse>   (content text)
 //   * chat_stream(req, acc[, on_delta])                         (structured)
 //   * models()                      -> expected<vector<Model>>
-//   * characters()                  -> expected<vector<Character>>
+//   * characters(query)             -> expected<CharacterPage>
 //   * balance()                     -> expected<json>           (rate-limit/balance)
 //
 // A ChatResponse carries the whole assistant turn as a Message, so a reply can
@@ -381,28 +381,41 @@ class Client {
   // A default-constructed query sends the bare /characters, byte-identical to
   // what a no-argument call would have sent if this type did not exist.
   //
-  // **The endpoint pages, and the default page is 50.** It caps at 100 and the
-  // response carries no total, so listing everything means asking for the next
-  // page until a short one comes back:
+  // **The endpoint pages, and the default page is 50.** It caps at 100, so
+  // listing everything means asking for the next page until a short one comes
+  // back:
   //
   //   venice::CharacterQuery q;
   //   q.limit = 100;
   //   for (q.offset = 0; ; *q.offset += 100) {
   //     const auto page = client.characters(q);
-  //     if (!page || page->size() < 100) break;
+  //     if (!page || page->returned < 100) break;
   //   }
+  //
+  // `page->returned`, not `page->entries.size()`. They differ exactly when an
+  // entry was skipped for want of a slug, and comparing the *usable* count
+  // against the limit would then end the walk one page in and call a truncated
+  // catalogue complete. That is why this returns a CharacterPage rather than
+  // the vector the ticket asked for: a bare vector cannot express the
+  // difference, so no caller could write this loop correctly.
   //
   // Not wrapped in an all-pages helper here: that loop needs a policy for a
   // failed page mid-walk — abandon, retry, or return what it has — and every
   // answer is wrong for someone. Retries are a later phase (AGENTS.md).
   //
   // Unlike /models, this endpoint needs a real key: it answers 402 to an
-  // unauthenticated request and 401 to a junk bearer, both measured. Venice
-  // documents it as a preview API that may change, which is why Character::raw
-  // matters more here than elsewhere.
+  // unauthenticated request and 401 to a junk bearer, both measured. Note the
+  // 402 — `kind_for_status` maps 401/403 to ErrorKind::Auth and everything else
+  // to ErrorKind::Http, so a *credential-less* call to this endpoint reports
+  // Http, not Auth. Widening that mapping is an error-model change affecting
+  // every endpoint and is filed separately rather than smuggled in here; until
+  // then, check `status` as well as `kind`.
+  //
+  // Venice documents this as a preview API that may change, which is why
+  // Character::raw and CharacterPage::raw matter more here than elsewhere.
   [[nodiscard]] auto characters(const CharacterQuery& query = {},
                                 const RequestOptions& opts = {}) const
-      -> std::expected<std::vector<Character>, Error> {
+      -> std::expected<CharacterPage, Error> {
     const auto params = character_query_params(query);
     auto res = get_json(detail::with_query("/characters", params), opts);
     if (!res) return std::unexpected{std::move(res.error())};

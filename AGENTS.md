@@ -294,6 +294,15 @@ and PRs note what was actually run to verify.
 
 ## Notes for agents
 
+- **A documented snippet that compiles is not a documented snippet that works.**
+  README blocks and header comment snippets are never built by anything, which
+  cost VC-08 a `tools` example that did not compile. Paste them into a throwaway
+  TU against the real headers before claiming they work — and then look at
+  lifetimes by hand, because the compiler will not. VC-04 found
+  `for (const auto& x : *client.models())` in README, clean on both compilers
+  and a `stack-use-after-scope` under ASan: the `expected` temporary dies at the
+  end of the range-for's initializer, and P2718R0 fixes that in GCC 15 / Clang
+  19 while this project supports GCC 13+. Bind the result to a named variable.
 - **Path caution:** the editing tools in some environments write relative to a
   session's original project root, not the shell's cwd. If you `cp`/`cd` into a
   new repo mid-session, confirm file writes land in the right tree (a

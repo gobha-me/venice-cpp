@@ -380,15 +380,15 @@ eighth is the finding above. The wire shapes come from Venice's published docs,
 the call, send the history back) proves the turn is one Venice will continue.
 
 **VC-04 (#5, characters endpoint) is done** — see v0.10.0. `characters()`
-returns a typed listing, `Character` carries slug/name/description/tags/stats
-plus the verbatim entry as `raw`, and `CharacterQuery` carries the endpoint's
-filters. As with VC-03 the parse left `Client` —
-`venice::characters_from_json_body` and `venice::character_query_params` are
-free functions in `types.hpp`, so the whole failure matrix is offline in
-`test/08characters/`. Purely additive; `test/02request/`'s `kBaseline` and every
-`/models` case are untouched.
+returns a typed `CharacterPage`, `Character` carries
+slug/name/description/tags/stats plus the verbatim entry as `raw`, and
+`CharacterQuery` carries the endpoint's filters. As with VC-03 the parse left
+`Client` — `venice::characters_from_json_body` and
+`venice::character_query_params` are free functions in `types.hpp`, so the whole
+failure matrix is offline in `test/08characters/`. Purely additive;
+`test/02request/`'s `kBaseline` and every `/models` case are untouched.
 
-Four things are worth knowing, three of them measured rather than reasoned:
+Six things are worth knowing, four of them measured rather than reasoned:
 
 - **The ticket asked for `extra` and it shipped as `raw`.** The same correction
   VC-03 made against its own wording, for the same reason: a response-side hatch
@@ -397,13 +397,39 @@ Four things are worth knowing, three of them measured rather than reasoned:
   and it is sent.
 
 - **`CharacterQuery` exists because the endpoint pages, which the ticket does
-  not mention.** `limit` defaults to 50, caps at 100, and the response carries
-  no total. A `characters()` with nothing to say would have answered the first
-  50 of N and called it the list — this ticket's own defect ("you cannot
-  discover what exists") one layer down. There is deliberately no all-pages
-  helper: that loop needs a policy for a page that fails halfway, and abandon /
-  retry / return-what-we-have are each wrong for someone. The loop is written
-  out in `client.hpp` and README instead.
+  not mention.** `limit` defaults to 50, caps at 100. A `characters()` with
+  nothing to say would have answered the first 50 of N and called it the list —
+  this ticket's own defect ("you cannot discover what exists") one layer down.
+  There is deliberately no all-pages helper: that loop needs a policy for a page
+  that fails halfway, and abandon / retry / return-what-we-have are each wrong
+  for someone. The loop is written out in `client.hpp` and README instead.
+
+- **The return type is a `CharacterPage` and not the vector the ticket asked
+  for, because a vector could not express the thing the paging loop needs.**
+  The first draft returned `vector<Character>` and documented `page->size() <
+  100` as the termination test. That is wrong, and wrong in the silent
+  direction: the parse skips entries with no usable slug, so a full page of 100
+  containing one such entry comes back as 99, the loop stops, and a truncated
+  catalogue is reported as a complete one. No caller could have fixed it from
+  outside — the server's page size was not reachable through the API at all.
+  `CharacterPage::returned` is that count, `entries` is what survived, and
+  `raw` keeps the envelope so a `total` or cursor turning up later is an
+  additive discovery rather than a breaking signature change. This is
+  [[information-model-before-api-surface]] again: the bug was that the type
+  could not hold the fact, and no amount of fixing the loop would have helped.
+
+- **A comment justified a design with a constraint that did not exist, for the
+  second release running.** `tags` / `categories` / `model_id` were
+  comma-joined, on the stated grounds that comma "is the one a query string can
+  express without `with_query` growing a multimap". The owning `with_query`
+  overload added in the same change takes a `vector<pair>` and loops it with no
+  dedup — it *is* a multimap, and `{{"tags","a"},{"tags","b"}}` emits
+  `?tags=a&tags=b` today, which was measured. So the rationale was false and
+  the cost was real: comma-joining made `{"a,b"}` and `{"a","b"}` byte-identical
+  on the wire, silently turning one filter into two. They now repeat the key,
+  which is the form the endpoint documents as primary anyway. Exactly VC-08's
+  `response_format::json_schema` finding, and the lesson generalises: a comment
+  asserting "X is impossible" is a claim to test, not a reason to accept.
 
 - **A break came back green, and the reason is worth recording.** Removing the
   empty-value skip from `detail::append_param` left all 107 assertions in
@@ -428,10 +454,37 @@ Four things are worth knowing, three of them measured rather than reasoned:
   API's own; the *combination* has still never been on a wire. `venice-cpp
   --characters` is the live check and is item 4 in "Next up".
 
-Two things were left out on purpose. `GET /characters/{slug}` is the same struct
-behind a different path and belongs to whoever needs a single fetch; and the
+- **The documented-snippet gap is worse than "it might not compile", and the
+  compile check does not close it.** Both the new character example and the
+  *pre-existing* `models()` one at README.md:129 read `for (const auto& m :
+  *client.models())`. That compiles clean on both compilers — and it is a
+  use-after-free: the `expected` temporary dies at the end of the range-for's
+  initializer, and P2718R0, which extends its lifetime, is GCC 15 / Clang 19
+  while AGENTS.md declares GCC 13+ and CI runs stock GCC 13. Reduced to the same
+  shape and run under ASan on GCC 14 it aborts with `stack-use-after-scope`;
+  the named-variable form is clean. Both README blocks now bind the result
+  first. So the VC-08 blind spot has a second half: compiling a documented
+  snippet proves it compiles, and the interesting failures in a C++ example are
+  lifetime ones that only running it under a sanitizer can see.
+
+- **`Character::from_json` clears `slug` and `stats` before parsing.** Every
+  other field is assigned unconditionally, so leaving those two conditional
+  meant a re-parse into a live object kept the *previous* entry's slug beside
+  the new entry's name — and the slug is the field that picks a persona.
+  `characters_from_json_body` never hits it (it always starts fresh), but
+  `j.get_to(c)` on a reused object is a reachable public path, and
+  `test/08characters/` pins it. `Model::from_json` has the same shape for `id`
+  and was left alone: fixing it belongs to a change that can test it.
+
+Three things were left out on purpose. `GET /characters/{slug}` is the same
+struct behind a different path and belongs to whoever needs a single fetch. The
 README's FetchContent `GIT_TAG` was bumped by hand again, which is the drive-by
-VC-12 (#17) exists to abolish.
+VC-12 (#17) exists to abolish. And **402 still maps to `ErrorKind::Http`, not
+`Auth`** — this endpoint answers 402 to a credential-less call, and
+`kind_for_status` only maps 401/403, so a consumer branching on `Auth` to
+re-prompt will not fire. Widening that mapping changes the error model for every
+endpoint and is filed separately rather than smuggled into an endpoint PR;
+`client.hpp` says so where a caller will read it.
 
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.

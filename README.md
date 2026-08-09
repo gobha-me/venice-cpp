@@ -128,7 +128,10 @@ req.response_format = venice::response_format::json_schema("reply", my_schema);
 second round of JSON parsing:
 
 ```cpp
-for (const auto& m : *client.models()) {
+const auto list = client.models();      // named, not iterated as a temporary
+if (!list) return;                      // inspect list.error()
+
+for (const auto& m : *list) {
   if (!m.capabilities || m.capabilities->supports_function_calling != true) continue;
   if (!m.context_length || *m.context_length < 200000) continue;
 
@@ -137,6 +140,12 @@ for (const auto& m : *client.models()) {
     std::cout << m.id << " $" << *m.pricing->base.input->usd << '\n';
 }
 ```
+
+The result is bound to a named variable on purpose. `for (const auto& m :
+*client.models())` compiles and reads freed memory — the `expected` temporary
+dies at the end of the range-for's initializer, and the lifetime extension that
+would save it (P2718R0) is GCC 15 / Clang 19 while this library supports GCC
+13+. It aborts under ASan on GCC 14.
 
 Every field but `id` and `type` is optional, and absent means *the response did
 not say* — not `false` and not zero. `m.capabilities->supports_vision != true`
@@ -201,10 +210,13 @@ you find one to select:
 ```cpp
 venice::CharacterQuery q;
 q.search = "philosophy";
-q.tags = {"helpful"};
+q.tags = {"helpful", "productivity"};   // sent as tags=helpful&tags=productivity
 q.is_web_enabled = true;
 
-for (const auto& c : *client.characters(q)) {
+const auto page = client.characters(q);
+if (!page) return;                      // inspect page.error()
+
+for (const auto& c : page->entries) {
   std::cout << c.slug;
   if (c.name) std::cout << "  " << *c.name;
   if (c.stats && c.stats->average_rating) std::cout << "  " << *c.stats->average_rating;
@@ -212,13 +224,18 @@ for (const auto& c : *client.characters(q)) {
 }
 ```
 
+Note the named `page`. Writing `for (const auto& c : *client.characters(q))`
+compiles and is a use-after-free: the `expected` is a temporary that dies at the
+end of the range-for's initializer, and the fix that extends its lifetime
+(P2718R0) is GCC 15 / Clang 19, while this library supports GCC 13+. Under ASan
+on GCC 14 that spelling aborts with `stack-use-after-scope`.
+
 A default-constructed query sends the bare `/characters`. Every filter is
 optional and an unset one contributes no query key at all, so building a query
 up conditionally never changes the shape of what the other filters send.
 
-**The endpoint pages, and the default page is 50.** It caps at 100 and the
-response carries no total, so a complete listing means asking until a short page
-comes back:
+**The endpoint pages, and the default page is 50.** It caps at 100, so a
+complete listing means asking until a short page comes back:
 
 ```cpp
 venice::CharacterQuery q;
@@ -227,12 +244,22 @@ std::vector<venice::Character> all;
 for (q.offset = 0; ; *q.offset += 100) {
   auto page = client.characters(q);
   if (!page) break;                       // inspect page.error()
-  const bool last = page->size() < 100;
-  all.insert(all.end(), std::make_move_iterator(page->begin()),
-             std::make_move_iterator(page->end()));
+  const bool last = page->returned < 100;
+  all.insert(all.end(), std::make_move_iterator(page->entries.begin()),
+             std::make_move_iterator(page->entries.end()));
   if (last) break;
 }
 ```
+
+**`page->returned`, not `page->entries.size()`** — and that distinction is why
+`characters()` returns a `CharacterPage` rather than the vector `models()`
+returns. The parse skips entries it cannot use, so a full page containing one
+slug-less entry comes back with fewer usable characters than the server sent;
+paging on the usable count would end the walk right there and report a truncated
+catalogue as a complete one. `returned` is the server's own page size and is the
+only honest thing to compare a limit against. `page->raw` is the whole envelope,
+so a `total` or a cursor appearing later is reachable without this signature
+changing.
 
 There is no all-pages helper here on purpose: that loop needs a policy for a
 page that fails halfway through — abandon, retry, or return what it has — and
@@ -242,6 +269,8 @@ each answer is wrong for somebody. The one above abandons; yours may not want to
 one — the value set is Venice's (`featured`, `highestRating`,
 `highlyRated`, `highlyRatedAndRecent`, `imports`, `mostRecent`, `ratingCount`),
 and a list hardcoded here would refuse a valid value the day one is added.
+`tags`, `categories` and `model_id` each repeat their key once per element
+rather than comma-joining, so a value containing a comma stays one filter.
 `CharacterQuery::extra` reaches any filter this struct does not model, and a
 modeled field that is set wins the key rather than sending it twice.
 

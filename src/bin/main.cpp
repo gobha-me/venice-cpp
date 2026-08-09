@@ -98,20 +98,33 @@ auto list_characters(const venice::Client& client, std::string_view search) -> i
 
   const auto res = client.characters(q);
   if (!res) {
+    // The body is printed and not just the message because this endpoint's
+    // documented failures are 402 and 401, and "HTTP 402" alone names nothing.
+    // The 402 body is where "Authentication required" actually appears.
     std::cerr << "characters failed [" << venice::to_string(res.error().kind) << "] "
               << res.error().message << '\n';
+    if (!res.error().body.empty()) std::cerr << res.error().body << '\n';
     return EXIT_FAILURE;
   }
 
-  std::cout << res->size() << " characters";
+  // Both counts, because one number cannot answer both questions this leg
+  // exists to ask. `returned` is the server's page — if it is 50 with no limit
+  // set, the default-page claim holds. `entries` is what survived the parse —
+  // if it is lower, `slug` is not always present after all, which is the other
+  // guess. Printing only the second would make the two indistinguishable.
+  std::cout << res->entries.size() << " usable of " << res->returned << " returned";
   if (!search.empty()) std::cout << " (search=" << search << ')';
   std::cout << '\n';
-  if (res->empty()) {
-    std::cout << "   <-- ZERO: either the account sees no characters, or every "
-                 "entry was skipped for want of a slug\n";
+  if (res->returned > res->entries.size()) {
+    std::cout << "   <-- " << res->returned - res->entries.size()
+              << " entry/entries skipped for want of a slug: the schema says "
+                 "slug is required, so this is the schema being wrong\n";
+  }
+  if (res->returned == 0) {
+    std::cout << "   <-- ZERO returned: the account sees no characters at all\n";
   }
 
-  for (const auto& c : *res) {
+  for (const auto& c : res->entries) {
     std::cout << c.slug << "  model=";
     if (c.model_id) std::cout << *c.model_id;
     else std::cout << '?';

@@ -63,9 +63,9 @@ auto list_of(const std::string& entries) -> nlohmann::json {
 }
 
 auto one(const std::string& entry) -> Character {
-  auto v = characters_from_json_body(list_of(entry));
-  REQUIRE(v.size() == 1);
-  return v.front();
+  auto page = characters_from_json_body(list_of(entry));
+  REQUIRE(page.entries.size() == 1);
+  return page.entries.front();
 }
 
 // The query string Client::characters would build from this query. Spelled out
@@ -111,10 +111,10 @@ TEST_CASE("a characters response that is not a list throws", "[characters][failu
 
 TEST_CASE("an empty character list is a list, not a failure", "[characters]") {
   SECTION("wrapped in data") {
-    REQUIRE(characters_from_json_body(nlohmann::json::parse(R"({"data":[]})")).empty());
+    REQUIRE(characters_from_json_body(nlohmann::json::parse(R"({"data":[]})")).entries.empty());
   }
   SECTION("bare array body — the no-data branch") {
-    REQUIRE(characters_from_json_body(nlohmann::json::parse("[]")).empty());
+    REQUIRE(characters_from_json_body(nlohmann::json::parse("[]")).entries.empty());
   }
   SECTION("the envelope's other key is ignored, not required") {
     // The documented body carries `"object":"list"` beside `data`. Requiring it
@@ -122,7 +122,7 @@ TEST_CASE("an empty character list is a list, not a failure", "[characters]") {
     // gain — nothing here reads it.
     REQUIRE(characters_from_json_body(
                 nlohmann::json::parse(R"({"object":"list","data":[{"slug":"a"}]})"))
-                .size() == 1);
+                .entries.size() == 1);
   }
 }
 
@@ -135,13 +135,15 @@ TEST_CASE("an empty character list is a list, not a failure", "[characters]") {
 // which is the failure this ticket is written against.
 
 TEST_CASE("unusable character entries are skipped, not fatal", "[characters][failure]") {
-  const auto v = characters_from_json_body(nlohmann::json::parse(
+  const auto page = characters_from_json_body(nlohmann::json::parse(
       R"({"data":[{"slug":"a","name":"A"},42,null,"x",[],)"
       R"({"name":"no slug"},{"slug":123},{"slug":""},{"slug":"b"}]})"));
 
-  REQUIRE(v.size() == 2);
-  REQUIRE(v[0].slug == "a");
-  REQUIRE(v[1].slug == "b");
+  REQUIRE(page.entries.size() == 2);
+  REQUIRE(page.entries[0].slug == "a");
+  REQUIRE(page.entries[1].slug == "b");
+  // And the skipping is *visible*: nine elements arrived, two survived.
+  REQUIRE(page.returned == 9);
 }
 
 TEST_CASE("a character is skipped on slug, not on id", "[characters][failure]") {
@@ -150,12 +152,29 @@ TEST_CASE("a character is skipped on slug, not on id", "[characters][failure]") 
   // unusable, and an entry with a slug and no id is perfectly usable — getting
   // this backwards would drop every character while keeping every one that
   // cannot be selected.
-  const auto v = characters_from_json_body(nlohmann::json::parse(
+  const auto page = characters_from_json_body(nlohmann::json::parse(
       R"({"data":[{"id":"2f460055","name":"has id only"},{"slug":"s","name":"has slug only"}]})"));
 
-  REQUIRE(v.size() == 1);
-  REQUIRE(v[0].slug == "s");
-  REQUIRE_FALSE(v[0].id.has_value());
+  REQUIRE(page.entries.size() == 1);
+  REQUIRE(page.entries[0].slug == "s");
+  REQUIRE_FALSE(page.entries[0].id.has_value());
+}
+
+TEST_CASE("re-parsing into a used Character leaves nothing of the old one",
+          "[characters][failure]") {
+  // Every field but these two is assigned unconditionally, so a conditional
+  // slug would survive a re-parse and pair the *previous* character's slug
+  // with this one's name — and the slug is the field that selects a persona.
+  // nlohmann's get_to on a live object is the reachable path.
+  venice::Character c;
+  nlohmann::json::parse(kAlanWatts).get_to(c);
+  REQUIRE(c.slug == "alan-watts");
+  REQUIRE(c.stats.has_value());
+
+  nlohmann::json::parse(R"({"name":"Someone Else"})").get_to(c);
+  REQUIRE(c.slug.empty());
+  REQUIRE_FALSE(c.stats.has_value());
+  REQUIRE(c.name == "Someone Else");
 }
 
 TEST_CASE("a partial character entry is kept", "[characters]") {
@@ -240,7 +259,61 @@ TEST_CASE("wrong-typed character fields degrade to absent", "[characters][failur
   }
 }
 
-// ── §3 raw is a superset ──────────────────────────────────────────────────
+// ── §3 the page, not just the list ────────────────────────────────────────
+//
+// The section this endpoint needs and /models does not. `characters()` returns
+// a CharacterPage because a bare vector cannot answer "was that the last
+// page?": the parse skips what it cannot use, so the usable count and the
+// server's page size are different numbers, and paging on the wrong one ends
+// the walk early and calls a truncated catalogue complete.
+
+TEST_CASE("returned counts what the server sent, entries what survived",
+          "[characters][page]") {
+  SECTION("they agree when nothing is skipped") {
+    const auto page = characters_from_json_body(
+        nlohmann::json::parse(R"({"data":[{"slug":"a"},{"slug":"b"},{"slug":"c"}]})"));
+    REQUIRE(page.returned == 3);
+    REQUIRE(page.entries.size() == 3);
+  }
+
+  SECTION("they diverge on exactly one skipped entry — the paging bug") {
+    // A "full" page of three with one unusable entry. Terminating a walk on
+    // entries.size() < 3 stops here; on returned < 3 it correctly continues.
+    const auto page = characters_from_json_body(
+        nlohmann::json::parse(R"({"data":[{"slug":"a"},{"name":"no slug"},{"slug":"c"}]})"));
+    REQUIRE(page.returned == 3);
+    REQUIRE(page.entries.size() == 2);
+  }
+
+  SECTION("a page of entirely unusable entries is still a full page") {
+    // The degenerate version, and the one a caller most needs: zero usable
+    // characters must not read as "the catalogue ended".
+    const auto page = characters_from_json_body(
+        nlohmann::json::parse(R"({"data":[{"name":"x"},42,{"slug":""}]})"));
+    REQUIRE(page.returned == 3);
+    REQUIRE(page.entries.empty());
+  }
+
+  SECTION("an empty page is empty by both counts") {
+    const auto page = characters_from_json_body(nlohmann::json::parse(R"({"data":[]})"));
+    REQUIRE(page.returned == 0);
+    REQUIRE(page.entries.empty());
+  }
+}
+
+TEST_CASE("the page keeps the whole envelope", "[characters][page][raw]") {
+  // The documented body is {data, object} with no total and no cursor — but
+  // that shape has never been seen on a wire, so an envelope key that turns up
+  // later has to be reachable without changing this signature.
+  const auto page = characters_from_json_body(nlohmann::json::parse(
+      R"({"object":"list","total":812,"data":[{"slug":"a"}]})"));
+
+  REQUIRE(page.raw.at("object") == "list");
+  REQUIRE(page.raw.at("total") == 812);
+  REQUIRE(page.raw.at("data").size() == 1);
+}
+
+// ── §4 raw is a superset ──────────────────────────────────────────────────
 
 TEST_CASE("Character::raw holds the whole entry, modeled keys included",
           "[characters][raw]") {
@@ -262,7 +335,7 @@ TEST_CASE("Character::raw holds the whole entry, modeled keys included",
   }
 }
 
-// ── §4 the query build ────────────────────────────────────────────────────
+// ── §5 the query build ────────────────────────────────────────────────────
 //
 // Flattening is asserted through the finished URL rather than the pair vector,
 // because emission *order* is part of the contract — it is what makes the
@@ -291,16 +364,16 @@ TEST_CASE("empty character query values are not filters", "[characters][query][f
     REQUIRE(query_string(q) == "/characters");
   }
 
-  SECTION("a vector of empty strings emits nothing, not a bare comma") {
+  SECTION("a vector of empty strings emits nothing, not bare keys") {
     CharacterQuery q;
     q.tags = {"", ""};
     REQUIRE(query_string(q) == "/characters");
   }
 
-  SECTION("an empty element is dropped from the middle of a join") {
+  SECTION("an empty element is dropped from the middle of a repetition") {
     CharacterQuery q;
     q.tags = {"a", "", "b"};
-    REQUIRE(query_string(q) == "/characters?tags=a%2Cb");
+    REQUIRE(query_string(q) == "/characters?tags=a&tags=b");
   }
 }
 
@@ -353,12 +426,26 @@ TEST_CASE("character query fields use the wire's own spelling", "[characters][qu
     REQUIRE(query_string(q) == "/characters?limit=5000&offset=-1");
   }
 
-  SECTION("a multi-valued filter is comma-joined and the comma is encoded") {
+  SECTION("a multi-valued filter repeats the key, one element each") {
     CharacterQuery q;
     q.tags = {"helpful", "productivity"};
     q.categories = {"roleplay", "philosophy"};
     REQUIRE(query_string(q) ==
-            "/characters?tags=helpful%2Cproductivity&categories=roleplay%2Cphilosophy");
+            "/characters?tags=helpful&tags=productivity"
+            "&categories=roleplay&categories=philosophy");
+  }
+
+  SECTION("a value containing a comma stays one filter") {
+    // The case comma-joining could not express: joined, `{"a,b"}` and
+    // `{"a","b"}` are byte-identical on the wire, and the server's documented
+    // comma-splitting would turn one filter into two with nothing to say so.
+    CharacterQuery q;
+    q.categories = {"science, fiction"};
+    REQUIRE(query_string(q) == "/characters?categories=science%2C%20fiction");
+
+    CharacterQuery two;
+    two.categories = {"science", " fiction"};
+    REQUIRE(query_string(two) != query_string(q));
   }
 
   SECTION("a search term is encoded, not concatenated") {
@@ -402,7 +489,7 @@ TEST_CASE("character query extra is additive and loses to a modeled field",
   }
 }
 
-// ── §5 happy path, last ───────────────────────────────────────────────────
+// ── §6 happy path, last ───────────────────────────────────────────────────
 
 TEST_CASE("the documented character entry parses whole", "[characters]") {
   const auto c = one(kAlanWatts);
@@ -430,13 +517,14 @@ TEST_CASE("the documented character entry parses whole", "[characters]") {
 }
 
 TEST_CASE("a full listing parses into a picker's worth of characters", "[characters]") {
-  const auto v = characters_from_json_body(
+  const auto page = characters_from_json_body(
       list_of(std::string{kAlanWatts} + "," + kBare + R"(,{"slug":"z","name":"Z"})"));
 
-  REQUIRE(v.size() == 3);
-  REQUIRE(v[0].name == "Alan Watts");
-  REQUIRE_FALSE(v[1].name.has_value());
-  REQUIRE(v[2].name == "Z");
+  REQUIRE(page.entries.size() == 3);
+  REQUIRE(page.returned == 3);
+  REQUIRE(page.entries[0].name == "Alan Watts");
+  REQUIRE_FALSE(page.entries[1].name.has_value());
+  REQUIRE(page.entries[2].name == "Z");
 }
 
 TEST_CASE("the pagination query is what a full walk would send", "[characters][query]") {
