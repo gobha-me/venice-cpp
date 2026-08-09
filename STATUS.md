@@ -58,12 +58,16 @@ a single-family run.
    case in `test/07stream/` whose deliberate inversion is the ticket's
    acceptance criterion. The hard half is streaming: a merge rule for arbitrary
    unmodeled keys across fragments has no wire evidence to choose it yet.
-3. **A top-level `cost` object is on every reply and the library models it
+3. **VC-20 (#34): Venice reports what it charged, and the library models it
    nowhere.** Found while sweeping for VC-17: both paths carry
    `"cost":{"usd":0,"diem":0.001089404}` — the non-streaming envelope and the
-   streamed usage-bearing chunk. Venice reports what it actually charged, which
-   is strictly better than the rate-card arithmetic README describes, and it
-   rides untyped in `ChatResponse::raw` / `acc.chunks()` today. Not filed yet.
+   streamed usage-bearing chunk. That is authoritative where README's rate-card
+   arithmetic is a reconstruction, and VC-17 established the reconstruction
+   cannot be exact anyway (`cached_tokens` is per-family; pricing has two cache
+   buckets where `Usage` reports one). It rides untyped in `ChatResponse::raw` /
+   `acc.chunks()` today, which is what makes it additive rather than urgent. The
+   observed `"usd":0` on a call that cost real `diem` is the first thing to
+   measure.
 4. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
    embeddings, retries/backoff, async). Driven by real use, not
    speculatively.
