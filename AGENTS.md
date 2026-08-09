@@ -109,7 +109,10 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   hardcodes a *shape* set the way an enum hardcodes a value set, and would emit
   `{"type":"web_search","function":{"name":""}}` the day Venice accepts a tool
   entry that is not a function. `ToolCall` may nest unconditionally because it
-  re-serializes what the server *sent*. It would also break the escape hatch
+  re-serializes what the server *sent* — with the corollary VC-18 paid for: a
+  freshly built object serializes exactly what it models and drops everything
+  else, so any server-sent key a model *requires back* has to be modeled. That
+  was `thought_signature`, dropped silently until a live 400 found it. It would also break the escape hatch
   rather than merely omit it: a typed element leaves only `extra["tools"]`, which
   *loses* whenever `tools` is engaged, so the hatch's behaviour would flip on an
   unrelated field. The container stays typed
@@ -185,6 +188,12 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   arguably the caller's own request, while `Message::extra` will routinely be
   seeded from a response, which makes shadowing the common case rather than a
   pathology.
+- **Both hatches reach message-level keys only.** `tool_calls` is modeled, so it
+  is assigned over whatever the seed put there — `m.extra = m.raw` cannot rescue
+  an unmodeled key *inside* a tool call, and `ToolCall` has `raw` but no `extra`
+  of its own. VC-18 is the proof and VC-19 (#31) is the ticket; the limit is
+  pinned by a §0 case in `test/07stream/` rather than left implicit, so removing
+  it means inverting that case deliberately.
 - **`Message::from_json` is total; `ChatResponse::from_json_body` is loud. Do
   not unify them.** A message sub-object's shape legitimately varies — content
   string/null/absent/parts-array, tool_calls present or not — and the old
@@ -225,6 +234,22 @@ Both together mean the suite was green on either side of a bug that killed any
 real HTTPS caller. Anything touching socket teardown needs a live check against
 api.venice.ai as well — `/models` answers for any bearer token, so that costs
 nothing and needs no key.
+
+**A live smoke leg that auto-picks "the first model claiming a capability" must
+name the alternates it did not pick.** VC-18 read as a library bug for as long as
+it did because `--tools` silently chose one model and the screen gave no reason
+to suspect the next one would answer differently — it did, and the same assembled
+turn that a Gemini model rejected was accepted by glm. Server behaviour that
+varies by model family is invisible to a leg that only ever runs one, so printing
+the runners-up is part of the check, not decoration.
+
+**A convergence assertion cannot see a symmetric loss.** `test/07stream/`'s §10
+compares the streamed and non-streamed turns and is the file's payoff — and
+measured while running VC-18's break matrix, deleting the `thought_signature`
+emit leaves it *green*, because both sides lose the key identically and still
+compare equal. It caught only the breaks where one path kept the field and the
+other did not. Convergence is evidence about the stream's plumbing, never about
+serialization; that has to be pinned upstream or it is not pinned at all.
 
 `test/30sanitizer-smoke/` is not a unit test — it deliberately trips the active
 sanitizer to prove the toolchain is engaged rather than a silent no-op, which is

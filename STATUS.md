@@ -10,8 +10,8 @@ AGENTS.md (which holds standing conventions, not state).
 - `chat_stream()` SSE streaming, three forms: a content-text callback and two
   that assemble into a caller-owned `StreamAccumulator`. Cancellable.
 - A reply is a `Message` and a `Message` is what you send — reasoning_content,
-  tool_calls, tool_call_id, refusal, multimodal content parts, all
-  round-trippable, all individually withholdable.
+  tool_calls, tool_call_id, refusal, multimodal content parts and a tool call's
+  `thought_signature`, all round-trippable, all individually withholdable.
 - Per-request timeouts and a `CancelToken` on every entry point (VC-06).
 - `models()` list with typed per-model metadata, filterable by modality
   (105 text / 299 all, fetched live), `balance()` rate-limit endpoint.
@@ -54,15 +54,82 @@ live API. What they settled is recorded in each ticket's entry below; what they
    live `usage` carries only `prompt_tokens` / `completion_tokens` /
    `total_tokens`. Nothing is broken — absent parses as absent — but
    `test/07stream/` asserts a shape the API does not send.
-3. **VC-18 (#29): a replayed tool turn is rejected by Gemini-family models.**
-   Leg two of `--tools` comes back 400 asking for a `thought_signature` in the
-   functionCall part. The same turn is accepted by `zai-org-glm-4.7`, so the
-   assembly is right and something model-specific is not being carried.
+3. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
+   m.raw` is overwritten for `tool_calls` because that key is modeled, and
+   `ToolCall` has `raw` but no `extra`, so an unmodeled tool-call key is
+   unrecoverable. VC-18 was exactly that failure. The limit is pinned by a §0
+   case in `test/07stream/` whose deliberate inversion is the ticket's
+   acceptance criterion. The hard half is streaming: a merge rule for arbitrary
+   unmodeled keys across fragments has no wire evidence to choose it yet.
 4. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
    embeddings, retries/backoff, async). Driven by real use, not
    speculatively.
 5. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-18 (#29) is done** — see v0.11.0. A key settled what the ticket left open,
+and the answer was the third option it did not list: Venice passes Gemini's
+`thought_signature` through untouched, and the library dropped it.
+
+Measured against api.venice.ai on 2026-08-09, and these are the plan's ground
+truth rather than its reasoning:
+
+- `gemini-3-6-flash` returns the call as `{"id","type","thought_signature",
+  "function":{...}}` — the signature is a **sibling of `function`**, not a member
+  of it.
+- Replayed with it stripped: `HTTP 400 "Function call is missing a
+  thought_signature in functionCall parts"`, the ticket's error reproduced.
+  Replayed with it echoed: `200`. Necessary *and* sufficient — nothing else about
+  the turn had to change.
+- `gemini-3-5-flash` splits one tool call across **two** streaming fragments.
+  Multi-fragment calls are real, which is what rules out reading the signature
+  off `slot.raw`.
+
+Four things are worth knowing:
+
+- **There were two independent losses, so the ticket's "either/or" was a false
+  dichotomy.** `ToolCall::to_json` builds a *fresh* object from four modeled keys
+  and never consults `t.raw`; and `Message::to_json` assigns `j["tool_calls"]`
+  unconditionally, so the documented `m.extra = m.raw` hatch could not have
+  rescued it either. `Message::to_json` needed no change in the end — the gap was
+  one level down from where #29 guessed. The residual hole is VC-19 (#31).
+- **The merge rule is first-non-empty, and one half of it is analogical rather
+  than measured.** The signature is not tied to the opening fragment the way
+  id/type/name are, so it obeys the same rule those do; the extra guard against a
+  *blank* signature on a continuation mirrors the `"name": ""` behaviour already
+  documented in that comment block, and no capture has shown it. It is labelled
+  as such in the code, and it is the only rule difference a test can discriminate.
+- **A generic `ToolCall::extra` was considered and rejected**, not on taste: it
+  would not have fixed this bug (the only rule touching unmodeled data across
+  fragments is the first-fragment `slot.raw` rule that finding 3 falsifies), and
+  no unmodeled key exists today whose loss can be demonstrated — a hatch with no
+  failure case is the speculative design this repo refuses.
+- **§10's convergence assertion is blind to half the break matrix, and that was
+  measured, not assumed.** Eight deliberate breaks were installed one at a time
+  against the fixed header and the red sets recorded. Deleting the emit turns
+  seven cases red across §2/§6/§9 and leaves §10 **green** — both paths lose the
+  key identically and still compare equal. §10 caught only the asymmetric breaks.
+  Two breaks exist solely to prove a case is load bearing: emitting the key
+  unconditionally is caught by the two no-signature cases and nothing else, and
+  the weaker merge guard is caught by the empty-first case and nothing else.
+  These cases could not be run red against the pre-VC-18 header — the field does
+  not exist there, so they do not compile — and the test file says so rather than
+  implying a red run.
+
+`--tools` is now a live regression check rather than a one-family spot check: it
+names the runners-up it did not auto-pick (the second-order finding in #29 — the
+bug read as a library defect precisely because one model was chosen silently),
+reports whether a signature came back, reads the echo off the **serialized body**
+rather than the struct (the defect lived downstream of the field), and returns
+failure when a signature is seen but not carried back, so a future tolerant model
+cannot let this regress behind a green leg two.
+
+Live on three families, all both legs: `gemini-3-6-flash` (signature present, 384
+chars, echoed), `gemini-3-5-flash` (no signature), `zai-org-glm-4.7` (no
+signature — the proof that other families' bodies did not move). Suite 13/13 on
+gcc and clang, 13/13 under ASan/UBSan/TSan, check_artifacts 16/16, consumer
+harness 3/3 on both compilers. Additive to a public header, and the wire body
+changes for a whole model family, hence the minor bump.
 
 **VC-07 (#8, install/export) is done** — see v0.2.0. Upstream CT-04 landed the
 pattern for the whole cpp-template family and this repo ported it rather than

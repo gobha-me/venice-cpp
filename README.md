@@ -28,7 +28,9 @@ right bridge.
 - **Tool / function calling, both directions** — declare functions with `tools`,
   steer with `tool_choice` and `parallel_tool_calls`; read the model's request
   back as typed `ToolCall`s and answer it with `Message::tool()`. Tool-call
-  argument fragments are merged across a stream by index, never by position.
+  argument fragments are merged across a stream by index, never by position, and
+  the opaque `thought_signature` some families require echoed on the next turn
+  is carried back for you.
 - **`venice_parameters`** extension — web search, citations, character,
   thinking toggles, with forward-compatible passthrough for unmodeled keys.
 - **Models list** (`/models`) — typed metadata per model: context window,
@@ -431,6 +433,27 @@ attractive — a parsed reply would round-trip for free — but it honours
 resends the answer you just redacted. Verbatim replay of unmodeled keys is still
 one deliberate line: `turn.extra = turn.raw;`
 
+**Those hatches reach message-level keys only.** `tool_calls` is a modeled field,
+so it wins over the seed — an unmodeled key *inside* a tool call is not
+recoverable by `turn.extra = turn.raw`. That is not a hypothetical: it is how
+`thought_signature` was lost (#29), and why the field is modeled rather than left
+to a hatch. A tool-call-level passthrough is filed as #31.
+
+### Signatures on a tool call
+
+Gemini-family models attach an opaque `thought_signature` to the function-call
+part and **require it echoed verbatim** on the next turn. Measured against
+`api.venice.ai` on `gemini-3-6-flash`, 2026-08-09: the same turn replayed with it
+stripped is `HTTP 400` — *"Function call is missing a thought_signature in
+functionCall parts"* — and replayed with it echoed is `200`. Venice passes the
+field through rather than stripping it; it sits beside `function`, not inside it.
+
+`ToolCall::thought_signature` holds it, and the caller does nothing: replaying
+`*res->message` carries it back. It is emitted **only when the server sent one**,
+so a family that uses no signature — `zai-org-glm-4.7`, for instance — produces
+the byte-identical body it always did. The value is opaque and is never decoded,
+validated or length-checked.
+
 `content` is `std::optional<nlohmann::json>` rather than a string, because the
 wire has four states and only that type holds all of them: absent (`nullopt`),
 `null` (`= nullptr`), text, and a multimodal parts array. `text()` flattens it
@@ -460,7 +483,10 @@ req.parallel_tool_calls = false;                      // one call at a time
 tool shape — and would emit `{"type":"web_search","function":{"name":""}}` the
 day Venice accepts an entry that is not a function. `ToolCall` on the response
 side may nest unconditionally because it re-serializes what the server *sent*;
-`tools` is yours to author. So the builders supply the ergonomics and anything
+`tools` is yours to author. The corollary, learned the expensive way in #29: a
+freshly built object serializes exactly what it models and drops the rest, so a
+server-sent tool-call key that a model *requires back* has to be modeled — no
+hatch reaches it. So the builders supply the ergonomics and anything
 they don't cover you assign yourself, exactly as with `response_format`:
 
 ```cpp
@@ -501,7 +527,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.10.1)
+  GIT_TAG        v0.11.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -606,10 +632,13 @@ counts move as Venice's catalogue does.
 the "documented, not measured" caveat that covered v0.8.0 through v0.10.0 is
 retired. `--characters` confirmed every modeled key, its types and the 50-entry
 default page; `--stream` confirmed where `reasoning_content` sits and that the
-turn replays; `--tools` confirmed a tool call round-trips and is accepted back.
-Two things the runs opened rather than closed are filed as #28 (`Usage`'s nested
-detail objects are modeled but never sent) and #29 (a replayed tool turn is
-rejected by Gemini-family models, accepted by others).
+turn replays; `--tools` confirmed a tool call round-trips and is accepted back —
+**on the family it happened to pick.** Run against another it was rejected, which
+is #29 below. Two things the runs opened rather than closed were filed as #28
+(`Usage`'s nested detail objects are modeled but never sent) and #29 (a replayed
+tool turn rejected by Gemini-family models); **#29 is fixed in v0.11.0**, and
+`--tools` now passes both legs on `gemini-3-6-flash`, `gemini-3-5-flash` and
+`zai-org-glm-4.7`.
 
 The original caveat, for the record: the
 **v0.8.0, v0.9.0 and v0.10.0 wire shapes were documented, not measured**. Where
@@ -629,7 +658,14 @@ VENICE_API_KEY=... venice-cpp --characters     # v0.10.0: the character entry
 
 `--tools` runs two legs, and the second is the one that matters: leg one proves
 `tools` parsed, leg two answers the call and proves the assembled turn is a
-conversation Venice will continue. `--characters` prints the columns a picker
+conversation Venice will continue. With no model argument it auto-picks the first
+text model claiming `supports_function_calling` and **names the runners-up**,
+because #29 read as a library bug until the same run was tried on another family
+— `venice-cpp --tools <id>` runs the same two legs on any of them, and a pass
+there with a failure here is a model-family gap. It also reports whether a
+`thought_signature` came back, dumps the turn as it would be replayed, and fails
+the run if a signature was seen but not carried back, so VC-18 cannot regress
+quietly behind a green leg two. `--characters` prints the columns a picker
 would branch on, so a key that parses in the fixture and not in reality shows up
 as a blank column; its count is also the only evidence for the claim that the
 page defaults to 50. If something disagrees, the fixture in `test/07stream/`,

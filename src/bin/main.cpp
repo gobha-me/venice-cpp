@@ -269,6 +269,7 @@ auto stream_report(const venice::Client& client, const std::string& prompt) -> i
 // ChatResponse::raw and Message::raw are why a wrong guess here is recoverable.
 auto tools_report(const venice::Client& client, std::string_view model) -> int {
   std::string chosen{model};
+  std::vector<std::string> alternates;
   if (chosen.empty()) {
     // Pick a model that claims to support this, which also gives VC-03's
     // supports_function_calling flag its first live use — a flag nothing has
@@ -279,12 +280,24 @@ auto tools_report(const venice::Client& client, std::string_view model) -> int {
                 << models.error().message << '\n';
       return EXIT_FAILURE;
     }
-    for (const auto& m : *models)
-      if (m.capabilities && m.capabilities->supports_function_calling &&
-          *m.capabilities->supports_function_calling) {
+    // Collect a few rather than breaking on the first. VC-18 (#29) was filed as
+    // a library bug because this leg auto-picked one model and there was
+    // nothing on screen to suggest the next one might answer differently — and
+    // it did: the assembled turn was rejected by the Gemini family and accepted
+    // by glm. Naming the runners-up is the whole fix for that, and it costs no
+    // policy. A hardcoded list of "families that work" would be the wrong
+    // shape, and stale the day Venice adds one.
+    for (const auto& m : *models) {
+      if (!(m.capabilities && m.capabilities->supports_function_calling &&
+            *m.capabilities->supports_function_calling))
+        continue;
+      if (chosen.empty())
         chosen = m.id;
+      else if (alternates.size() < 4)
+        alternates.push_back(m.id);
+      else
         break;
-      }
+    }
     if (chosen.empty()) {
       std::cerr << "no text model reported supports_function_calling -- either none does,"
                    " or that flag is not where Model expects it\n";
@@ -303,8 +316,16 @@ auto tools_report(const venice::Client& client, std::string_view model) -> int {
   req.tool_choice = venice::tool_choice::automatic();
   req.parallel_tool_calls = false;
 
-  std::cerr << "model: " << chosen << "\n\n-- leg 1: the body actually sent --\n"
-            << req.to_json_body(false).dump(2) << '\n';
+  std::cerr << "model: " << chosen << '\n';
+  if (!alternates.empty()) {
+    std::cerr << "others claiming function calling: ";
+    for (std::size_t i = 0; i < alternates.size(); ++i)
+      std::cerr << (i != 0U ? ", " : "") << alternates[i];
+    std::cerr << "\n  (venice-cpp --tools <id> runs these same two legs on any of them;"
+                 " a pass there\n   with a failure here is a model-family gap, not an"
+                 " assembly bug)\n";
+  }
+  std::cerr << "\n-- leg 1: the body actually sent --\n" << req.to_json_body(false).dump(2) << '\n';
 
   const auto first = client.chat(req);
   if (!first) {
@@ -339,8 +360,30 @@ auto tools_report(const venice::Client& client, std::string_view model) -> int {
   if (const auto parsed = call.parsed_arguments(); !parsed)
     std::cerr << "arguments DID NOT PARSE: " << parsed.error().message << '\n';
 
+  std::cerr << "thought_signature  : ";
+  if (call.thought_signature)
+    std::cerr << "present, " << call.thought_signature->size()
+              << " chars  <-- this family requires it echoed on leg 2 (VC-18)\n";
+  else
+    std::cerr << "(none -- this family does not use one)\n";
+
   // Leg two. Replay the assistant turn verbatim, then answer the call.
-  req.messages.push_back(*first->message);
+  //
+  // Read the echo off the SERIALIZED body, not off the struct. VC-18's defect
+  // lived in ToolCall::to_json, downstream of the field — re-reading
+  // call.thought_signature here would only restate what leg 1 just printed and
+  // would have stayed quiet through the entire bug.
+  auto assistant_turn = *first->message;
+  const nlohmann::json replayed = assistant_turn;
+  const bool echoed = replayed.contains("tool_calls") && !replayed.at("tool_calls").empty() &&
+                      replayed.at("tool_calls").at(0).contains("thought_signature");
+  const bool signature_lost = call.thought_signature.has_value() && !echoed;
+
+  std::cerr << "\n-- the turn, as it would be replayed --\n" << replayed.dump(2) << '\n';
+  if (signature_lost)
+    std::cerr << "\nSIGNATURE SEEN BUT NOT ECHOED -- VC-18 has regressed; leg 2 will 400\n";
+
+  req.messages.push_back(std::move(assistant_turn));
   req.messages.push_back(venice::Message::tool(call.id, R"({"temp_f":68,"sky":"fog"})"));
 
   const auto second = client.chat(req);
@@ -348,13 +391,23 @@ auto tools_report(const venice::Client& client, std::string_view model) -> int {
     std::cerr << "\n-- leg 2 REJECTED --\n[" << venice::to_string(second.error().kind) << "] "
               << second.error().message << "\nbody: " << second.error().body
               << "\n\nThis is the half no fixture can settle: the turn assembled here is not"
-                 " something Venice will take back.\n";
+                 " something Venice will take back.\nRun the same two legs on another family"
+                 " before reading this as a library bug:\n"
+              // The runners-up are only on screen when this leg auto-picked. A
+              // caller who named the model got no such line, so pointing at
+              // "the list above" would be pointing at nothing.
+              << (alternates.empty()
+                      ? "`venice-cpp --tools` with no argument lists other models that claim it.\n"
+                      : "`venice-cpp --tools <id>` with any id from the list above.\n");
     return EXIT_FAILURE;
   }
 
   std::cerr << "\n-- leg 2: the tool result was accepted --\n";
   std::cout << second->content << '\n';
-  return EXIT_SUCCESS;
+  // A pass is not enough. A future model that tolerates a stripped signature
+  // would let VC-18 regress silently behind a green leg 2, so a signature seen
+  // and not carried back fails the run on its own.
+  return signature_lost ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
 }  // namespace
