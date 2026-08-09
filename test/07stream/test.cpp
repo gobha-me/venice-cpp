@@ -41,6 +41,17 @@
 //     and never built a Message, so every §3 assertion below had no field to
 //     read.
 //
+// VC-18's thought_signature cases (§2, §6, §9) could NOT be proven that way, and
+// saying so is better than implying they were: the field does not exist on the
+// pre-VC-18 header, so those cases do not compile against it — which is absence
+// of evidence, not a red run. They were proven the other way instead, by
+// installing eight deliberate breaks in the *new* header one at a time and
+// recording which cases went red for each; the run is in the PR and the STATUS
+// entry. Two of those breaks exist only to prove a case is load bearing:
+// emitting the key unconditionally (caught by the two no-signature cases and
+// nothing else), and the weaker of the two candidate merge guards (caught by
+// the empty-first case and nothing else).
+//
 // Failure matrix first, happy path last.
 
 #include <catch2/catch_test_macros.hpp>
@@ -171,6 +182,25 @@ TEST_CASE("extra seeds the body and modeled fields win over it", "[message][merg
   REQUIRE(sent.at("cache_control").at("type") == "ephemeral");     // unmodeled rides
 }
 
+// This pins a KNOWN LIMIT, not a desired behaviour (VC-19). `tool_calls` is a
+// modeled key, so Message::to_json assigns over whatever the seed put there —
+// which means the documented `m.extra = m.raw` escape hatch reaches
+// message-level keys only and cannot rescue an unmodeled key *inside* a tool
+// call. That is exactly how VC-18's thought_signature was lost, and why it had
+// to be modeled rather than left to a hatch. The day ToolCall grows its own
+// passthrough this case goes red, and inverting it deliberately is the
+// acceptance criterion for that ticket.
+TEST_CASE("extra cannot reach a key inside tool_calls, and that is a stated limit",
+          "[message][merge][failure]") {
+  auto m = turn();
+  m.raw["tool_calls"][0]["unmodeled_key"] = "carried by the server";
+  m.extra = m.raw;  // the full verbatim-replay hatch, deliberately engaged
+
+  const nlohmann::json sent = m;
+  REQUIRE(sent.at("tool_calls").at(0).at("id") == "call_a");
+  REQUIRE_FALSE(sent.at("tool_calls").at(0).contains("unmodeled_key"));
+}
+
 TEST_CASE("a non-object extra degrades to no seed rather than throwing", "[message][merge][failure]") {
   auto m = Message::user("hi");
   SECTION("array") { m.extra = nlohmann::json::array({1, 2}); }
@@ -255,6 +285,7 @@ TEST_CASE("ToolCall::from_json tolerates every fragment shape", "[toolcall][pars
       R"({"index":0,"function":{"arguments":"{\"lo"}})",   // a continuation
       R"({"function":"not an object"})",
       R"({"id":42})",
+      R"({"thought_signature":42})",
       R"([])",
   };
   for (const auto& s : shapes) {
@@ -299,6 +330,99 @@ TEST_CASE("a ToolCall with no type defaults to function on the wire", "[toolcall
   REQUIRE(j.at("type") == "function");
   REQUIRE(j.at("function").at("name") == "f");
   REQUIRE(j.at("function").at("arguments") == "{}");
+}
+
+// VC-18 (#29). A Gemini-family model attaches an opaque signature to the
+// function-call part and 400s the next turn if it does not come back. The four
+// cases below are ordered non-regression first: the field is new, and the
+// expensive way to get it wrong is not "the signature is missing" — that fails
+// loudly against one family — but "every other family's body moved", which
+// fails against all of them and was green the whole time.
+//
+// A realistic value, because base64 contains '+', '/' and '=' and a naive
+// encoder somewhere downstream would only show up on one that does.
+namespace {
+constexpr auto kSig =
+    "AY89a19vUCxARrnsLLo2whPeNwfnUiESldLD2jBxsz/vhLb3XZoh8cVySH2tKTuxVHaLC5at+w==";
+}  // namespace
+
+TEST_CASE("a call with no signature emits no thought_signature key at all",
+          "[toolcall][merge][failure]") {
+  // Byte-exact rather than a contains() sweep, on test/02request's reasoning:
+  // a key-by-key absence check passes happily when some *other* key is
+  // accidentally emitted. This string is the pre-VC-18 body, unchanged.
+  constexpr auto kUnmoved =
+      R"({"function":{"arguments":"{}","name":"f"},"id":"call_x","type":"function"})";
+
+  SECTION("hand-built") {
+    ToolCall t;
+    t.id = "call_x";
+    t.name = "f";
+    t.arguments = "{}";
+    REQUIRE_FALSE(t.thought_signature.has_value());
+    REQUIRE(nlohmann::json(t).dump() == kUnmoved);
+  }
+  SECTION("parsed from a signature-less wire object") {
+    const auto t = nlohmann::json::parse(kUnmoved).get<ToolCall>();
+    REQUIRE_FALSE(t.thought_signature.has_value());
+    REQUIRE(nlohmann::json(t).dump() == kUnmoved);
+  }
+}
+
+TEST_CASE("an opaque signature is a sibling of function and survives verbatim",
+          "[toolcall][parse][failure]") {
+  const auto wire = nlohmann::json::parse(
+      std::string{R"({"id":"call_0","type":"function","thought_signature":")"} + kSig +
+      R"(","function":{"name":"get_weather","arguments":"{\"city\":\"SF\"}"}})");
+
+  const auto t = wire.get<ToolCall>();
+  REQUIRE(t.thought_signature == kSig);
+
+  const nlohmann::json sent = t;
+  REQUIRE(sent.at("thought_signature") == kSig);
+  // The placement assertion, and the reason this case exists at all: nesting it
+  // inside `function` parses and serializes and reads fine, and still 400s.
+  REQUIRE_FALSE(sent.at("function").contains("thought_signature"));
+  // Nothing else moved, and no extra key rode along.
+  REQUIRE(sent == wire);
+}
+
+TEST_CASE("a wrong-typed signature reads as absent rather than throwing",
+          "[toolcall][parse][failure]") {
+  // Absent is the honest outcome: it produces the server's 400 rather than
+  // putting a confident wrong value on the wire.
+  const auto shapes = std::vector<std::string>{
+      R"({"id":"c","thought_signature":42})",   R"({"id":"c","thought_signature":null})",
+      R"({"id":"c","thought_signature":{"a":1}})", R"({"id":"c","thought_signature":[]})",
+      R"({"id":"c","thought_signature":true})",
+  };
+  for (const auto& s : shapes) {
+    INFO("shape: " << s);
+    ToolCall t;
+    REQUIRE_NOTHROW(t = nlohmann::json::parse(s).get<ToolCall>());
+    REQUIRE_FALSE(t.thought_signature.has_value());
+    REQUIRE_FALSE(nlohmann::json(t).contains("thought_signature"));
+  }
+}
+
+TEST_CASE("an engaged empty signature is distinct from a disengaged one", "[toolcall][merge]") {
+  // Same rule as content and tool_calls in §0: engaged-but-empty is a value the
+  // caller chose. The policy about what an empty signature *means* lives in one
+  // place only, the accumulator's merge — not here.
+  ToolCall t;
+  t.id = "call_x";
+  t.name = "f";
+  t.arguments = "{}";
+
+  SECTION("disengaged omits the key") {
+    REQUIRE_FALSE(nlohmann::json(t).contains("thought_signature"));
+  }
+  SECTION("engaged empty emits \"\"") {
+    t.thought_signature = "";
+    const nlohmann::json sent = t;
+    REQUIRE(sent.contains("thought_signature"));
+    REQUIRE(sent.at("thought_signature") == "");
+  }
 }
 
 // ── §3 ChatResponse keeps the turn, and stays loud about structure ────────
@@ -450,6 +574,31 @@ TEST_CASE("an assistant turn replays into the next request intact", "[message][r
   REQUIRE(tool.at("role") == "tool");
   REQUIRE(tool.at("tool_call_id") == "call_a");
   REQUIRE(tool.at("content") == R"({"temp_f":68})");
+}
+
+// VC-18's acceptance criterion, in the form the live 400 took. Message::to_json
+// needed no change for this to work — it assigns j["tool_calls"] and each
+// element serializes itself — and that is precisely the claim worth pinning:
+// this case goes red if anyone ever "optimises" that assignment into something
+// that reconstructs the array by hand.
+TEST_CASE("a replayed turn carries the tool-call signature back", "[message][replay][failure]") {
+  const auto body = nlohmann::json::parse(
+      std::string{R"({"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[)"} +
+      R"({"id":"call_0","type":"function","thought_signature":")" + kSig +
+      R"(","function":{"name":"get_weather","arguments":"{\"city\":\"SF\"}"}}]}}]})");
+
+  ChatRequest next;
+  next.model = "gemini-3-6-flash";
+  next.messages = {Message::user("what is the weather in SF?"),
+                   *ChatResponse::from_json_body(body).message,
+                   Message::tool("call_0", R"({"temp_f":68})")};
+
+  // By value, not by reference: to_json_body returns a temporary, and chaining
+  // at() off it dangles. The neighbouring case above does the same, and GCC's
+  // -Wdangling-reference catches it — this one was written wrong first.
+  const auto replayed = next.to_json_body(/*stream=*/false).at("messages").at(1);
+  REQUIRE(replayed.at("tool_calls").at(0).at("thought_signature") == kSig);
+  REQUIRE_FALSE(replayed.at("tool_calls").at(0).at("function").contains("thought_signature"));
 }
 
 TEST_CASE("thinking can be refed or withheld, per turn", "[message][replay]") {
@@ -732,6 +881,117 @@ TEST_CASE("a continuation does not clobber the scalars", "[stream][accumulator][
   REQUIRE(call.arguments == "{}");
 }
 
+// VC-18 across the streaming path. Every case asserts the merged struct *and*
+// the emitted JSON: without the pair, deleting the to_json line is caught in §2
+// alone and all of these stay green.
+TEST_CASE("a signature arriving on the second fragment survives the merge",
+          "[stream][accumulator][failure]") {
+  // Measured 2026-08-09: gemini-3-6-flash sends the whole call in one fragment,
+  // gemini-3-5-flash splits the same call across two. So the signature is not
+  // tied to the opening fragment, and any design that reads it off slot.raw —
+  // which holds fragment one only — fails exactly here.
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0","type":"function",
+           "function":{"name":"get_weather","arguments":""}}]}}]})",
+      std::string{R"({"choices":[{"delta":{"tool_calls":[{"index":0,"thought_signature":")"} +
+          kSig + R"(","function":{"arguments":"{\"city\":\"SF\"}"}}]}}]})",
+  });
+
+  const auto m = acc.message();  // by value: a reference into the temporary would dangle
+  REQUIRE(m.tool_calls->at(0).thought_signature == kSig);
+  REQUIRE(m.tool_calls->at(0).arguments == R"({"city":"SF"})");
+  REQUIRE(nlohmann::json(m).at("tool_calls").at(0).at("thought_signature") == kSig);
+}
+
+TEST_CASE("a continuation does not blank a signature already seen",
+          "[stream][accumulator][failure]") {
+  const auto acc = accumulate({
+      std::string{R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0",
+           "type":"function","thought_signature":")"} +
+          kSig + R"(","function":{"name":"f","arguments":"{"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","thought_signature":"",
+           "function":{"name":"","arguments":"}"}}]}}]})",
+  });
+
+  const auto m = acc.message();
+  REQUIRE(m.tool_calls->at(0).thought_signature == kSig);
+  REQUIRE(nlohmann::json(m).at("tool_calls").at(0).at("thought_signature") == kSig);
+}
+
+TEST_CASE("an empty signature does not win over the real one that follows",
+          "[stream][accumulator][failure]") {
+  // The case that discriminates the two candidate merge rules, the way §0's
+  // first case discriminates the two candidate serialization rules. A plain
+  // `if (!slot.thought_signature)` guard latches the empty string from
+  // fragment one and emits "" — which is the same 400 as emitting nothing,
+  // with a lie attached. The non-empty guard is what makes this green.
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0","type":"function",
+           "thought_signature":"","function":{"name":"f","arguments":"{"}}]}}]})",
+      std::string{R"({"choices":[{"delta":{"tool_calls":[{"index":0,"thought_signature":")"} +
+          kSig + R"(","function":{"arguments":"}"}}]}}]})",
+  });
+
+  const auto m = acc.message();
+  REQUIRE(m.tool_calls->at(0).thought_signature == kSig);
+  REQUIRE(nlohmann::json(m).at("tool_calls").at(0).at("thought_signature") == kSig);
+}
+
+TEST_CASE("a stream with no signature produces a turn with no signature key",
+          "[stream][accumulator][failure]") {
+  // zai-org-glm-4.7's shape. This is where the "other families' bodies do not
+  // move" claim lives, and it is byte-exact for the reason §2's twin is.
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function",
+           "function":{"name":"f","arguments":"{"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]})",
+  });
+
+  const auto m = acc.message();
+  REQUIRE_FALSE(m.tool_calls->at(0).thought_signature.has_value());
+  REQUIRE(nlohmann::json(m).at("tool_calls").at(0).dump() ==
+          R"({"function":{"arguments":"{}","name":"f"},"id":"call_a","type":"function"})");
+}
+
+TEST_CASE("two calls each keep their own signature", "[stream][accumulator][failure]") {
+  // Fragments interleaved out of order, which catches an implementation that
+  // parks the signature on the accumulator instead of on the slot.
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","type":"function",
+           "function":{"name":"f","arguments":"{}"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"b","type":"function",
+           "thought_signature":"SIG-B","function":{"name":"g","arguments":"[]"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"thought_signature":"SIG-A"}]}}]})",
+  });
+
+  const auto m = acc.message();
+  REQUIRE(m.tool_calls->at(0).thought_signature == "SIG-A");
+  REQUIRE(m.tool_calls->at(1).thought_signature == "SIG-B");
+  const auto sent = nlohmann::json(m).at("tool_calls");
+  REQUIRE(sent.at(0).at("thought_signature") == "SIG-A");
+  REQUIRE(sent.at(1).at("thought_signature") == "SIG-B");
+}
+
+TEST_CASE("raw on a merged call is the first fragment, not the whole call",
+          "[stream][accumulator]") {
+  // The honesty case for the merge block's corrected comment. There is no
+  // single verbatim server object for a call that arrived in pieces, so raw
+  // holds the opening fragment and chunks() is the complete record. Overlaying
+  // the fragments would be a synthesised value wearing a "verbatim" label.
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function",
+           "function":{"name":"f","arguments":"{"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]})",
+  });
+
+  const auto m = acc.message();
+  const auto& raw = m.tool_calls->at(0).raw;
+  REQUIRE(raw.at("id") == "call_a");
+  REQUIRE(raw.at("function").at("arguments") == "{");  // fragment one, not "{}"
+  REQUIRE(m.tool_calls->at(0).arguments == "{}");      // the merged value is right
+  REQUIRE(acc.chunks().size() == 2);                   // and the full record is here
+}
+
 TEST_CASE("two calls in a single chunk are both taken", "[stream][accumulator][failure]") {
   const auto acc = accumulate({
       R"({"choices":[{"delta":{"tool_calls":[
@@ -846,6 +1106,17 @@ TEST_CASE("reset clears everything but the retention setting", "[stream][accumul
 // then everything the non-streamed parse keeps, the stream keeps too — and the
 // stream's own extra plumbing (framing, fragment merge, two text buffers) has
 // not quietly dropped or reordered anything.
+//
+// What it CANNOT see, measured while running VC-18's break matrix rather than
+// reasoned: a loss that is symmetric across both paths. Deleting the
+// thought_signature emit from ToolCall::to_json, or moving it inside
+// `function`, leaves this case green — both sides lose the key identically and
+// still compare equal — while seven cases elsewhere in this file go red. It
+// caught the two *asymmetric* breaks (dropping the merge line, and taking the
+// signature from the first fragment only), where the non-streamed path keeps
+// the field and the stream does not. So convergence is evidence about the
+// stream's plumbing, never about serialization; that has to be pinned upstream,
+// in §2, or it is not pinned at all.
 
 TEST_CASE("a streamed reply assembles to the same message as a non-streamed one",
           "[stream][accumulator][converge]") {
@@ -854,7 +1125,7 @@ TEST_CASE("a streamed reply assembles to the same message as a non-streamed one"
     "choices":[{"index":0,"finish_reason":"tool_calls","message":{
       "role":"assistant","reasoning_content":"step one, step two",
       "content":"partial answer",
-      "tool_calls":[{"id":"call_a","type":"function",
+      "tool_calls":[{"id":"call_a","type":"function","thought_signature":"SIG-A",
                      "function":{"name":"get_weather","arguments":"{\"location\":\"SF\"}"}},
                     {"id":"call_b","type":"function",
                      "function":{"name":"clock","arguments":"{}"}}]}}],
@@ -875,7 +1146,8 @@ TEST_CASE("a streamed reply assembles to the same message as a non-streamed one"
       R"({"choices":[{"delta":{"content":"al answer"}}]})",
       R"({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function",
            "function":{"name":"clock","arguments":"{}"}}]}}]})",
-      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"SF\"}"}}]}}]})",
+      R"({"choices":[{"delta":{"tool_calls":[{"index":0,"thought_signature":"SIG-A",
+           "function":{"arguments":"\"SF\"}"}}]}}]})",
       R"({"choices":[{"finish_reason":"tool_calls","delta":{}}]})",
       R"({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,
            "prompt_tokens_details":{"cached_tokens":4},

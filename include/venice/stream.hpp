@@ -397,9 +397,21 @@ class StreamAccumulator {
   //   * arguments is appended verbatim, never trimmed. Whitespace inside a JSON
   //     string literal is significant, and a fragment is not valid JSON on its
   //     own so there is nothing to validate against.
+  //   * thought_signature obeys the same first-non-empty rule, and it *must*:
+  //     unlike id/type/name it is not tied to the opening fragment. Measured
+  //     2026-08-09 — gemini-3-6-flash sends the whole call in one fragment with
+  //     the signature attached, gemini-3-5-flash splits the same call across
+  //     two. So it cannot be read off `raw` below, which is fragment one only.
   //
   // A fragment with no index at all is treated as index 0, which is what a
   // non-streamed reply and a single-call stream both look like.
+  //
+  // `raw` here is the FIRST fragment, not a record of the call: on a
+  // multi-fragment call there is no single verbatim server object to hold, and
+  // its `function.arguments` is only the opening chunk. `chunks()` is where the
+  // complete record lives. Overlaying the fragments into one object would be a
+  // synthesised value wearing a "verbatim" label, which is the same thing
+  // response() refuses to do for ChatResponse::raw above.
   void merge_tool_call(const ToolCall& frag) {
     auto& slot = m_calls[frag.index.value_or(0)];
     if (slot.id.empty()) slot.id = frag.id;
@@ -407,6 +419,14 @@ class StreamAccumulator {
     if (slot.name.empty()) slot.name = frag.name;
     slot.arguments += frag.arguments;
     if (!slot.index) slot.index = frag.index;
+    // The empty-signature half of this guard is analogical, not measured: no
+    // capture has shown a blank signature on a continuation. It mirrors the
+    // `"name": ""` behaviour documented three bullets up, on this same object
+    // with this same lifecycle — and an empty signature is not a signature,
+    // since emitting "" is the same 400 as emitting none with a lie attached.
+    if ((!slot.thought_signature || slot.thought_signature->empty()) &&
+        frag.thought_signature && !frag.thought_signature->empty())
+      slot.thought_signature = frag.thought_signature;
     if (slot.raw.is_null()) slot.raw = frag.raw;
   }
 

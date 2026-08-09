@@ -176,6 +176,26 @@ struct ToolCall {
   // Present on streaming fragments, absent on a non-streamed reply. It is the
   // *join key* while accumulating, not an array position — see stream.hpp.
   std::optional<int> index{};
+  // Gemini-family models attach an opaque signature to the function-call part
+  // and require it echoed back on the next turn (VC-18, #29). Measured against
+  // api.venice.ai on gemini-3-6-flash, 2026-08-09: the same turn replayed with
+  // it stripped is HTTP 400 ("Function call is missing a thought_signature in
+  // functionCall parts"), replayed with it echoed is 200. Necessary and
+  // sufficient — nothing else about the turn had to change.
+  //
+  // It is a SIBLING of `function`, not a member of it, and Venice passes it
+  // through unmodified rather than stripping it. Nesting it inside `function`
+  // is the one way to reimplement this and still get the 400.
+  //
+  // optional<string> rather than string for the same reason ChatRequest's
+  // fields are optional: a family that sends none must keep producing the
+  // byte-identical body it always did. zai-org-glm-4.7 sends none and accepts
+  // the replay today; that body does not move.
+  //
+  // Opaque on purpose — never decoded, validated, or length-checked. It is a
+  // token carried between two turns, and any opinion here about its contents
+  // would be this library inventing one.
+  std::optional<std::string> thought_signature{};
   nlohmann::json raw{};  // verbatim; never serialized (see Message::raw)
 
   // The one place `arguments` is interpreted, and it hands the failure back
@@ -197,6 +217,11 @@ struct ToolCall {
     fn["name"] = t.name;
     fn["arguments"] = t.arguments;
     j["function"] = std::move(fn);
+    // Only when the server sent one. An unconditional key — even "" or null —
+    // moves the wire body for every family that sends no signature, which is
+    // the non-regression half of VC-18. Emitted beside `function`, never
+    // inside it; see the member's comment for what nesting it costs.
+    if (t.thought_signature) j["thought_signature"] = *t.thought_signature;
     // `index` is deliberately NOT emitted. It is a streaming-transport artifact
     // — the position this fragment merges into — and replaying it on a request
     // would assert an ordering the caller never chose.
@@ -210,6 +235,10 @@ struct ToolCall {
     if (const auto* s = detail::opt_string_at(j, "id")) t.id = *s;
     if (const auto* s = detail::opt_string_at(j, "type")) t.type = *s;
     t.index = detail::opt_int(j, "index");
+    // Predicate-based like every other read here, and that is load bearing: a
+    // wrong-typed signature reads as *absent*, which produces the server's
+    // honest 400 rather than putting a confident wrong value on the wire.
+    t.thought_signature = detail::opt_string(j, "thought_signature");
     if (const auto* fn = detail::opt_object(j, "function")) {
       if (const auto* s = detail::opt_string_at(*fn, "name")) t.name = *s;
       if (const auto* s = detail::opt_string_at(*fn, "arguments")) t.arguments = *s;
