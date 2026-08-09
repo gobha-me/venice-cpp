@@ -6,6 +6,7 @@
 // `venice_parameters` extension. Plain structs, nlohmann/json (de)serialization
 // via to_json/from_json free functions.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <expected>
@@ -1114,6 +1115,271 @@ struct Model {
     const auto* id = detail::opt_string_at(e, "id");
     if (id == nullptr || id->empty()) continue;
     out.push_back(e.get<Model>());
+  }
+  return out;
+}
+
+
+// ── characters ────────────────────────────────────────────────────────────
+//
+// `venice_parameters.character_slug` has been sendable since Phase 0, and until
+// VC-04 (#5) nothing here could tell you what slugs exist — the feature was
+// reachable only by someone who already knew the answer.
+//
+// Venice marks /characters a *preview* API that may change, which is the
+// strongest argument this file has for the tolerant-read discipline above: the
+// shape below is the one documented today, `raw` carries whatever it becomes.
+
+// The engagement numbers on a character, all quoted as JSON numbers rather than
+// integers — hence opt_double throughout and not opt_int. `imports` and
+// `rating_count` are counts and will read as whole doubles; taking them as int
+// would be a narrowing this file has no reason to risk for a display value.
+//
+// `user_rating` is documented nullable: it is the *authenticated caller's* own
+// rating, absent when they have not rated. Absent and unrated are the same
+// answer here, so no third state is modeled.
+struct CharacterStats {
+  std::optional<double> average_rating;
+  std::optional<double> imports;
+  std::optional<double> rating_count;
+  std::optional<double> rating_sum;
+  std::optional<double> user_rating;
+
+  friend void from_json(const nlohmann::json& j, CharacterStats& s) {
+    s.average_rating = detail::opt_double(j, "averageRating");
+    s.imports = detail::opt_double(j, "imports");
+    s.rating_count = detail::opt_double(j, "ratingCount");
+    s.rating_sum = detail::opt_double(j, "ratingSum");
+    s.user_rating = detail::opt_double(j, "userRating");
+  }
+};
+
+// One entry from /characters.
+//
+// `slug` is the only plain field, and it is `slug` rather than `id` for the
+// reason Model keeps `id`: it is the one this library can hand back to the API.
+// `character_slug` is what VeniceParameters sends; the `id` here is a UUID no
+// call in this client accepts. So an entry without a usable slug is not a
+// degraded character, it is not a character — see characters_from_json_body.
+//
+// `created_at` / `updated_at` stay strings. Model::created is epoch seconds and
+// these are ISO-8601 timestamps: two endpoints, two shapes, and neither is
+// worth a date parser in a header-only client that already hands you `raw`.
+//
+// Wire keys are camelCase here (modelId, photoUrl, webEnabled, shareUrl) where
+// /models is snake_case at the top level — the same split Model already lives
+// with inside model_spec. Field names stay snake_case regardless.
+//
+// `raw` is the whole entry verbatim, superset and never sent, on Model::raw's
+// three rules — and it matters more here, because a preview API is exactly the
+// one whose unmodeled keys are worth keeping.
+struct Character {
+  std::string slug;
+
+  std::optional<std::string> id;
+  std::optional<std::string> name;
+  std::optional<std::string> description;
+  std::optional<std::string> author;    // short anonymized author identifier
+  std::optional<std::string> model_id;  // the model this character runs on
+  std::optional<std::string> share_url;
+  std::optional<std::string> photo_url;
+  std::optional<std::string> created_at;
+  std::optional<std::string> updated_at;
+
+  std::optional<bool> adult;
+  std::optional<bool> featured;
+  std::optional<bool> web_enabled;
+
+  // Plain, like Model::traits: empty is a truthful answer to both "no tags" and
+  // "the response did not say", and no caller branches on the difference.
+  std::vector<std::string> tags;
+
+  std::optional<CharacterStats> stats;
+
+  nlohmann::json raw;
+
+  friend void from_json(const nlohmann::json& j, Character& c) {
+    // Cleared rather than left alone, unlike Model::from_json's `id`. Every
+    // other field here is assigned unconditionally — opt_string on an absent
+    // key assigns nullopt — so leaving these two conditional would make a
+    // re-parse into a used object keep the *previous* entry's slug and stats
+    // beside the new entry's everything-else. The slug is the field that
+    // selects a persona, so the failure is chatting with the wrong one while
+    // every other field on screen says otherwise.
+    c.slug.clear();
+    c.stats.reset();
+
+    if (const auto* s = detail::opt_string_at(j, "slug")) c.slug = *s;
+
+    c.raw = j;
+    c.id = detail::opt_string(j, "id");
+    c.name = detail::opt_string(j, "name");
+    c.description = detail::opt_string(j, "description");
+    c.author = detail::opt_string(j, "author");
+    c.model_id = detail::opt_string(j, "modelId");
+    c.share_url = detail::opt_string(j, "shareUrl");
+    c.photo_url = detail::opt_string(j, "photoUrl");
+    c.created_at = detail::opt_string(j, "createdAt");
+    c.updated_at = detail::opt_string(j, "updatedAt");
+
+    c.adult = detail::opt_bool(j, "adult");
+    c.featured = detail::opt_bool(j, "featured");
+    c.web_enabled = detail::opt_bool(j, "webEnabled");
+
+    c.tags = detail::string_array(j, "tags");
+
+    if (const auto* s = detail::opt_object(j, "stats")) c.stats = s->get<CharacterStats>();
+  }
+};
+
+// One page of /characters.
+//
+// A page and not a bare vector, which is where this type differs from
+// models() — and the difference is forced by the endpoint, not chosen. Venice
+// pages /characters and /models is unpaginated, so a caller here has to answer
+// "was that the last page?" and `entries.size()` cannot tell them: the parse
+// skips entries it cannot use, so a full page containing one slug-less entry
+// comes back short and a size-versus-limit test ends the walk early, reporting
+// a truncated catalogue as a complete one. `returned` is the server's own count
+// and is the only honest thing to compare a limit against.
+//
+// `raw` is the whole envelope, on Character::raw's reasoning applied one level
+// up. The documented body is `{data, object}` with no total and no cursor —
+// but that shape has never been seen on a wire here (see the STATUS entry), and
+// a total appearing later must be an additive field a caller can already reach
+// rather than a breaking change to this signature.
+struct CharacterPage {
+  // Usable characters. An entry the parse could not use is not here and *is*
+  // counted in `returned`.
+  std::vector<Character> entries;
+
+  // How many elements the server put in `data`, before any skipping. Compare
+  // this against CharacterQuery::limit to decide whether to ask for more.
+  std::size_t returned{0};
+
+  nlohmann::json raw;
+};
+
+// Parse a /characters response body into a page. Same contract as
+// models_from_json_body, for the same reasons and with the same one fatal case:
+// a body that is not a list has nothing to degrade to, and without the
+// is_array() check a `{"data":{...}}` quietly becomes a vector of characters
+// built out of whatever the values happened to be.
+[[nodiscard]] inline auto characters_from_json_body(const nlohmann::json& j) -> CharacterPage {
+  const auto* data = detail::opt_array(j, "data");
+  const nlohmann::json& arr = data != nullptr ? *data : j;
+  if (!arr.is_array())
+    throw std::runtime_error{"characters: response is not a list"};
+
+  CharacterPage page;
+  page.raw = j;
+  page.returned = arr.size();
+  for (const auto& e : arr) {
+    if (!e.is_object()) continue;
+    const auto* slug = detail::opt_string_at(e, "slug");
+    if (slug == nullptr || slug->empty()) continue;
+    page.entries.push_back(e.get<Character>());
+  }
+  return page;
+}
+
+// The filters /characters accepts.
+//
+// A struct rather than positional parameters the way models(type) took one,
+// because there are eleven of them — but the deciding field is `limit`. The
+// endpoint pages: it defaults to 50, caps at 100, and the response carries no
+// total, so a listing call with no way to say "the next 50" silently answers
+// the first 50 of N. That is the same defect this ticket exists to fix, one
+// layer down, and it is why this type exists at all.
+//
+// Nothing here is an enum. `sort_by` and `sort_order` have documented value
+// sets — featured, highestRating, mostRecent, … — and they are still strings,
+// on the reasoning that keeps models(type) one: the value set belongs to
+// Venice, and a list hardcoded here starts refusing valid values the day one is
+// added. A bad sort is the server's 400 to give.
+//
+// `extra` is request-side and therefore keeps that name, unlike Character::raw
+// — it is additive and it is sent. Its contract is the same as
+// ChatRequest::extra's: modeled fields win. Duplicate query keys are not
+// something servers agree on, so character_query_params drops an extra pair
+// whose key a set field already emitted rather than sending the key twice.
+struct CharacterQuery {
+  std::optional<std::string> search;
+  std::optional<std::string> sort_by;
+  std::optional<std::string> sort_order;
+
+  // Ints, not size_t: they are sent as decimal text and the server's own bounds
+  // (offset >= 0, 0 < limit <= 100) fit in an int many times over. Out-of-range
+  // values are passed through to the 400 they earn, per AGENTS.md's
+  // "range checking: none".
+  std::optional<int> limit;
+  std::optional<int> offset;
+
+  std::optional<bool> is_adult;
+  std::optional<bool> is_pro;
+  std::optional<bool> is_web_enabled;
+
+  // Each element is sent as its own repetition of the key —
+  // `?tags=helpful&tags=productivity`. The endpoint documents that form as the
+  // primary one and comma-joining as also accepted, and comma-joining is the
+  // one that cannot round-trip: a single tag containing a comma would arrive
+  // as two filters with nothing to distinguish it. The pair list
+  // character_query_params returns is already a multimap, so repetition costs
+  // nothing.
+  std::vector<std::string> tags;
+  std::vector<std::string> categories;
+  std::vector<std::string> model_id;
+
+  std::vector<std::pair<std::string, std::string>> extra;
+};
+
+// Flatten a CharacterQuery into ordered key/value pairs, ready for
+// detail::with_query to encode.
+//
+// Free, at namespace scope, and returning pairs rather than a finished query
+// string: this is the half worth testing and none of it needs a socket — the
+// same move models_from_json_body and percent_encode both made.
+//
+// Emission order is the declaration order of CharacterQuery, so the resulting
+// URL is deterministic and a test can assert the whole string rather than
+// picking through it. An unset field, an empty string and an empty vector all
+// emit nothing at all, which is what keeps a default-constructed query sending
+// the bare /characters.
+[[nodiscard]] inline auto character_query_params(const CharacterQuery& q)
+    -> std::vector<std::pair<std::string, std::string>> {
+  std::vector<std::pair<std::string, std::string>> out;
+
+  const auto add = [&out](std::string key, std::string value) {
+    if (value.empty()) return;
+    out.emplace_back(std::move(key), std::move(value));
+  };
+  const auto add_bool = [&add](const char* key, const std::optional<bool>& v) {
+    if (v) add(key, *v ? "true" : "false");
+  };
+  // One repetition of the key per element, empty elements skipped. See the
+  // note on CharacterQuery::tags for why this is not comma-joined.
+  const auto add_each = [&add](const char* key, const std::vector<std::string>& values) {
+    for (const auto& v : values) add(key, v);
+  };
+
+  if (q.search) add("search", *q.search);
+  if (q.sort_by) add("sortBy", *q.sort_by);
+  if (q.sort_order) add("sortOrder", *q.sort_order);
+  if (q.limit) add("limit", std::to_string(*q.limit));
+  if (q.offset) add("offset", std::to_string(*q.offset));
+  add_bool("isAdult", q.is_adult);
+  add_bool("isPro", q.is_pro);
+  add_bool("isWebEnabled", q.is_web_enabled);
+  add_each("tags", q.tags);
+  add_each("categories", q.categories);
+  add_each("modelId", q.model_id);
+
+  for (const auto& [key, value] : q.extra) {
+    if (key.empty() || value.empty()) continue;
+    const bool taken = std::any_of(out.begin(), out.end(),
+                                   [&key](const auto& p) { return p.first == key; });
+    if (taken) continue;
+    out.emplace_back(key, value);
   }
   return out;
 }

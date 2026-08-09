@@ -146,7 +146,15 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   `/models` it always did — that skip is the non-breaking guarantee, pinned by
   `test/05query/`, not a formatting nicety. Both it and `percent_encode` are
   free functions at namespace scope so the encoding is testable without a
-  socket, the same move VC-03 made with `models_from_json_body`.
+  socket, the same move VC-03 made with `models_from_json_body`. Since VC-04
+  there are two `with_query` overloads — an `initializer_list` one for filters
+  spelled out at the call site and an owning one taking `std::string` pairs for
+  a query built at runtime, because a `string_view` into `std::to_string`'s
+  temporary dangles. They share `detail::append_param` deliberately: two copies
+  of the empty-value skip is exactly how one endpoint keeps that guarantee while
+  another quietly loses it. A filter set wide enough to need a struct
+  (`CharacterQuery`) flattens to pairs in a free function of its own, so the
+  ordering and the encoding stay checkable offline.
 - **Response-side escape hatches are named `raw`, not `extra`.** `Model::raw`
   holds the verbatim entry — modeled fields included — because a *subtractive*
   hatch breaks its readers every time a key graduates to a typed field. The
@@ -286,6 +294,15 @@ and PRs note what was actually run to verify.
 
 ## Notes for agents
 
+- **A documented snippet that compiles is not a documented snippet that works.**
+  README blocks and header comment snippets are never built by anything, which
+  cost VC-08 a `tools` example that did not compile. Paste them into a throwaway
+  TU against the real headers before claiming they work — and then look at
+  lifetimes by hand, because the compiler will not. VC-04 found
+  `for (const auto& x : *client.models())` in README, clean on both compilers
+  and a `stack-use-after-scope` under ASan: the `expected` temporary dies at the
+  end of the range-for's initializer, and P2718R0 fixes that in GCC 15 / Clang
+  19 while this project supports GCC 13+. Bind the result to a named variable.
 - **Path caution:** the editing tools in some environments write relative to a
   session's original project root, not the shell's cwd. If you `cp`/`cd` into a
   new repo mid-session, confirm file writes land in the right tree (a

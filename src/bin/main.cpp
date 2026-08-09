@@ -69,6 +69,85 @@ auto list_models(const venice::Client& client, std::string_view type) -> int {
   return EXIT_SUCCESS;
 }
 
+// `--characters [search]`: the live check VC-04 could not run offline, and the
+// reason its PR says "documented, not captured".
+//
+// test/08characters/ pins the shape Venice's OpenAPI document describes, but
+// nothing there has been on a wire: unlike /models, this endpoint answers 402
+// unauthenticated and 401 to a junk bearer, so no fixture could be captured
+// without a real key. The columns below are exactly the fields a TUI picker
+// would branch on, and an absent one prints '?' — so a key that parses in the
+// fixture and not in reality shows up as a blank column rather than passing
+// quietly. If one disagrees, the fixture is what needs correcting;
+// Character::raw is why that is recoverable.
+//
+// Two things this leg is specifically watching for, both of them guesses until
+// it runs:
+//
+//   * that `slug` really is always present, since the parse skips entries
+//     without one — a listing that comes back short is that guess being wrong.
+//   * that the page really is 50 by default. The count printed below against a
+//     `--characters` with no search is the whole evidence for the pagination
+//     paragraph in client.hpp.
+//
+// The optional argument is a search term, which is also the cheapest way to see
+// that a query parameter survives encoding: `--characters "alan watts"`.
+auto list_characters(const venice::Client& client, std::string_view search) -> int {
+  venice::CharacterQuery q;
+  if (!search.empty()) q.search = std::string{search};
+
+  const auto res = client.characters(q);
+  if (!res) {
+    // The body is printed and not just the message because this endpoint's
+    // documented failures are 402 and 401, and "HTTP 402" alone names nothing.
+    // The 402 body is where "Authentication required" actually appears.
+    std::cerr << "characters failed [" << venice::to_string(res.error().kind) << "] "
+              << res.error().message << '\n';
+    if (!res.error().body.empty()) std::cerr << res.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+
+  // Both counts, because one number cannot answer both questions this leg
+  // exists to ask. `returned` is the server's page — if it is 50 with no limit
+  // set, the default-page claim holds. `entries` is what survived the parse —
+  // if it is lower, `slug` is not always present after all, which is the other
+  // guess. Printing only the second would make the two indistinguishable.
+  std::cout << res->entries.size() << " usable of " << res->returned << " returned";
+  if (!search.empty()) std::cout << " (search=" << search << ')';
+  std::cout << '\n';
+  if (res->returned > res->entries.size()) {
+    std::cout << "   <-- " << res->returned - res->entries.size()
+              << " entry/entries skipped for want of a slug: the schema says "
+                 "slug is required, so this is the schema being wrong\n";
+  }
+  if (res->returned == 0) {
+    std::cout << "   <-- ZERO returned: the account sees no characters at all\n";
+  }
+
+  for (const auto& c : res->entries) {
+    std::cout << c.slug << "  model=";
+    if (c.model_id) std::cout << *c.model_id;
+    else std::cout << '?';
+
+    std::cout << "  web=";
+    if (c.web_enabled) std::cout << (*c.web_enabled ? "yes" : "no");
+    else std::cout << '?';
+
+    std::cout << "  adult=";
+    if (c.adult) std::cout << (*c.adult ? "yes" : "no");
+    else std::cout << '?';
+
+    std::cout << "  rating=";
+    if (c.stats && c.stats->average_rating) std::cout << *c.stats->average_rating;
+    else std::cout << '?';
+
+    std::cout << "  tags=" << c.tags.size();
+    if (c.name) std::cout << "  (" << *c.name << ')';
+    std::cout << '\n';
+  }
+  return EXIT_SUCCESS;
+}
+
 // The live check VC-05 could not run offline, and the reason the PR says
 // "documented, not measured".
 //
@@ -262,6 +341,8 @@ auto main(int argc, char** argv) -> int {
   const venice::Client client{key};
   if (argc > 1 && std::string_view{argv[1]} == "--models")
     return list_models(client, argc > 2 ? argv[2] : "");
+  if (argc > 1 && std::string_view{argv[1]} == "--characters")
+    return list_characters(client, argc > 2 ? argv[2] : "");
   if (argc > 1 && std::string_view{argv[1]} == "--stream")
     return stream_report(client, argc > 2 ? argv[2]
                                           : "Think step by step: what is 17 * 23?");
