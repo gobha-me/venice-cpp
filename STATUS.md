@@ -41,31 +41,116 @@ have since landed there as CT-14.
 
 ## Next up
 
-**The three live captures are done.** A key was available on 2026-08-09 and all
-of `--models`, `--stream`, `--tools` and `--characters` were run against the
-live API. What they settled is recorded in each ticket's entry below; what they
-*opened* is filed:
+**The live captures are done.** A key was available on 2026-08-09 and all of
+`--models`, `--stream`, `--tools`, `--characters` and (since VC-17) `--usage`
+were run against the live API. What they settled is recorded in each ticket's
+entry below; what they *opened* is filed. One caution the VC-17 entry pays for
+in full: a leg that auto-picks one model settles nothing about a shape that
+varies by model family, and two tickets have now been filed on the strength of
+a single-family run.
 
 1. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
    Both foundations are proven, and now measured rather than assumed.
-2. **VC-17 (#28): `Usage`'s nested detail objects never arrive.**
-   `completion_tokens_details.reasoning_tokens` and
-   `prompt_tokens_details.cached_tokens` are modeled and fixture-pinned, and a
-   live `usage` carries only `prompt_tokens` / `completion_tokens` /
-   `total_tokens`. Nothing is broken — absent parses as absent — but
-   `test/07stream/` asserts a shape the API does not send.
-3. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
+2. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
    m.raw` is overwritten for `tool_calls` because that key is modeled, and
    `ToolCall` has `raw` but no `extra`, so an unmodeled tool-call key is
    unrecoverable. VC-18 was exactly that failure. The limit is pinned by a §0
    case in `test/07stream/` whose deliberate inversion is the ticket's
    acceptance criterion. The hard half is streaming: a merge rule for arbitrary
    unmodeled keys across fragments has no wire evidence to choose it yet.
+3. **A top-level `cost` object is on every reply and the library models it
+   nowhere.** Found while sweeping for VC-17: both paths carry
+   `"cost":{"usd":0,"diem":0.001089404}` — the non-streaming envelope and the
+   streamed usage-bearing chunk. Venice reports what it actually charged, which
+   is strictly better than the rate-card arithmetic README describes, and it
+   rides untyped in `ChatResponse::raw` / `acc.chunks()` today. Not filed yet.
 4. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
    embeddings, retries/backoff, async). Driven by real use, not
    speculatively.
 5. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-17 (#28) is done** — see v0.11.1, and the ticket's premise was wrong. It
+said `Usage`'s nested detail objects "are modeled and fixture-pinned, but Venice
+does not send them". Venice sends both, at exactly the nesting
+`Usage::from_json` reads. Measured on 2026-08-09, 21 captures — seven model
+families × {non-streaming, streaming, streaming with
+`stream_options.include_usage`} — and these are the plan's ground truth rather
+than its reasoning:
+
+| | `prompt_tokens_details.cached_tokens` | `completion_tokens_details.reasoning_tokens` |
+|---|---|---|
+| `deepseek-v4-pro` | ✓ | ✓ |
+| `grok-4-5` | ✓ | ✓ |
+| `zai-org-glm-4.7` | ✓ | — |
+| `zai-org-glm-5` | ✓ | — |
+| `llama-3.3-70b` | ✓ | — |
+| `gemini-3-6-flash` | — | — |
+| `qwen3-235b-a22b-thinking-2507` | — | — |
+
+Five things are worth knowing, four of them measured rather than reasoned:
+
+- **The bug was in how the evidence was gathered, and the repo had already
+  written down the rule that would have prevented it.** AGENTS.md has said since
+  VC-18 that a leg auto-picking "the first model claiming a capability" must
+  name the runners-up. That was written into `--tools` and into no other leg, so
+  `--stream` still picked silently — and it picks the first `supportsReasoning`
+  entry in the catalogue, which is `gemini-3-6-flash`, one of exactly two
+  families in the table above that report neither field. A shape that varies by
+  family cannot be settled by a leg that only ever runs one. `pick_by_capability`
+  and `report_pick` are that logic factored out so there is one copy to forget.
+
+- **The new `--usage [model]` leg prints the verbatim `usage` object beside the
+  typed `Usage`, and the distinction is the entire ticket.** A typed field
+  reading absent means either "the server did not send it" or "we are looking in
+  the wrong place", and only the raw object separates them. `--stream` said
+  `(absent -- check completion_tokens_details nesting)`, which asserts the
+  second, and that sentence is what sent this ticket down the wrong path. It now
+  says the absence is per-family. The leg reads the streamed frame off
+  `acc.chunks()`, so no library change was needed to reach it.
+
+- **The leg is a check, not a printer, and the check was proven live.** A modeled
+  key present in the raw object but absent from the typed struct is case (c) in
+  #28's own scope — the only one of the three that is a parse bug — and fails the
+  run. With `completion_tokens_details` misspelled in `Usage::from_json`,
+  `--usage deepseek-v4-pro` reports `RAW SAYS 117: the wire moved and the parse
+  did not` on both paths and exits 1. The same break stays **green** on
+  `gemini-3-6-flash`, which is the runners-up argument earning itself twice in
+  one ticket.
+
+- **A break came back green and the header was wrong about why.**
+  `Usage::from_json` described `detail::opt_object` as what stands between a
+  `"prompt_tokens_details": null` and a thrown parse. Swapping the predicate for
+  a plain `contains()` leaves all 13 test binaries green: nlohmann's `contains`
+  answers false for a null or an array exactly as the predicate does. What is
+  load bearing is that *some* guard exists — reaching straight through turns the
+  null and empty-object shapes red. Corrected in the header, because the old
+  wording would have had a reader defend the wrong property. This is the fourth
+  time a comment in this repo has justified a design with a constraint that did
+  not exist, after VC-08's `json_schema` and VC-04's two.
+
+- **The flat `cached_tokens` key is now the one shape here with no wire behind
+  it.** Venice does send a flat sibling — `cache_read_input_tokens` — but it is a
+  *different key*, it appears only beside the nested one and never instead of it,
+  and it carried the same number in all 21 captures. So it stays untyped (a
+  second spelling of one fact is not a fact), and the flat `cached_tokens` read
+  stays too, labelled: removing it changes a public parse to buy nothing, and a
+  gateway that flattens a details object is the case it was written for. Both
+  `test/07stream/` §4 and `test/01client/` now say which of their shapes have
+  been observed and which have not.
+
+Three observed shapes are pinned verbatim, including an explicit
+`"cached_tokens":0` — `deepseek-v4-pro` and `llama-3.3-70b` both send one on a
+cold cache, so absent and zero are different answers on the wire and the
+`optional<int>` is load bearing rather than merely tidy. Six breaks were run,
+each reverted; five went red where intended and the sixth is the finding above.
+Break 5 (remove the nested read, i.e. the pre-VC-05 behaviour) reddens four
+assertions including both new live-shape cases, and it is a break that could not
+have been demonstrated before this ticket — until §4 carried an observed nested
+value, deleting that read reddened only constructed fixtures.
+
+Comments, fixtures and the smoke binary only; no library behaviour changed,
+hence the patch bump.
 
 **VC-18 (#29) is done** — see v0.11.0. A key settled what the ticket left open,
 and the answer was the third option it did not list: Venice passes Gemini's
@@ -356,11 +441,14 @@ Five things are worth knowing, four of them measured rather than reasoned:
   reported `ErrorKind::Parse` on a reasoning-only stream that had arrived
   perfectly, and an early stop kept parsing frames already in the buffer.
 
-- **`Usage::cached_tokens` was very likely always `nullopt` against real
-  Venice.** It read a *flat* `usage.cached_tokens`, while OpenAI-compatible
-  bodies nest it at `prompt_tokens_details.cached_tokens`. Both are read now,
-  nested winning on disagreement. `reasoning_tokens` was unreachable entirely,
-  which made a reasoning model's actual cost invisible.
+- **`Usage::cached_tokens` was always `nullopt` against real Venice** — "very
+  likely" when this was written, measured by VC-17 since. It read a *flat*
+  `usage.cached_tokens`, a key Venice has never been seen sending, while
+  OpenAI-compatible bodies nest it at `prompt_tokens_details.cached_tokens` and
+  five of seven model families do exactly that. Both are read now, nested
+  winning on disagreement. `reasoning_tokens` was unreachable entirely, which
+  made a reasoning model's actual cost invisible on the two families that report
+  it.
 
 - **The overload set is shaped by an ambiguity, and the shape turned out to be
   the better design.** A bare `bool(const StreamDelta&)` overload beside the
