@@ -2,17 +2,96 @@
 // key is present, else prints the library shape. Real usage comes later; for
 // now this proves the header-only client links and runs.
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include <venice/venice.hpp>
 
 namespace {
+
+// ── choosing a model from the live catalogue ──────────────────────────────
+//
+// A model chosen by capability, plus the runners-up it beat. Both halves are
+// the point. AGENTS.md makes naming the alternates a rule after VC-18, where
+// --tools auto-picked one family and nothing on screen suggested the next one
+// would answer differently — it did, and the bug read as a library defect for
+// as long as it did because of that.
+//
+// VC-17 (#28) is the second bug that rule would have caught, and this helper
+// exists because writing the rule down in one leg did not put it in the others.
+// #28 was filed as "Venice does not send Usage's nested detail objects" on the
+// strength of a --stream run against `gemini-3-6-flash` — which is simply the
+// first supportsReasoning entry in /models?type=text, and one of the two models
+// in a seven-model sweep that reports neither field. Five of the other six send
+// prompt_tokens_details.cached_tokens and two send
+// completion_tokens_details.reasoning_tokens, at exactly the nesting the ticket
+// called unobserved. One model settles nothing about a per-family shape.
+struct ModelPick {
+  std::string chosen{};
+  std::vector<std::string> alternates{};
+};
+
+// nullopt after printing why: the list call failed, or nothing claimed the flag.
+// Both are this leg's failure to report, not something a caller can fix.
+//
+// The flag is a pointer-to-member rather than a name, so a typo cannot compile
+// — the same reason detail::kCapabilityBoolFields pairs the field with its wire
+// key instead of looking one up by string.
+auto pick_by_capability(const venice::Client& client,
+                        std::optional<bool> venice::ModelCapabilities::*flag,
+                        std::string_view flag_name,
+                        std::size_t max_alternates = 4) -> std::optional<ModelPick> {
+  const auto models = client.models("text");
+  if (!models) {
+    std::cerr << "models failed [" << venice::to_string(models.error().kind) << "] "
+              << models.error().message << '\n';
+    return std::nullopt;
+  }
+
+  ModelPick pick;
+  for (const auto& m : *models) {
+    if (!m.capabilities) continue;
+    const auto& claimed = (*m.capabilities).*flag;
+    if (!claimed || !*claimed) continue;
+    if (pick.chosen.empty())
+      pick.chosen = m.id;
+    else if (pick.alternates.size() < max_alternates)
+      pick.alternates.push_back(m.id);
+    else
+      break;
+  }
+
+  if (pick.chosen.empty()) {
+    std::cerr << "no text model reported " << flag_name
+              << " -- either none does, or that flag is not where Model expects it\n";
+    return std::nullopt;
+  }
+  return pick;
+}
+
+// `rerun` names the command that runs this same leg on a named model, because
+// a list of alternates nobody can act on is decoration. Prints nothing beyond
+// the model when the caller named one — there are no runners-up to a choice
+// that was not made here.
+void report_pick(const ModelPick& pick, std::string_view flag_name, std::string_view rerun) {
+  std::cerr << "model: " << pick.chosen << '\n';
+  if (pick.alternates.empty()) return;
+  std::cerr << "others claiming " << flag_name << ": ";
+  for (std::size_t i = 0; i < pick.alternates.size(); ++i)
+    std::cerr << (i != 0U ? ", " : "") << pick.alternates[i];
+  std::cerr << "\n  (" << rerun
+            << " runs this same leg on any of them; server behaviour that varies by\n"
+               "   model family is invisible to a leg that only ever runs one)\n";
+}
 
 // `--models [type]`: the live check for Model's typed metadata and, since
 // VC-13, for the type filter. Prints the fields a picker would actually branch
@@ -171,28 +250,18 @@ auto stream_report(const venice::Client& client, const std::string& prompt) -> i
   // --models leg records about hardcoded *counts*, and a model id ages faster.
   // Picking on supports_reasoning also gives that VC-03 flag a live use, the
   // way tools_report does for supports_function_calling.
-  const auto models = client.models("text");
-  if (!models) {
-    std::cerr << "models failed [" << venice::to_string(models.error().kind) << "] "
-              << models.error().message << '\n';
-    return EXIT_FAILURE;
-  }
-  std::string chosen;
-  for (const auto& m : *models)
-    if (m.capabilities && m.capabilities->supports_reasoning &&
-        *m.capabilities->supports_reasoning) {
-      chosen = m.id;
-      break;
-    }
-  if (chosen.empty()) {
-    std::cerr << "no text model reported supports_reasoning -- either none does, or that"
-                 " flag is not where Model expects it\n";
-    return EXIT_FAILURE;
-  }
-  std::cerr << "(streaming from " << chosen << ")\n";
+  //
+  // It also names the runners-up, which it did not until VC-17. Picking the
+  // first entry and printing only that is what let #28 be filed against the one
+  // model family that answers this question differently from most; see
+  // pick_by_capability.
+  const auto pick = pick_by_capability(client, &venice::ModelCapabilities::supports_reasoning,
+                                       "supportsReasoning");
+  if (!pick) return EXIT_FAILURE;
+  report_pick(*pick, "supportsReasoning", "`venice-cpp --usage <id>`");
 
   venice::ChatRequest req;
-  req.model = chosen;  // a reasoning model, so thinking has somewhere to come from
+  req.model = pick->chosen;  // a reasoning model, so thinking has somewhere to come from
   req.messages = {venice::Message::user(prompt)};
 
   venice::StreamAccumulator acc;
@@ -229,15 +298,20 @@ auto stream_report(const venice::Client& client, const std::string& prompt) -> i
             << "tool calls         : " << (msg.tool_calls ? msg.tool_calls->size() : 0) << '\n'
             << "finish_reason      : " << res->finish_reason << '\n';
 
+  // Absence here is a fact about the model, not a symptom. Both of these read
+  // "(absent -- check the nesting)" until VC-17, which pointed the reader at a
+  // parse bug that does not exist: the nestings are right, and whether they
+  // arrive is per-family. `--usage` prints the verbatim object, which is the
+  // only thing that can tell those two apart.
   if (res->usage) {
     std::cerr << "prompt/completion  : " << res->usage->prompt_tokens << '/'
               << res->usage->completion_tokens << '\n'
               << "reasoning_tokens   : ";
     if (res->usage->reasoning_tokens) std::cerr << *res->usage->reasoning_tokens << '\n';
-    else std::cerr << "(absent -- check completion_tokens_details nesting)\n";
+    else std::cerr << "(absent -- this family does not report one; venice-cpp --usage)\n";
     std::cerr << "cached_tokens      : ";
     if (res->usage->cached_tokens) std::cerr << *res->usage->cached_tokens << '\n';
-    else std::cerr << "(absent -- expected below prompt_tokens_details)\n";
+    else std::cerr << "(absent -- this family does not report one; venice-cpp --usage)\n";
   } else {
     std::cerr << "usage              : (no usage frame arrived at all)\n";
   }
@@ -268,42 +342,22 @@ auto stream_report(const venice::Client& client, const std::string& prompt) -> i
 // If a field disagrees with the fixtures, the fixture is what needs correcting;
 // ChatResponse::raw and Message::raw are why a wrong guess here is recoverable.
 auto tools_report(const venice::Client& client, std::string_view model) -> int {
-  std::string chosen{model};
-  std::vector<std::string> alternates;
-  if (chosen.empty()) {
-    // Pick a model that claims to support this, which also gives VC-03's
-    // supports_function_calling flag its first live use — a flag nothing has
-    // ever branched on is a flag nobody knows is parsed.
-    const auto models = client.models("text");
-    if (!models) {
-      std::cerr << "models failed [" << venice::to_string(models.error().kind) << "] "
-                << models.error().message << '\n';
-      return EXIT_FAILURE;
-    }
-    // Collect a few rather than breaking on the first. VC-18 (#29) was filed as
-    // a library bug because this leg auto-picked one model and there was
-    // nothing on screen to suggest the next one might answer differently — and
-    // it did: the assembled turn was rejected by the Gemini family and accepted
-    // by glm. Naming the runners-up is the whole fix for that, and it costs no
-    // policy. A hardcoded list of "families that work" would be the wrong
-    // shape, and stale the day Venice adds one.
-    for (const auto& m : *models) {
-      if (!(m.capabilities && m.capabilities->supports_function_calling &&
-            *m.capabilities->supports_function_calling))
-        continue;
-      if (chosen.empty())
-        chosen = m.id;
-      else if (alternates.size() < 4)
-        alternates.push_back(m.id);
-      else
-        break;
-    }
-    if (chosen.empty()) {
-      std::cerr << "no text model reported supports_function_calling -- either none does,"
-                   " or that flag is not where Model expects it\n";
-      return EXIT_FAILURE;
-    }
+  // Picking by capability gives VC-03's supports_function_calling flag its
+  // first live use — a flag nothing has ever branched on is a flag nobody knows
+  // is parsed — and collecting the runners-up is the fix VC-18 paid for. That
+  // logic lives in pick_by_capability now, because VC-17 found --stream had
+  // never grown it and filed a wrong conclusion as a result.
+  ModelPick pick;
+  if (model.empty()) {
+    auto picked = pick_by_capability(client, &venice::ModelCapabilities::supports_function_calling,
+                                     "supportsFunctionCalling");
+    if (!picked) return EXIT_FAILURE;
+    pick = *std::move(picked);
+  } else {
+    pick.chosen = std::string{model};
   }
+  const std::string& chosen = pick.chosen;
+  const auto& alternates = pick.alternates;
 
   venice::ChatRequest req;
   req.model = chosen;
@@ -316,15 +370,7 @@ auto tools_report(const venice::Client& client, std::string_view model) -> int {
   req.tool_choice = venice::tool_choice::automatic();
   req.parallel_tool_calls = false;
 
-  std::cerr << "model: " << chosen << '\n';
-  if (!alternates.empty()) {
-    std::cerr << "others claiming function calling: ";
-    for (std::size_t i = 0; i < alternates.size(); ++i)
-      std::cerr << (i != 0U ? ", " : "") << alternates[i];
-    std::cerr << "\n  (venice-cpp --tools <id> runs these same two legs on any of them;"
-                 " a pass there\n   with a failure here is a model-family gap, not an"
-                 " assembly bug)\n";
-  }
+  report_pick(pick, "supportsFunctionCalling", "`venice-cpp --tools <id>`");
   std::cerr << "\n-- leg 1: the body actually sent --\n" << req.to_json_body(false).dump(2) << '\n';
 
   const auto first = client.chat(req);
@@ -410,6 +456,148 @@ auto tools_report(const venice::Client& client, std::string_view model) -> int {
   return signature_lost ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
+// ── `--usage [model]`: what Venice actually puts in `usage` ───────────────
+//
+// The leg VC-17 (#28) needed and did not have. `Usage` models two nested
+// fields, `prompt_tokens_details.cached_tokens` and
+// `completion_tokens_details.reasoning_tokens`, and no offline fixture can say
+// whether the API sends them — #28 was filed claiming it does not, off a single
+// model that does not.
+//
+// So this prints the **verbatim** usage object from both the streaming and the
+// non-streaming path, beside the typed Usage parsed from it. Verbatim is the
+// whole point: a typed field reading absent means either "the server did not
+// send it" or "we are looking in the wrong place", and only the raw object
+// distinguishes them. That ambiguity is what cost this ticket a wrong premise.
+//
+// It is a check and not a printer. A modeled key present in the raw object but
+// absent from the typed struct is a parse bug — case (c) in #28's own scope,
+// the only one of the three that is — and fails the run.
+
+// Every key Usage reads, so anything else in the object can be named as
+// unmodeled rather than disappearing silently into ChatResponse::raw.
+constexpr std::array<std::string_view, 6> kModeledUsageKeys{
+    "prompt_tokens",  "completion_tokens",        "total_tokens",
+    "cached_tokens",  "prompt_tokens_details",    "completion_tokens_details"};
+
+// True when the typed parse disagrees with the object it came from.
+auto report_usage(const nlohmann::json& raw, const std::optional<venice::Usage>& typed) -> bool {
+  std::cerr << "usage, verbatim    : " << raw.dump() << '\n';
+  if (!typed) {
+    std::cerr << "  TYPED USAGE ABSENT while a usage object arrived -- parse bug\n";
+    return true;
+  }
+
+  // What the raw object says, independent of the parse. nullopt means the key
+  // is not there at all; a present 0 is a real answer and not the same thing —
+  // both deepseek-v4-pro and llama-3.3-70b report an explicit cached_tokens 0,
+  // which is why Usage's fields are optional rather than defaulted.
+  const auto nested = [&raw](const char* obj, const char* key) -> std::optional<int> {
+    const auto o = raw.find(obj);
+    if (o == raw.end() || !o->is_object()) return std::nullopt;
+    const auto k = o->find(key);
+    if (k == o->end() || !k->is_number_integer()) return std::nullopt;
+    return k->get<int>();
+  };
+  const auto raw_cached = nested("prompt_tokens_details", "cached_tokens");
+  const auto raw_reasoning = nested("completion_tokens_details", "reasoning_tokens");
+
+  const auto show = [](const char* label, std::optional<int> from_raw, std::optional<int> from_typed) {
+    std::cerr << label;
+    if (from_typed) std::cerr << *from_typed;
+    else std::cerr << "(absent)";
+    if (from_raw != from_typed)
+      std::cerr << "   <-- RAW SAYS " << (from_raw ? std::to_string(*from_raw) : "(absent)")
+                << ": the wire moved and the parse did not";
+    std::cerr << '\n';
+  };
+  show("typed cached_tokens: ", raw_cached, typed->cached_tokens);
+  show("typed reasoning    : ", raw_reasoning, typed->reasoning_tokens);
+
+  // Name what we do not model. cache_read_input_tokens turned up this way — a
+  // flat sibling mirroring the nested cached_tokens, redundant in all 21
+  // captures of the VC-17 sweep, which is why it stays untyped.
+  std::vector<std::string> unmodeled;
+  for (const auto& [k, v] : raw.items())
+    if (std::find(kModeledUsageKeys.begin(), kModeledUsageKeys.end(), k) ==
+        kModeledUsageKeys.end())
+      unmodeled.push_back(k);
+  if (!unmodeled.empty()) {
+    std::cerr << "unmodeled usage keys: ";
+    for (std::size_t i = 0; i < unmodeled.size(); ++i)
+      std::cerr << (i != 0U ? ", " : "") << unmodeled[i];
+    std::cerr << "   (reachable via ChatResponse::raw)\n";
+  }
+
+  return raw_cached != typed->cached_tokens || raw_reasoning != typed->reasoning_tokens;
+}
+
+auto usage_report(const venice::Client& client, std::string_view model) -> int {
+  ModelPick pick;
+  if (model.empty()) {
+    auto picked =
+        pick_by_capability(client, &venice::ModelCapabilities::supports_reasoning,
+                           "supportsReasoning");
+    if (!picked) return EXIT_FAILURE;
+    pick = *std::move(picked);
+  } else {
+    pick.chosen = std::string{model};
+  }
+  report_pick(pick, "supportsReasoning", "`venice-cpp --usage <id>`");
+
+  venice::ChatRequest req;
+  req.model = pick.chosen;
+  // Long enough to have something to cache: cached_tokens can only be non-zero
+  // on a request that actually hit a prompt cache, and #28's original run had
+  // no reason to. Re-running this leg back to back is the cache probe.
+  req.messages = {venice::Message::user("Think step by step: what is 17 * 23?")};
+
+  bool mismatch = false;
+
+  std::cerr << "\n-- non-streaming --\n";
+  const auto nonstream = client.chat(req);
+  if (!nonstream) {
+    std::cerr << "chat failed [" << venice::to_string(nonstream.error().kind) << "] "
+              << nonstream.error().message << '\n';
+    return EXIT_FAILURE;
+  }
+  if (const auto u = nonstream->raw.find("usage");
+      u != nonstream->raw.end() && u->is_object())
+    mismatch = report_usage(*u, nonstream->usage) || mismatch;
+  else
+    std::cerr << "usage, verbatim    : (no usage key in the body at all)\n";
+
+  std::cerr << "\n-- streaming --\n";
+  venice::StreamAccumulator acc;
+  const auto streamed = client.chat_stream(req, acc, [](const venice::StreamDelta&) { return true; });
+  if (!streamed) {
+    std::cerr << "stream failed [" << venice::to_string(streamed.error().kind) << "] "
+              << streamed.error().message << '\n';
+    return EXIT_FAILURE;
+  }
+
+  // Off the retained chunks, not off the typed Usage — the accumulator parses
+  // the frame and keeps the struct, so the struct is exactly what cannot answer
+  // "is this key on the wire". chunks() is where the verbatim record lives, and
+  // it needed no library change to reach.
+  const nlohmann::json* frame = nullptr;
+  std::size_t usage_frames = 0;
+  for (const auto& c : acc.chunks())
+    if (const auto u = c.find("usage"); u != c.end() && u->is_object()) {
+      ++usage_frames;
+      frame = &*u;  // last wins, matching StreamAccumulator::ingest
+    }
+
+  std::cerr << "usage frames       : " << usage_frames << '\n';
+  if (frame != nullptr) mismatch = report_usage(*frame, streamed->usage) || mismatch;
+  else std::cerr << "usage, verbatim    : (no chunk carried a usage object)\n";
+
+  if (mismatch)
+    std::cerr << "\nRAW AND TYPED DISAGREE -- Usage::from_json is reading the wrong place.\n"
+                 "This is case (c) in #28: a parse bug, not a per-family absence.\n";
+  return mismatch ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -429,6 +617,8 @@ auto main(int argc, char** argv) -> int {
                                           : "Think step by step: what is 17 * 23?");
   if (argc > 1 && std::string_view{argv[1]} == "--tools")
     return tools_report(client, argc > 2 ? argv[2] : "");
+  if (argc > 1 && std::string_view{argv[1]} == "--usage")
+    return usage_report(client, argc > 2 ? argv[2] : "");
 
   const std::string prompt = argc > 1 ? argv[1] : "Say hello in one short sentence.";
 

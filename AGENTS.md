@@ -207,6 +207,15 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   tokens price differently — see venice-cli #75). Model *pricing* has two cache
   buckets (`cache_input` read, `cache_write` write) where `Usage` reports one,
   so the two cannot be paired 1:1 — don't write code that assumes they can.
+  **Both of `Usage`'s optional fields are per-family, and absent is not zero.**
+  VC-17 measured seven families: five send
+  `prompt_tokens_details.cached_tokens`, two of those also send
+  `completion_tokens_details.reasoning_tokens`, and two send neither while both
+  claiming `supportsReasoning`. An explicit `"cached_tokens":0` also arrives, on
+  a cold cache, so a disengaged optional means "this family does not say" and
+  collapsing the two loses a real distinction. Cost estimates treat absent as
+  unknown. `venice-cpp --usage <model>` is how you find out for a given family,
+  and it is the check that a nesting has not moved.
 - **KDE/Qt-readiness:** keep the library UI-free and Qt-linkable. No Qt types
   in the API client; a separate service layer owns D-Bus/KF concerns.
 
@@ -242,6 +251,22 @@ to suspect the next one would answer differently — it did, and the same assemb
 turn that a Gemini model rejected was accepted by glm. Server behaviour that
 varies by model family is invisible to a leg that only ever runs one, so printing
 the runners-up is part of the check, not decoration.
+
+That rule was written here after VC-18 and put into `--tools` only, and VC-17 is
+what it cost: `--stream` still picked silently, so #28 was filed claiming Venice
+never sends `Usage`'s detail objects, on a run against one of the two families
+in seven that do not. **The rule now lives in one place** —
+`pick_by_capability` / `report_pick` in `src/bin/main.cpp` — because a
+convention re-implemented per leg is a convention three legs are exempt from. A
+new leg picks through those or explains why not.
+
+**A live leg reports the verbatim server object, not only what parsed out of
+it.** The corollary of the above, and the other half of VC-17. A typed field
+reading absent means either "the server did not send it" or "we are looking in
+the wrong place"; `--stream` printed `(absent -- check the nesting)`, which
+asserts the second, and no fixture could contradict it. `--usage` prints the raw
+`usage` beside the parse and fails when a modeled key is in one and not the
+other, which turns the question into a check rather than a judgement call.
 
 **A convergence assertion cannot see a symmetric loss.** `test/07stream/`'s §10
 compares the streamed and non-streamed turns and is the file's payoff — and

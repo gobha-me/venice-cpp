@@ -181,6 +181,14 @@ const venice::PriceTier& tier =
 Note that pricing carries **two** cache buckets (`cache_input` for a read,
 `cache_write` for populating it) while `Usage` reports only one
 (`cached_tokens`), so a response cannot yet be paired 1:1 with the rate card.
+And `cached_tokens` itself is **per-family**: five of the seven models VC-17
+swept report it, two report nothing but the three flat counts, so a cost
+estimate must treat an absent bucket as unknown rather than as zero. Run
+`venice-cpp --usage <model>` to see what a given family actually reports.
+
+Venice also returns a top-level `cost` object — `{"usd":…,"diem":…}` — on both
+the streaming and non-streaming paths, saying what it actually charged. The
+library does not model it yet; it is in `ChatResponse::raw`.
 
 **`Model::raw` holds the whole entry verbatim**, modeled fields included. It is
 not called `extra` because it is the opposite of the request-side hatches: it is
@@ -640,6 +648,16 @@ tool turn rejected by Gemini-family models); **#29 is fixed in v0.11.0**, and
 `--tools` now passes both legs on `gemini-3-6-flash`, `gemini-3-5-flash` and
 `zai-org-glm-4.7`.
 
+**#28 is settled in v0.11.1, and its premise was wrong.** Venice does send both
+detail objects, at exactly the nesting the library reads — but only on some
+model families. `--stream` had auto-picked `gemini-3-6-flash`, one of two
+families in a seven-model sweep that report neither, and printed "(absent —
+check the nesting)", which reads as a parse bug. Both mistakes are fixed: every
+auto-picking leg now names the runners-up it did not try, and the new
+`venice-cpp --usage [model]` prints the verbatim `usage` object beside the typed
+one, because that is the only thing that tells "the server did not send it"
+apart from "we are looking in the wrong place".
+
 The original caveat, for the record: the
 **v0.8.0, v0.9.0 and v0.10.0 wire shapes were documented, not measured**. Where
 `reasoning_content` sits, where `cached_tokens` is nested, how tool-call
@@ -654,6 +672,7 @@ came from a capture. `/models` answers for any bearer token; chat and
 VENICE_API_KEY=... venice-cpp --stream "..."   # v0.8.0: the reply shapes
 VENICE_API_KEY=... venice-cpp --tools          # v0.9.0: the request shape
 VENICE_API_KEY=... venice-cpp --characters     # v0.10.0: the character entry
+VENICE_API_KEY=... venice-cpp --usage [model]  # v0.11.1: what `usage` carries
 ```
 
 `--tools` runs two legs, and the second is the one that matters: leg one proves

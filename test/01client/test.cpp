@@ -108,6 +108,11 @@ TEST_CASE("ChatResponse::from_json_body fails loudly on malformed input", "[pars
 // ── Usage cache buckets stay distinct (venice-cli #75) ───────────────────
 
 TEST_CASE("Usage keeps cached_tokens distinct when reported", "[parse][usage]") {
+  // The FLAT spelling, which VC-17's 21-capture sweep did not see Venice use
+  // once — the wire location is prompt_tokens_details.cached_tokens, pinned in
+  // test/07stream/ §4 against real captures. This case is what makes the
+  // compatibility read a contract rather than an accident; it is not evidence
+  // about the API. Read §4's provenance note before treating it as such.
   const auto j = nlohmann::json::parse(
       R"({"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"cached_tokens":80})");
   auto u = j.get<Usage>();

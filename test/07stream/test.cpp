@@ -72,11 +72,15 @@ using venice::Usage;
 
 namespace {
 
-// A reasoning + tool-call reply: the shape this whole ticket is about. Written
-// in the nesting the docs describe rather than captured live — there is no
-// VENICE_API_KEY in the implementing environment, and saying so is better than
-// implying a capture. Message::raw and ChatResponse::raw are what make that
-// gap recoverable if a field name here is wrong.
+// A reasoning + tool-call reply: the shape this whole ticket is about.
+//
+// Assembled rather than captured — no single reply carries reasoning_content,
+// a tool call and both usage detail objects at once, so this is a composite. It
+// is no longer a *guess*, though, which is what it was when written: every
+// element of it has since been seen on the wire, the usage block by the VC-17
+// sweep (see §4's provenance note) and the rest by VC-05's and VC-18's live
+// runs. Message::raw and ChatResponse::raw remain what makes a wrong field name
+// here recoverable rather than lossy.
 constexpr auto kReplyBody = R"({
   "id":"chatcmpl-1","model":"deepseek-r1","object":"chat.completion","created":1700000000,
   "system_fingerprint":"fp_abc",
@@ -474,21 +478,107 @@ TEST_CASE("the fields the old parse discarded are all present", "[response][pars
 }
 
 // ── §4 Usage ──────────────────────────────────────────────────────────────
+//
+// PROVENANCE. VC-17 (#28) was filed because this section asserted nestings no
+// capture had shown. It has one now: 21 captures on 2026-08-09, seven models ×
+// {non-streaming, streaming, streaming+stream_options.include_usage}, via
+// `venice-cpp --usage <id>`. What it settled:
+//
+//   prompt_tokens_details.cached_tokens         5 of 7 — glm-4.7, glm-5,
+//                                                 llama-3.3-70b, deepseek-v4-pro,
+//                                                 grok-4-5
+//   completion_tokens_details.reasoning_tokens  2 of 7 — deepseek-v4-pro,
+//                                                 grok-4-5
+//   neither                                     gemini-3-6-flash,
+//                                                 qwen3-235b-a22b-thinking-2507
+//
+// So #28's premise was wrong — both nestings are exactly where this parse looks
+// — and the reason it was wrong is worth more than the correction. The run
+// behind it used the one leg that auto-picked a model without naming the
+// alternates, and gemini-3-6-flash is both the first supportsReasoning entry in
+// the catalogue and one of the two families that report neither field. A shape
+// that varies by family cannot be settled by a leg that only ever runs one.
+//
+// The cases below are the observed shapes, pinned verbatim. The cases after
+// them pin the parse *rule*, and each now says whether its shape has ever been
+// on a wire — because "the fixture agrees with the docs" is exactly the state
+// this ticket exists to end.
+
+// Captured from `--usage gemini-3-6-flash`, non-streaming, 2026-08-09. The
+// streamed frame carried the same three keys.
+constexpr auto kLiveUsageBare = R"({"prompt_tokens":1794,"completion_tokens":607,
+                                    "total_tokens":2401})";
+
+// Captured from `--usage deepseek-v4-pro`, non-streaming, 2026-08-09.
+constexpr auto kLiveUsageFull = R"({"prompt_tokens":1752,"completion_tokens":365,
+                                    "total_tokens":2117,
+                                    "cache_read_input_tokens":1024,
+                                    "prompt_tokens_details":{"cached_tokens":1024},
+                                    "completion_tokens_details":{"reasoning_tokens":92}})";
+
+TEST_CASE("the observed live shapes parse as measured", "[usage][parse][live]") {
+  auto usage_of = [](const char* body) { return nlohmann::json::parse(body).get<Usage>(); };
+
+  SECTION("three flat counts and nothing else leaves both optionals disengaged") {
+    const auto u = usage_of(kLiveUsageBare);
+    REQUIRE(u.prompt_tokens == 1794);
+    REQUIRE(u.completion_tokens == 607);
+    REQUIRE(u.total_tokens == 2401);
+    // Not zero. This is the shape #28 saw and read as a parse failure; absent
+    // is the correct answer to a question this family does not answer.
+    REQUIRE_FALSE(u.cached_tokens.has_value());
+    REQUIRE_FALSE(u.reasoning_tokens.has_value());
+  }
+
+  SECTION("both detail objects are read when the family sends them") {
+    const auto u = usage_of(kLiveUsageFull);
+    REQUIRE(u.cached_tokens == 1024);
+    REQUIRE(u.reasoning_tokens == 92);
+    REQUIRE(u.completion_tokens == 365);
+    // cache_read_input_tokens sits right there beside them and is deliberately
+    // not modeled: it mirrored the nested value in all 21 captures, so typing
+    // it would add a second spelling of one fact. It stays reachable through
+    // ChatResponse::raw, which is what makes that omission honest.
+  }
+
+  SECTION("an explicit zero is engaged, not absent") {
+    // deepseek-v4-pro and llama-3.3-70b both reported "cached_tokens":0 on a
+    // cold cache. Collapsing that to nullopt would erase the difference between
+    // "nothing was cached" and "this family does not say", which is the whole
+    // reason these fields are optional rather than defaulted to 0.
+    const auto u = usage_of(R"({"prompt_tokens":1701,"completion_tokens":78,
+                                "total_tokens":1779,
+                                "prompt_tokens_details":{"cached_tokens":0}})");
+    REQUIRE(u.cached_tokens.has_value());
+    REQUIRE(*u.cached_tokens == 0);
+  }
+}
 
 TEST_CASE("cached_tokens is read from both locations", "[usage][parse][failure]") {
   auto usage_of = [](const char* body) { return nlohmann::json::parse(body).get<Usage>(); };
 
-  SECTION("the flat key, as every release through v0.7.0 read it") {
+  SECTION("the flat key — UNOBSERVED, and kept anyway") {
+    // Venice has never been seen sending a flat `cached_tokens`. What it does
+    // send flat, alongside the nested one and never instead of it, is
+    // `cache_read_input_tokens` — a different key. So this read is the
+    // compatibility shim it was always described as, and this is the only case
+    // in §4 pinning a shape with no wire behind it. Kept rather than deleted:
+    // the read is harmless, removing it changes a public parse's behaviour to
+    // buy nothing, and a gateway in front of Venice is exactly the thing that
+    // would flatten a details object.
     REQUIRE(usage_of(R"({"cached_tokens":80})").cached_tokens == 80);
   }
-  SECTION("the nested OpenAI-canonical location, which was silently unread") {
+  SECTION("the nested OpenAI-canonical location — OBSERVED on 5 of 7 families") {
     REQUIRE(usage_of(R"({"prompt_tokens_details":{"cached_tokens":4}})").cached_tokens == 4);
   }
-  SECTION("nested wins when both are present and disagree") {
+  SECTION("nested wins when both are present and disagree — CONSTRUCTED") {
+    // No capture disagrees, because no capture carries both. This pins the
+    // ordering so a disagreement, if one ever arrives, resolves the documented
+    // way rather than by statement order in from_json.
     REQUIRE(usage_of(R"({"cached_tokens":80,"prompt_tokens_details":{"cached_tokens":4}})")
                 .cached_tokens == 4);
   }
-  SECTION("neither leaves it unset") {
+  SECTION("neither leaves it unset — OBSERVED on gemini and qwen") {
     REQUIRE_FALSE(usage_of(R"({"prompt_tokens":1})").cached_tokens.has_value());
   }
 }
@@ -518,6 +608,9 @@ TEST_CASE("a wrong-typed token count stays loud", "[usage][parse][failure]") {
 }
 
 TEST_CASE("reasoning_tokens is reported", "[usage][parse]") {
+  // Reads the composite reply rather than a bare usage object, so it covers the
+  // path through ChatResponse::from_json_body too. The nesting is the one
+  // deepseek-v4-pro and grok-4-5 were measured sending.
   const auto r = reply();
   REQUIRE(r.usage->reasoning_tokens == 15);
   REQUIRE(r.usage->cached_tokens == 4);
