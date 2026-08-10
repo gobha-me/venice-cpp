@@ -26,6 +26,7 @@
 // embeddings, retries/backoff, async.
 
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <expected>
 #include <functional>
@@ -35,6 +36,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <httplib.h>
@@ -157,6 +159,210 @@ inline void append_param(std::string& out, char& sep, std::string_view key,
   return out;
 }
 
+// ── buffered HTTP substrate (VC-22, #37) ─────────────────────────────────
+//
+// Endpoint methods stay typed. This is deliberately under detail rather than a
+// public Client::send escape hatch: it is the one internal vocabulary every
+// buffered endpoint uses for method, headers, body and response metadata.
+// Keeping it at namespace scope makes the transport contract fixture-testable
+// without adding a fake public endpoint solely for tests.
+
+enum class HttpMethod { Get, Post, Patch, Delete };
+
+struct ByteBody {
+  // std::string is the byte container cpp-httplib accepts. Its size, rather
+  // than a terminating NUL, is authoritative, so arbitrary binary data is
+  // preserved without a text conversion.
+  std::string bytes = {};
+  std::string content_type = {};
+};
+
+struct MultipartPart {
+  std::string name = {};
+  std::string bytes = {};
+  std::string filename = {};
+  std::string content_type = {};
+};
+
+struct MultipartBody {
+  std::vector<MultipartPart> parts = {};
+};
+
+using BufferedBody = std::variant<std::monostate, ByteBody, MultipartBody>;
+
+struct BufferedRequest {
+  HttpMethod method = HttpMethod::Get;
+  std::string endpoint = {};
+  httplib::Headers headers = {};
+  BufferedBody body = std::monostate{};
+};
+
+struct BufferedResponse {
+  int status = 0;
+  httplib::Headers headers = {};
+  // Normalized type/subtype only: lower-case, surrounding whitespace and
+  // parameters removed. The verbatim header remains in headers.
+  std::string content_type = {};
+  std::string body = {};
+};
+
+[[nodiscard]] inline auto host_from_base_url(std::string_view base_url) -> std::string {
+  const auto pos = base_url.find("/api/");
+  return pos == std::string_view::npos ? std::string{base_url} : std::string{base_url.substr(0, pos)};
+}
+
+[[nodiscard]] inline auto request_path(std::string_view base_url, std::string_view endpoint)
+    -> std::string {
+  const auto pos = base_url.find("/api/");
+  const auto prefix = pos == std::string_view::npos ? std::string_view{} : base_url.substr(pos);
+  return std::string{prefix} + std::string{endpoint};
+}
+
+[[nodiscard]] inline auto make_transport(std::string_view base_url, const RequestOptions& opts)
+    -> httplib::Client {
+  httplib::Client cli{host_from_base_url(base_url)};
+  cli.set_follow_location(true);
+  cli.set_read_timeout(opts.read_timeout.value_or(std::chrono::seconds{300}));
+  cli.set_connection_timeout(opts.connect_timeout.value_or(std::chrono::seconds{30}));
+  if (opts.write_timeout) cli.set_write_timeout(*opts.write_timeout);
+  return cli;
+}
+
+[[nodiscard]] inline auto transport_error(httplib::Error error) -> Error {
+  return Error{ErrorKind::Network, 0, "transport: " + httplib::to_string(error), {}};
+}
+
+[[nodiscard]] inline auto cancel_error() -> Error {
+  return Error{ErrorKind::Cancelled, 0, "cancelled by caller", {}};
+}
+
+[[nodiscard]] inline auto http_error(int status, const std::string& body) -> Error {
+  return Error{kind_for_status(status), status, "HTTP " + std::to_string(status), body};
+}
+
+[[nodiscard]] inline auto normalize_media_type(std::string_view value) -> std::string {
+  value = value.substr(0, value.find(';'));
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+    value.remove_prefix(1);
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+    value.remove_suffix(1);
+
+  std::string normalized;
+  normalized.reserve(value.size());
+  for (const char c : value)
+    normalized.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+  return normalized;
+}
+
+[[nodiscard]] inline auto response_from_httplib(httplib::Response response) -> BufferedResponse {
+  std::string content_type;
+  if (const auto it = response.headers.find("Content-Type"); it != response.headers.end())
+    content_type = normalize_media_type(it->second);
+  return BufferedResponse{response.status, std::move(response.headers), std::move(content_type),
+                          std::move(response.body)};
+}
+
+[[nodiscard]] inline auto method_name(HttpMethod method) -> const char* {
+  switch (method) {
+    case HttpMethod::Get: return "GET";
+    case HttpMethod::Post: return "POST";
+    case HttpMethod::Patch: return "PATCH";
+    case HttpMethod::Delete: return "DELETE";
+  }
+  return "GET";
+}
+
+[[nodiscard]] inline auto send_buffered(std::string_view base_url, const BufferedRequest& request,
+                                        const RequestOptions& opts = {})
+    -> std::expected<BufferedResponse, Error> {
+  // Every audited multipart operation is POST. Encoding through cpp-httplib's
+  // public multipart API keeps boundary construction in the transport library;
+  // rejecting any other method here prevents an internal caller from silently
+  // sending a different body shape.
+  if (std::holds_alternative<MultipartBody>(request.body) && request.method != HttpMethod::Post)
+    return std::unexpected{
+        Error{ErrorKind::InvalidArg, 0, "multipart requests require POST", {}}};
+
+  auto cli = make_transport(base_url, opts);
+  // Declared after cli: reverse destruction joins the watcher while the client
+  // it may stop is still alive. This is the same ordering as the SSE path.
+  const CancelGuard guard{opts.cancel, cli};
+  if (guard.cancelled()) return std::unexpected{cancel_error()};
+
+  httplib::Response response;
+  httplib::Error transport_status = httplib::Error::Success;
+  bool sent = false;
+
+  if (const auto* multipart = std::get_if<MultipartBody>(&request.body)) {
+    httplib::MultipartFormDataItems items;
+    items.reserve(multipart->parts.size());
+    for (const auto& part : multipart->parts)
+      items.push_back({part.name, part.bytes, part.filename, part.content_type});
+
+    auto result = cli.Post(request_path(base_url, request.endpoint), request.headers, items);
+    transport_status = result.error();
+    sent = static_cast<bool>(result);
+    if (sent) response = std::move(result.value());
+  } else {
+    httplib::Request wire_request;
+    wire_request.method = method_name(request.method);
+    wire_request.path = request_path(base_url, request.endpoint);
+    wire_request.headers = request.headers;
+    if (const auto* bytes = std::get_if<ByteBody>(&request.body)) {
+      wire_request.body = bytes->bytes;
+      wire_request.headers.erase("Content-Type");
+      wire_request.set_header("Content-Type", bytes->content_type);
+    }
+    sent = cli.send(wire_request, response, transport_status);
+  }
+
+  // Cancellation is tested before the transport result because stop() makes a
+  // caller cancellation arrive from cpp-httplib as a failed socket operation.
+  if (guard.cancelled()) return std::unexpected{cancel_error()};
+  if (!sent) return std::unexpected{transport_error(transport_status)};
+  return response_from_httplib(std::move(response));
+}
+
+[[nodiscard]] inline auto is_json_media_type(std::string_view content_type) -> bool {
+  if (content_type == "application/json") return true;
+  constexpr std::string_view kPrefix = "application/";
+  constexpr std::string_view kSuffix = "+json";
+  return content_type.starts_with(kPrefix) && content_type.ends_with(kSuffix) &&
+         content_type.size() > kPrefix.size() + kSuffix.size();
+}
+
+[[nodiscard]] inline auto require_media_type(const BufferedResponse& response,
+                                             std::span<const std::string_view> allowed)
+    -> std::expected<void, Error> {
+  if (response.status < 200 || response.status >= 300)
+    return std::unexpected{http_error(response.status, response.body)};
+
+  for (const auto candidate : allowed) {
+    if (response.content_type == normalize_media_type(candidate)) return {};
+  }
+
+  const std::string actual = response.content_type.empty() ? "<missing>" : response.content_type;
+  return std::unexpected{Error{ErrorKind::Parse, response.status,
+                               "unexpected response content type: " + actual, response.body}};
+}
+
+[[nodiscard]] inline auto decode_json(const BufferedResponse& response)
+    -> std::expected<nlohmann::json, Error> {
+  if (response.status < 200 || response.status >= 300)
+    return std::unexpected{http_error(response.status, response.body)};
+  if (!is_json_media_type(response.content_type)) {
+    const std::string actual = response.content_type.empty() ? "<missing>" : response.content_type;
+    return std::unexpected{Error{ErrorKind::Parse, response.status,
+                                 "expected JSON response, got " + actual, response.body}};
+  }
+  try {
+    return nlohmann::json::parse(response.body);
+  } catch (const std::exception& e) {
+    return std::unexpected{Error{ErrorKind::Parse, response.status,
+                                 std::string{"json parse: "} + e.what(), response.body}};
+  }
+}
+
 }  // namespace detail
 
 class Client {
@@ -252,19 +458,19 @@ class Client {
     detail::SseFramer framer;
     std::vector<ToolCall> frags;  // backing store for the span in each delta
 
-    auto cli = make_transport(opts);
+    auto cli = detail::make_transport(m_base_url, opts);
     // Declared after cli and never before: the guard's watcher thread holds a
     // reference to it, and destruction runs in reverse, so this ordering is what
     // guarantees the thread is joined while cli is still alive.
     const detail::CancelGuard guard{opts.cancel, cli};
-    if (guard.cancelled()) return std::unexpected{cancel_error()};
+    if (guard.cancelled()) return std::unexpected{detail::cancel_error()};
 
     httplib::Headers headers = auth_headers();
     headers.emplace("Accept", "text/event-stream");
 
     httplib::Request hreq;
     hreq.method = "POST";
-    hreq.path = path("/chat/completions");
+    hreq.path = detail::request_path(m_base_url, "/chat/completions");
     hreq.headers = headers;
     hreq.body = payload;
     hreq.set_header("Content-Type", "application/json");
@@ -310,12 +516,12 @@ class Client {
     // that as "here is your partial answer" would hand back a response nobody
     // is waiting for. What `acc` holds is unaffected either way, which is the
     // whole point of it belonging to the caller.
-    if (guard.cancelled()) return std::unexpected{cancel_error()};
+    if (guard.cancelled()) return std::unexpected{detail::cancel_error()};
     if (!sent && !early_stop)
-      return std::unexpected{transport_error(herr)};
+      return std::unexpected{detail::transport_error(herr)};
     if (early_stop) return acc.response();  // deliberate early stop
     if (hres.status < 200 || hres.status >= 300)
-      return std::unexpected{http_error(hres.status, hres.body)};
+      return std::unexpected{detail::http_error(hres.status, hres.body)};
     // "nothing arrived at all", not "no content arrived". The old test was
     // assembled.content.empty(), which reported ErrorKind::Parse on a
     // reasoning-only stream that had in fact been received perfectly.
@@ -515,100 +721,42 @@ class Client {
     return {};
   }
 
-  // Split base_url into scheme://host and the /api/v1 path prefix.
-  [[nodiscard]] auto host() const -> std::string {
-    const auto pos = m_base_url.find("/api/");
-    return pos == std::string::npos ? m_base_url : m_base_url.substr(0, pos);
-  }
-  [[nodiscard]] auto path(std::string_view endpoint) const -> std::string {
-    const auto pos = m_base_url.find("/api/");
-    const std::string prefix = pos == std::string::npos ? "" : m_base_url.substr(pos);
-    return prefix + std::string{endpoint};
-  }
-
-  // The three defaults are the Phase 0 values and stay the defaults: a chat
-  // completion can legitimately take minutes, so a short read timeout would be
-  // a worse bug than the one VC-06 fixes. What changed is that they are now a
-  // floor a caller can move, per call, rather than a property of the library.
-  //
-  // No write timeout default — httplib's own applies. A request body here is a
-  // JSON document measured in kilobytes; there has never been a case where the
-  // write is the thing that hangs, and inventing a number for it would be
-  // asserting knowledge we do not have.
-  [[nodiscard]] auto make_transport(const RequestOptions& opts) const -> httplib::Client {
-    httplib::Client cli{host()};
-    cli.set_bearer_token_auth(m_api_key);
-    cli.set_follow_location(true);
-    cli.set_read_timeout(opts.read_timeout.value_or(std::chrono::seconds{300}));
-    cli.set_connection_timeout(opts.connect_timeout.value_or(std::chrono::seconds{30}));
-    if (opts.write_timeout) cli.set_write_timeout(*opts.write_timeout);
-    return cli;
-  }
-
   [[nodiscard]] auto auth_headers() const -> httplib::Headers {
     return {{"Authorization", "Bearer " + m_api_key}};
   }
 
-  // Both buffered helpers keep using httplib's convenience Get/Post rather than
-  // the lower-level send(): cancellation works by shutting the socket down from
-  // another thread, which aborts whichever call is blocked on it. Routing these
-  // through a content_receiver — one option #7 floated — would buy nothing,
-  // because a receiver only runs when bytes arrive and the case worth
-  // cancelling is precisely the one where none do.
+  // Both typed JSON helpers route through detail::send_buffered. The raw
+  // response remains available there for endpoint methods that need headers or
+  // a non-JSON body; these two deliberately return only the parsed value to
+  // preserve the established public signatures.
   //
   // Guard placement and ordering are identical to chat_stream's; see there. The
-  // post-call test comes before the `!res` test for the same reason it does
-  // over there, and also covers the case where the cancel lands after a
-  // perfectly good response: the caller stopped waiting, so they get Cancelled
-  // rather than an answer nobody is holding a thread for.
+  // substrate's post-call token test comes before its transport-result test for
+  // the same reason it does over there.
   [[nodiscard]] auto get_json(std::string_view endpoint, const RequestOptions& opts) const
       -> std::expected<nlohmann::json, Error> {
-    auto cli = make_transport(opts);
-    const detail::CancelGuard guard{opts.cancel, cli};
-    if (guard.cancelled()) return std::unexpected{cancel_error()};
-
-    auto res = cli.Get(path(endpoint), auth_headers());
-    if (guard.cancelled()) return std::unexpected{cancel_error()};
-    if (!res) return std::unexpected{transport_error(res.error())};
-    return decode_json(res->status, res->body);
+    auto response = detail::send_buffered(
+        m_base_url,
+        detail::BufferedRequest{.method = detail::HttpMethod::Get,
+                                .endpoint = std::string{endpoint},
+                                .headers = auth_headers()},
+        opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    return detail::decode_json(*response);
   }
 
   [[nodiscard]] auto post_json(std::string_view endpoint, const nlohmann::json& body,
                                const RequestOptions& opts) const
       -> std::expected<nlohmann::json, Error> {
-    auto cli = make_transport(opts);
-    const detail::CancelGuard guard{opts.cancel, cli};
-    if (guard.cancelled()) return std::unexpected{cancel_error()};
-
-    auto res = cli.Post(path(endpoint), auth_headers(), body.dump(), "application/json");
-    if (guard.cancelled()) return std::unexpected{cancel_error()};
-    if (!res) return std::unexpected{transport_error(res.error())};
-    return decode_json(res->status, res->body);
-  }
-
-  [[nodiscard]] static auto decode_json(int status, const std::string& body)
-      -> std::expected<nlohmann::json, Error> {
-    if (status < 200 || status >= 300)
-      return std::unexpected{http_error(status, body)};
-    try {
-      return nlohmann::json::parse(body);
-    } catch (const std::exception& e) {
-      return std::unexpected{Error{ErrorKind::Parse, status, std::string{"json parse: "} + e.what(), body}};
-    }
-  }
-
-  [[nodiscard]] static auto http_error(int status, const std::string& body) -> Error {
-    return Error{kind_for_status(status), status, "HTTP " + std::to_string(status), body};
-  }
-
-  [[nodiscard]] static auto transport_error(httplib::Error e) -> Error {
-    return Error{ErrorKind::Network, 0, "transport: " + httplib::to_string(e), {}};
-  }
-
-  // No status and no body, and there never can be one: the socket was shut down
-  // under the request, so whatever the server was going to say did not arrive.
-  [[nodiscard]] static auto cancel_error() -> Error {
-    return Error{ErrorKind::Cancelled, 0, "cancelled by caller", {}};
+    auto response = detail::send_buffered(
+        m_base_url,
+        detail::BufferedRequest{.method = detail::HttpMethod::Post,
+                                .endpoint = std::string{endpoint},
+                                .headers = auth_headers(),
+                                .body = detail::ByteBody{body.dump(), "application/json"}},
+        opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    return detail::decode_json(*response);
   }
 
   // SSE framing used to live here as a private static plus a "\n\n" loop inside

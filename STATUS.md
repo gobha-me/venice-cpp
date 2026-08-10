@@ -51,9 +51,10 @@ in full: a leg that auto-picks one model settles nothing about a shape that
 varies by model family, and two tickets have now been filed on the strength of
 a single-family run.
 
-1. **VC-22 (#37) and VC-23 (#38): transport/auth foundations for the OpenAPI
-   program.** VC-35 made the 49-operation inventory durable; these two shared
-   substrates are the next dependency before endpoint-family work.
+1. **VC-23 (#38): authentication/payment foundation for the OpenAPI program.**
+   VC-22's buffered transport substrate is done; explicit public/Bearer/SIWX/
+   x402 modes and payment-response metadata are the remaining shared dependency
+   before endpoint-family work.
 2. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
    Both foundations are proven, and now measured rather than assumed.
 3. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
@@ -68,6 +69,35 @@ a single-family run.
    speculatively.
 5. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-22 (#37) is done** — see v0.12.2. Every buffered endpoint now travels
+through one internal request/response substrate instead of the old GET-JSON and
+POST-JSON pair. It expresses GET, POST, PATCH and DELETE; caller-supplied
+headers; empty or binary-safe bodies; and multipart parts with exact field
+names, filenames, media types and bytes. The owned response keeps status,
+case-insensitive headers, normalized content type and the byte-exact body, which
+is the information VC-23 and the media/account endpoint families need.
+
+The substrate returns transport and cancellation failures immediately but does
+not erase an HTTP response merely because its status is non-2xx. Typed decoders
+apply status first, then media type: an error body with an unexpected content
+type remains the correct HTTP error, while a 2xx JSON response missing a JSON
+media type is `ErrorKind::Parse`. `application/json` and structured
+`application/*+json` suffixes are accepted case-insensitively with parameters
+ignored. The verbatim Content-Type header remains in the retained headers.
+
+Multipart encoding uses cpp-httplib's public multipart API rather than a local
+boundary implementation. All multipart operations in the audited contract are
+POST, so the internal layer rejects any other method before opening a socket.
+`test/06transport/` proves repeated field names, NUL-containing file bytes and
+cancellation while a multipart response is stalled; JSON, plain text, CSV and
+binary responses prove metadata and exact-byte retention. Existing chat,
+models, characters and rate-limit entry points keep their public signatures and
+now decode over this substrate. SSE keeps its specialized receiver but shares
+transport construction and error helpers.
+
+No supported public C++ API or endpoint coverage changes, hence the patch bump.
+Public exposure of payment headers and response metadata remains VC-23 (#38).
 
 **VC-35 (#50) is done** — see v0.12.1. Full API coverage is now an inventory
 rather than a hand count: 49 method/path pairs, four implemented and 45 planned,
