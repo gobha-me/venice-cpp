@@ -41,6 +41,13 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
 - cpp-httplib API notes (v0.18.x): `Request` has `body` + `set_header()` for
   content type (no `set_content`, no `content_type_`); `send(req,res,err)`
   returns `bool`. These bit once — check the vendored header before assuming.
+- **Buffered HTTP goes through `detail::send_buffered`; endpoint methods do not
+  grow their own verb/content helpers.** Its response owns status, headers,
+  normalized media type and byte-exact body. Non-2xx status is classified before
+  success-media validation; a wrong/missing media type on a 2xx is `Parse`.
+  Multipart uses cpp-httplib's public encoder and is POST-only because every
+  multipart operation in the audited contract is POST. SSE remains specialized
+  but shares transport construction and error helpers.
 
 ## Conventions that matter
 

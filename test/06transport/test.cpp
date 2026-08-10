@@ -42,6 +42,7 @@
 #include <pthread.h>
 #endif
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <expected>
@@ -108,6 +109,71 @@ class Gate {
 class TestServer {
  public:
   TestServer() {
+    const auto echo = [](const httplib::Request& req, httplib::Response& res) {
+      nlohmann::json body;
+      body["method"] = req.method;
+      body["target"] = req.target;
+      body["content_type"] = req.get_header_value("Content-Type");
+      body["x_test"] = req.get_header_value("X-Test-Request");
+      body["body"] = req.body;
+      res.set_header("X-Test-Response", "retained");
+      res.set_content(body.dump(), "application/json; charset=utf-8");
+    };
+    m_svr.Get("/api/v1/transport/echo", echo);
+    m_svr.Post("/api/v1/transport/echo", echo);
+    m_svr.Patch("/api/v1/transport/echo", echo);
+    m_svr.Delete("/api/v1/transport/echo", echo);
+
+    m_svr.Post("/api/v1/transport/multipart",
+               [](const httplib::Request& req, httplib::Response& res) {
+                 nlohmann::json parts = nlohmann::json::array();
+                 for (const auto& [name, part] : req.files) {
+                   parts.push_back({{"name", name},
+                                    {"filename", part.filename},
+                                    {"content_type", part.content_type},
+                                    {"content", part.content}});
+                 }
+                 res.set_header("X-Multipart-Seen", "yes");
+                 res.set_content(nlohmann::json{{"parts", std::move(parts)}}.dump(),
+                                 "application/json");
+               });
+    m_svr.Post("/api/v1/transport/multipart-stall",
+               [this](const httplib::Request&, httplib::Response& res) {
+                 ++m_multipart_stall_hits;
+                 m_gate.wait(kStallCap);
+                 res.set_content("{}", "application/json");
+               });
+
+    m_svr.Get("/api/v1/transport/text", [](const httplib::Request&, httplib::Response& res) {
+      res.set_header("X-Test-Response", "text");
+      res.set_content("plain response", "Text/Plain; charset=UTF-8");
+    });
+    m_svr.Get("/api/v1/transport/csv", [](const httplib::Request&, httplib::Response& res) {
+      res.set_header("X-Test-Response", "csv");
+      res.set_content("a,b\n1,2\n", "text/csv; header=present");
+    });
+    m_svr.Get("/api/v1/transport/binary", [](const httplib::Request&, httplib::Response& res) {
+      const std::array bytes{char{0}, char{1}, static_cast<char>(0xFF), char{'x'}};
+      res.set_header("X-Test-Response", "binary");
+      res.set_content(bytes.data(), bytes.size(), "Application/Octet-Stream; version=1");
+    });
+    m_svr.Get("/api/v1/transport/missing-type",
+              [](const httplib::Request&, httplib::Response& res) { res.body = R"({"ok":true})"; });
+    m_svr.Get("/api/v1/transport/wrong-type", [](const httplib::Request&, httplib::Response& res) {
+      res.set_content(R"({"ok":true})", "text/plain");
+    });
+    m_svr.Get("/api/v1/transport/vendor-json", [](const httplib::Request&, httplib::Response& res) {
+      res.set_content(R"({"kind":"problem"})", "Application/Problem+JSON; charset=UTF-8");
+    });
+    m_svr.Get("/api/v1/transport/malformed-json",
+              [](const httplib::Request&, httplib::Response& res) {
+                res.set_content("{", "application/json");
+              });
+    m_svr.Get("/api/v1/transport/http-error", [](const httplib::Request&, httplib::Response& res) {
+      res.status = 418;
+      res.set_content("not JSON and that does not matter", "text/plain");
+    });
+
     m_svr.Get("/api/v1/api_keys/rate_limits",
               [this](const httplib::Request&, httplib::Response& res) {
                 ++m_stall_hits;
@@ -115,13 +181,35 @@ class TestServer {
                 res.set_content("{}", "application/json");
               });
 
-    m_svr.Get("/api/v1/models", [this](const httplib::Request&, httplib::Response& res) {
+    m_svr.Get("/api/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
       ++m_models_hits;
+      if (req.get_header_value("Authorization") != "Bearer not-a-real-key") {
+        res.status = 401;
+        res.set_content(R"({"error":"missing test bearer"})", "application/json");
+        return;
+      }
       res.set_content(R"({"data":[{"id":"test-model","type":"text"}]})", "application/json");
     });
 
     m_svr.Post("/api/v1/chat/completions",
-               [this](const httplib::Request&, httplib::Response& res) {
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 if (req.get_header_value("Authorization") != "Bearer not-a-real-key") {
+                   res.status = 401;
+                   res.set_content(R"({"error":"missing test bearer"})", "application/json");
+                   return;
+                 }
+                 if (req.get_header_value("Content-Type") != "application/json") {
+                   res.status = 415;
+                   res.set_content(R"({"error":"wrong content type"})", "application/json");
+                   return;
+                 }
+                 const auto body = nlohmann::json::parse(req.body);
+                 if (!body.at("stream").get<bool>()) {
+                   res.set_content(
+                       R"({"id":"buffered-chat","choices":[{"message":{"role":"assistant","content":"ok"}}]})",
+                       "application/json");
+                   return;
+                 }
                  // Per-request, not per-server: two tests drive this endpoint,
                  // and a member counter would leave the second one starting
                  // mid-stream. The shared_ptr is what gives the provider — which
@@ -164,6 +252,7 @@ class TestServer {
 
   [[nodiscard]] auto stall_hits() const -> int { return m_stall_hits.load(); }
   [[nodiscard]] auto models_hits() const -> int { return m_models_hits.load(); }
+  [[nodiscard]] auto multipart_stall_hits() const -> int { return m_multipart_stall_hits.load(); }
 
   static constexpr int kFrames = 2;
   static constexpr const char* kDelta[kFrames] = {"hel", "lo"};
@@ -177,6 +266,7 @@ class TestServer {
   int m_port = 0;
   std::atomic<int> m_stall_hits{0};
   std::atomic<int> m_models_hits{0};
+  std::atomic<int> m_multipart_stall_hits{0};
 };
 
 auto minimal_chat() -> ChatRequest {
@@ -198,6 +288,225 @@ auto timed(F&& fn) -> std::chrono::milliseconds {
 // The bound every cancellation case is measured against. Three orders of
 // magnitude below the 300s default it is standing in for.
 constexpr auto kPromptly = 5000ms;
+
+// ── buffered substrate: failure matrix first (VC-22) ──────────────────────────
+
+TEST_CASE("buffered JSON decoding rejects missing and wrong success content types",
+          "[transport][buffered][failure]") {
+  const TestServer server;
+
+  for (const std::string endpoint : {"/transport/missing-type", "/transport/wrong-type"}) {
+    const auto response = venice::detail::send_buffered(
+        server.base_url(), {.method = venice::detail::HttpMethod::Get, .endpoint = endpoint});
+    REQUIRE(response.has_value());
+
+    const auto decoded = venice::detail::decode_json(*response);
+    REQUIRE_FALSE(decoded.has_value());
+    REQUIRE(decoded.error().kind == ErrorKind::Parse);
+    REQUIRE(decoded.error().status == 200);
+    REQUIRE(decoded.error().body == R"({"ok":true})");
+  }
+}
+
+TEST_CASE("buffered JSON decoding rejects malformed JSON after accepting its media type",
+          "[transport][buffered][failure]") {
+  const TestServer server;
+  const auto response = venice::detail::send_buffered(
+      server.base_url(),
+      {.method = venice::detail::HttpMethod::Get, .endpoint = "/transport/malformed-json"});
+  REQUIRE(response.has_value());
+
+  const auto decoded = venice::detail::decode_json(*response);
+  REQUIRE_FALSE(decoded.has_value());
+  REQUIRE(decoded.error().kind == ErrorKind::Parse);
+  REQUIRE(decoded.error().status == 200);
+  REQUIRE(decoded.error().body == "{");
+}
+
+TEST_CASE("a non-success status wins over an unexpected content type",
+          "[transport][buffered][failure]") {
+  const TestServer server;
+  const auto response = venice::detail::send_buffered(
+      server.base_url(),
+      {.method = venice::detail::HttpMethod::Get, .endpoint = "/transport/http-error"});
+  REQUIRE(response.has_value());
+
+  const auto decoded = venice::detail::decode_json(*response);
+  REQUIRE_FALSE(decoded.has_value());
+  REQUIRE(decoded.error().kind == ErrorKind::Http);
+  REQUIRE(decoded.error().status == 418);
+  REQUIRE(decoded.error().body == "not JSON and that does not matter");
+}
+
+TEST_CASE("multipart is rejected on methods the audited contract never uses",
+          "[transport][buffered][multipart][failure]") {
+  const TestServer server;
+  const auto response = venice::detail::send_buffered(
+      server.base_url(),
+      {.method = venice::detail::HttpMethod::Patch,
+       .endpoint = "/transport/multipart",
+       .body = venice::detail::MultipartBody{}});
+
+  REQUIRE_FALSE(response.has_value());
+  REQUIRE(response.error().kind == ErrorKind::InvalidArg);
+}
+
+TEST_CASE("every buffered HTTP method shares headers path body and response capture",
+          "[transport][buffered]") {
+  const TestServer server;
+
+  struct Case {
+    venice::detail::HttpMethod method;
+    std::string_view name;
+    std::string bytes;
+  };
+  const std::array cases{
+      Case{venice::detail::HttpMethod::Get, "GET", {}},
+      Case{venice::detail::HttpMethod::Post, "POST", std::string{"post\0bytes", 10}},
+      Case{venice::detail::HttpMethod::Patch, "PATCH", "patch bytes"},
+      Case{venice::detail::HttpMethod::Delete, "DELETE", "delete bytes"},
+  };
+
+  for (const auto& item : cases) {
+    venice::detail::BufferedRequest request{
+        .method = item.method,
+        .endpoint = "/transport/echo?mode=exact%20path",
+        .headers = {{"X-Test-Request", "caller-value"}},
+    };
+    if (item.method != venice::detail::HttpMethod::Get)
+      request.body = venice::detail::ByteBody{item.bytes, "application/octet-stream"};
+
+    const auto response = venice::detail::send_buffered(server.base_url(), request);
+    REQUIRE(response.has_value());
+    REQUIRE(response->status == 200);
+    REQUIRE(response->content_type == "application/json");
+    REQUIRE(response->headers.find("X-Test-Response") != response->headers.end());
+
+    const auto decoded = venice::detail::decode_json(*response);
+    REQUIRE(decoded.has_value());
+    REQUIRE((*decoded)["method"] == item.name);
+    REQUIRE((*decoded)["target"] == "/api/v1/transport/echo?mode=exact%20path");
+    REQUIRE((*decoded)["x_test"] == "caller-value");
+    REQUIRE((*decoded)["body"].get<std::string>() == item.bytes);
+    if (item.method == venice::detail::HttpMethod::Get)
+      REQUIRE((*decoded)["content_type"] == "");
+    else
+      REQUIRE((*decoded)["content_type"] == "application/octet-stream");
+  }
+}
+
+TEST_CASE("a structured JSON suffix and media-type parameters are accepted",
+          "[transport][buffered]") {
+  const TestServer server;
+  const auto response = venice::detail::send_buffered(
+      server.base_url(),
+      {.method = venice::detail::HttpMethod::Get, .endpoint = "/transport/vendor-json"});
+  REQUIRE(response.has_value());
+  REQUIRE(response->content_type == "application/problem+json");
+
+  const auto decoded = venice::detail::decode_json(*response);
+  REQUIRE(decoded.has_value());
+  REQUIRE((*decoded)["kind"] == "problem");
+}
+
+TEST_CASE("buffered text CSV and binary responses retain metadata and exact bytes",
+          "[transport][buffered]") {
+  const TestServer server;
+
+  const auto text = venice::detail::send_buffered(
+      server.base_url(), {.method = venice::detail::HttpMethod::Get, .endpoint = "/transport/text"});
+  REQUIRE(text.has_value());
+  REQUIRE(text->content_type == "text/plain");
+  REQUIRE(text->body == "plain response");
+  const auto text_header = text->headers.find("X-Test-Response");
+  REQUIRE(text_header != text->headers.end());
+  REQUIRE(text_header->second == "text");
+  const std::array text_types{std::string_view{"text/plain"}};
+  REQUIRE(venice::detail::require_media_type(*text, text_types).has_value());
+
+  const auto csv = venice::detail::send_buffered(
+      server.base_url(), {.method = venice::detail::HttpMethod::Get, .endpoint = "/transport/csv"});
+  REQUIRE(csv.has_value());
+  REQUIRE(csv->content_type == "text/csv");
+  REQUIRE(csv->body == "a,b\n1,2\n");
+  const std::array csv_types{std::string_view{"text/csv"}};
+  REQUIRE(venice::detail::require_media_type(*csv, csv_types).has_value());
+
+  const auto binary = venice::detail::send_buffered(
+      server.base_url(),
+      {.method = venice::detail::HttpMethod::Get, .endpoint = "/transport/binary"});
+  REQUIRE(binary.has_value());
+  REQUIRE(binary->content_type == "application/octet-stream");
+  REQUIRE(binary->body == std::string{"\0\1\xFFx", 4});
+  const auto binary_header = binary->headers.find("X-Test-Response");
+  REQUIRE(binary_header != binary->headers.end());
+  REQUIRE(binary_header->second == "binary");
+  const std::array binary_types{std::string_view{"application/octet-stream"}};
+  REQUIRE(venice::detail::require_media_type(*binary, binary_types).has_value());
+}
+
+TEST_CASE("multipart preserves repeated names filenames media types and NUL bytes",
+          "[transport][buffered][multipart]") {
+  const TestServer server;
+  const std::string nul_bytes{"left\0right", 10};
+  const auto response = venice::detail::send_buffered(
+      server.base_url(),
+      {.method = venice::detail::HttpMethod::Post,
+       .endpoint = "/transport/multipart",
+       .headers = {{"X-Test-Request", "multipart"}},
+       .body = venice::detail::MultipartBody{{
+           {.name = "images", .bytes = nul_bytes, .filename = "one.bin", .content_type = "application/octet-stream"},
+           {.name = "images", .bytes = "second", .filename = "two.txt", .content_type = "text/plain"},
+           {.name = "prompt", .bytes = "edit this", .filename = {}, .content_type = "text/plain"},
+       }}});
+  REQUIRE(response.has_value());
+  const auto seen_header = response->headers.find("X-Multipart-Seen");
+  REQUIRE(seen_header != response->headers.end());
+  REQUIRE(seen_header->second == "yes");
+
+  const auto decoded = venice::detail::decode_json(*response);
+  REQUIRE(decoded.has_value());
+  const auto& parts = decoded->at("parts");
+  REQUIRE(parts.size() == 3);
+  REQUIRE(parts[0]["name"] == "images");
+  REQUIRE(parts[0]["filename"] == "one.bin");
+  REQUIRE(parts[0]["content_type"] == "application/octet-stream");
+  REQUIRE(parts[0]["content"].get<std::string>() == nul_bytes);
+  REQUIRE(parts[1]["name"] == "images");
+  REQUIRE(parts[1]["filename"] == "two.txt");
+  REQUIRE(parts[1]["content"] == "second");
+  REQUIRE(parts[2]["name"] == "prompt");
+  REQUIRE(parts[2]["filename"] == "");
+  REQUIRE(parts[2]["content"] == "edit this");
+}
+
+TEST_CASE("cancellation interrupts the multipart transport path",
+          "[transport][buffered][multipart][cancel][failure]") {
+  const TestServer server;
+  venice::CancelToken token;
+  std::thread canceller{[&] {
+    while (server.multipart_stall_hits() == 0) std::this_thread::sleep_for(5ms);
+    token.cancel();
+  }};
+
+  std::expected<venice::detail::BufferedResponse, venice::Error> response;
+  const auto elapsed = timed([&] {
+    response = venice::detail::send_buffered(
+        server.base_url(),
+        {.method = venice::detail::HttpMethod::Post,
+         .endpoint = "/transport/multipart-stall",
+         .body = venice::detail::MultipartBody{{
+             {.name = "file", .bytes = std::string(4096, 'x'), .filename = "x.bin", .content_type = "application/octet-stream"},
+         }}},
+        {.cancel = &token});
+  });
+  canceller.join();
+
+  REQUIRE_FALSE(response.has_value());
+  REQUIRE(response.error().kind == ErrorKind::Cancelled);
+  REQUIRE(elapsed < kPromptly);
+  REQUIRE(server.multipart_stall_hits() == 1);
+}
 
 }  // namespace
 
@@ -539,4 +848,15 @@ TEST_CASE("default options behave as before", "[transport]") {
   REQUIRE(res.has_value());
   REQUIRE(res->size() == 1);
   REQUIRE(res->front().id == "test-model");
+}
+
+TEST_CASE("buffered chat still sends bearer JSON and parses the typed reply", "[transport]") {
+  const TestServer server;
+  const Client client{"not-a-real-key", server.base_url()};
+
+  const auto res = client.chat(minimal_chat());
+
+  REQUIRE(res.has_value());
+  REQUIRE(res->id == "buffered-chat");
+  REQUIRE(res->content == "ok");
 }
