@@ -8,6 +8,7 @@
 // nlohmann/json, and OpenSSL — provided transitively when linking the
 // `venice-cpp::lib` CMake target.
 
+#include "venice/auth.hpp"
 #include "venice/error.hpp"
 #include "venice/options.hpp"
 #include "venice/types.hpp"

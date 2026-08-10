@@ -12,7 +12,8 @@ AGENTS.md (which holds standing conventions, not state).
 - A reply is a `Message` and a `Message` is what you send — reasoning_content,
   tool_calls, tool_call_id, refusal, multimodal content parts and a tool call's
   `thought_signature`, all round-trippable, all individually withholdable.
-- Per-request timeouts and a `CancelToken` on every entry point (VC-06).
+- Per-request timeouts, a `CancelToken`, and an authentication override on every
+  entry point (VC-06/VC-23).
 - `models()` list with typed per-model metadata, filterable by modality
   (105 text / 299 all, fetched live), `balance()` rate-limit endpoint.
 - `characters()` list with typed per-character metadata and a `CharacterQuery`
@@ -20,7 +21,8 @@ AGENTS.md (which holds standing conventions, not state).
   2026-08-09: every modeled key present, no unmodeled key, default page 50.
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
-  rate_limited/invalid_arg, each carrying status + raw body.
+  payment_required/rate_limited/invalid_arg/cancelled, each carrying status +
+  raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
 - OpenAPI coverage: 4/49 operations implemented. The other 45 are assigned to
@@ -51,24 +53,50 @@ in full: a leg that auto-picks one model settles nothing about a shape that
 varies by model family, and two tickets have now been filed on the strength of
 a single-family run.
 
-1. **VC-23 (#38): authentication/payment foundation for the OpenAPI program.**
-   VC-22's buffered transport substrate is done; explicit public/Bearer/SIWX/
-   x402 modes and payment-response metadata are the remaining shared dependency
-   before endpoint-family work.
-2. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
+1. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
    Both foundations are proven, and now measured rather than assumed.
-3. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
+2. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
    m.raw` is overwritten for `tool_calls` because that key is modeled, and
    `ToolCall` has `raw` but no `extra`, so an unmodeled tool-call key is
    unrecoverable. VC-18 was exactly that failure. The limit is pinned by a §0
    case in `test/07stream/` whose deliberate inversion is the ticket's
    acceptance criterion. The hard half is streaming: a merge rule for arbitrary
    unmodeled keys across fragments has no wire evidence to choose it yet.
-4. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
+3. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
    embeddings, retries/backoff, async). Driven by real use, not
    speculatively.
-5. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
+4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-23 (#38) and VC-15 (#25) are done** — see v0.13.0. Authentication is now
+transport state with four explicit modes: Public, Bearer, pre-signed SIWX and a
+pre-built x402 payment payload. A client supplies the default and
+`RequestOptions::authentication` can override one call. The compatible string
+constructor remains exactly Bearer; an empty string is an invalid Bearer rather
+than a secret spelling for Public. Existing endpoints enforce the audited
+matrix before a socket: models accepts Public/Bearer, chat accepts Bearer/SIWX,
+and characters/rate-limits require Bearer.
+
+The emitted wallet headers follow the audited specification rather than the
+ticket's legacy names: `SIGN-IN-WITH-X` and `PAYMENT-SIGNATURE` are canonical;
+`X-Sign-In-With-X` and `X-402-Payment` are migration aliases Venice accepts but
+this client does not emit. No wallet key, signature production, base64 decode,
+or USDC transaction construction enters the library.
+
+402 is now `ErrorKind::PaymentRequired`, distinct from 401/403 `Auth`.
+`ResponseMetadata` preserves every response header and extracts the three
+protocol values callers need: `X-Balance-Remaining`, `PAYMENT-REQUIRED` and
+`PAYMENT-RESPONSE`, all exact strings. Response-derived failures carry it, and
+`ChatResponse` carries it on buffered success, completed streaming success and
+deliberate early stop. The SSE path now buffers a non-2xx body instead of trying
+to parse the JSON payment error as events and losing the raw body.
+
+The offline matrix covers all four header modes, empty secrets, per-call
+precedence, every current endpoint policy, zero-hit preflight rejection,
+buffered/completed/early-stop balance metadata, 402 body/header parity across
+both chat paths, case-insensitive lookup, generic parse/HTTP error metadata and
+secret non-disclosure. Endpoint coverage remains 4/49, hence a public-API minor
+release rather than an endpoint-count change.
 
 **VC-22 (#37) is done** — see v0.12.2. Every buffered endpoint now travels
 through one internal request/response substrate instead of the old GET-JSON and
@@ -97,7 +125,7 @@ now decode over this substrate. SSE keeps its specialized receiver but shares
 transport construction and error helpers.
 
 No supported public C++ API or endpoint coverage changes, hence the patch bump.
-Public exposure of payment headers and response metadata remains VC-23 (#38).
+Public exposure of payment headers and response metadata landed in VC-23.
 
 **VC-35 (#50) is done** — see v0.12.1. Full API coverage is now an inventory
 rather than a hand count: 49 method/path pairs, four implemented and 45 planned,
@@ -825,12 +853,9 @@ Six things are worth knowing, four of them measured rather than reasoned:
 Three things were left out on purpose. `GET /characters/{slug}` is the same
 struct behind a different path and is filed as VC-16 (#26). The
 README's FetchContent `GIT_TAG` was bumped by hand again, which is the drive-by
-VC-12 (#17) exists to abolish. And **402 still maps to `ErrorKind::Http`, not
-`Auth`** — this endpoint answers 402 to a credential-less call, and
-`kind_for_status` only maps 401/403, so a consumer branching on `Auth` to
-re-prompt will not fire. Widening that mapping changes the error model for every
-endpoint, so it is VC-15 (#25) rather than something smuggled into an endpoint
-PR; `client.hpp` says so where a caller will read it.
+VC-12 (#17) exists to abolish. The 402 ambiguity described by this historical
+entry is resolved in v0.13.0: it is `PaymentRequired`, while 401/403 remain
+`Auth`, and response headers are preserved for the caller.
 
 ## Cross-project context
 - Stack: cpp-template (base) -> venice-cpp (API) + termforge (TUI) -> AIForge.

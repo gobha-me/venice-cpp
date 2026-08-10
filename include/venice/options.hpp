@@ -30,6 +30,8 @@
 
 #include <httplib.h>
 
+#include "venice/auth.hpp"
+
 namespace venice {
 
 namespace detail {
@@ -90,7 +92,8 @@ class CancelToken {
 };
 
 // Per-request transport overrides. Every field is optional; an unset one keeps
-// the client default (300s read / 30s connect, httplib's own write default).
+// the client default (300s read / 30s connect, httplib's own write default and
+// the Authentication supplied to Client).
 //
 // A separate parameter rather than fields on ChatRequest, for the reason
 // ChatRequest has no `stream` member (AGENTS.md): none of this is part of the
@@ -104,12 +107,12 @@ class CancelToken {
 // allocation and an atomic refcount on every caller to model an ownership
 // transfer that never happens.
 //
-// Every member carries an explicit default initializer, including the three
+// Every member carries an explicit default initializer, including the four
 // std::optionals that would default-construct empty anyway. That is not
 // redundancy — it is what makes the designated-initializer spelling this type
 // is designed for usable at all. Without them, GCC's
-// -Wmissing-field-initializers (on in this project's toolchain) fires three
-// times on `{.cancel = &token}`, once per member the caller sensibly left out.
+// -Wmissing-field-initializers (on in this project's toolchain) fires once per
+// member the caller sensibly left out on `{.cancel = &token}`.
 // Measured, not assumed: the first build of test/06transport/ produced eighteen
 // of these, and a warning that every correct caller trips is an API defect
 // rather than a caller's problem.
@@ -118,6 +121,10 @@ struct RequestOptions {
   std::optional<std::chrono::milliseconds> read_timeout = std::nullopt;
   std::optional<std::chrono::milliseconds> write_timeout = std::nullopt;
   CancelToken* cancel = nullptr;
+  // Overrides the Client's default authentication for this call only. Like the
+  // timeout and cancel fields above, this is transport state and is never
+  // serialized into a request body.
+  std::optional<Authentication> authentication = std::nullopt;
 };
 
 namespace detail {

@@ -42,13 +42,18 @@ right bridge.
   `venice_parameters.character_slug`: slug, name, description, tags, the model
   a character runs on, and its rating stats, plus the verbatim entry as `raw`.
   Filterable and, because the endpoint pages at 50, pageable.
+- **Explicit authentication** — Public, Bearer, pre-signed SIWX and pre-built
+  x402 payment payloads are distinct modes, selectable per client or per call.
+  The client never owns wallet private keys or constructs signatures.
 - **Balance / rate limits** (`/api_keys/rate_limits`).
 - **Per-request timeouts and cancellation** — every call takes an optional
   `RequestOptions` with connect/read/write timeout overrides and a
   `CancelToken` that aborts an in-flight request from another thread, including
-  one that has received nothing at all.
+  one that has received nothing at all, plus an optional authentication
+  override for that call.
 - **Error model** — `std::expected<T, venice::Error>`; network / HTTP / parse /
-  auth / rate-limit / invalid-arg / cancelled, each carrying status + raw body.
+  auth / payment-required / rate-limit / invalid-arg / cancelled. Response
+  failures carry status, raw body and response metadata, including x402 headers.
 
 Later phases (fed by real use): image/audio/video, TTS, embeddings,
 retries/backoff, async.
@@ -93,9 +98,15 @@ transitively:
 ## Usage
 
 ```cpp
+#include <cstdlib>
+#include <string>
+#include <vector>
+
 #include <venice/venice.hpp>
 
-venice::Client client{std::getenv("VENICE_API_KEY")};
+const char* api_key = std::getenv("VENICE_API_KEY");
+venice::Client client{
+    venice::Authentication::bearer(api_key == nullptr ? "" : api_key)};
 
 venice::ChatRequest req;
 req.model = "llama-3.3-70b";
@@ -134,6 +145,56 @@ auto s2 = client.chat_stream(req, acc, [](const venice::StreamDelta& d) {
 });
 // acc.message() is the whole assistant turn; acc.chunks() is every frame verbatim
 ```
+
+### Authentication and x402 metadata
+
+Authentication is transport state, not request JSON. The string constructor
+remains the compatible Bearer spelling; the explicit form reaches public and
+wallet-authenticated calls without ever sending `Authorization: Bearer `:
+
+```cpp
+venice::Client public_client{venice::Authentication::public_access()};
+const auto public_models = public_client.models();
+
+const std::string signed_siwx = "base64 payload signed outside venice-cpp";
+venice::Client wallet_client{
+    venice::Authentication::sign_in_with_x(signed_siwx)};
+
+// One call may override its client's default without changing request JSON.
+const auto wallet_reply = client.chat(
+    req, {.authentication = venice::Authentication::sign_in_with_x(signed_siwx)});
+```
+
+Venice's current canonical wallet header is `SIGN-IN-WITH-X`; the library does
+not emit its migration alias `X-Sign-In-With-X`. Likewise,
+`Authentication::x402_payment(payload)` emits the canonical
+`PAYMENT-SIGNATURE`, not the legacy `X-402-Payment` spelling. That mode is the
+transport foundation for the x402 top-up endpoint; none of the four endpoints
+currently exposed accepts a payment signature.
+
+Successful SIWX inference exposes the balance string exactly as Venice sent it.
+A 402 is distinct from bad credentials and retains both the JSON body and the
+base64 payment-requirements header:
+
+```cpp
+if (wallet_reply) {
+  if (wallet_reply->metadata.x_balance_remaining) {
+    const std::string& balance = *wallet_reply->metadata.x_balance_remaining;
+    // Display or parse with the decimal policy appropriate to your application.
+  }
+} else if (wallet_reply.error().kind == venice::ErrorKind::PaymentRequired) {
+  const std::string& body = wallet_reply.error().body;
+  const auto& requirement = wallet_reply.error().metadata.payment_required;
+  // Decode/sign outside this library, without putting wallet keys in the client.
+}
+```
+
+`ResponseMetadata::headers` preserves all received headers, and `header(name)`
+looks one up case-insensitively. `x_balance_remaining`, `payment_required`, and
+`payment_response` are convenience fields but deliberately remain strings:
+balances are decimal protocol values and payment envelopes are opaque base64.
+Empty credentials and endpoint/mode mismatches return `InvalidArg` before a
+socket is opened. Credentials are never copied into an `Error`.
 
 Whether a request streams is decided by the method you call, not by a field on
 `ChatRequest`. If you build the wire body yourself, say so explicitly:
@@ -350,8 +411,9 @@ not a list at all is an `ErrorKind::Parse`. `Character::raw` holds the whole
 entry verbatim — worth more here than elsewhere, because Venice documents
 `/characters` as a preview API that may change.
 
-Unlike `/models`, this endpoint needs a real key: it answers 402 with no
-credentials and 401 with a bad one.
+Unlike `/models`, this endpoint is Bearer-only. Selecting Public, SIWX or an
+x402 payment for it returns `InvalidArg` before transport; server responses use
+`Auth` for 401/403 and `PaymentRequired` for 402.
 
 **`ChatRequest::extra` is a top-level passthrough**, same idea as
 `VeniceParameters::extra`: Venice accepts sampling keys this struct doesn't
@@ -590,7 +652,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.12.2)
+  GIT_TAG        v0.13.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

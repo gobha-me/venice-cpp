@@ -17,6 +17,7 @@
 
 using venice::ChatRequest;
 using venice::ChatResponse;
+using venice::Authentication;
 using venice::Error;
 using venice::ErrorKind;
 using venice::Message;
@@ -133,12 +134,77 @@ TEST_CASE("Usage keeps cached_tokens distinct when reported", "[parse][usage]") 
 
 // ── Error model: status → kind mapping ───────────────────────────────────
 
-TEST_CASE("kind_for_status maps auth and rate-limit distinctly", "[error]") {
+TEST_CASE("kind_for_status maps auth payment and rate-limit distinctly", "[error]") {
   REQUIRE(venice::kind_for_status(401) == ErrorKind::Auth);
+  REQUIRE(venice::kind_for_status(402) == ErrorKind::PaymentRequired);
   REQUIRE(venice::kind_for_status(403) == ErrorKind::Auth);
   REQUIRE(venice::kind_for_status(429) == ErrorKind::RateLimited);
   REQUIRE(venice::kind_for_status(500) == ErrorKind::Http);
   REQUIRE(venice::kind_for_status(200) == ErrorKind::Http);  // non-error path maps generic
+  REQUIRE(venice::to_string(ErrorKind::PaymentRequired) == "payment_required");
+}
+
+TEST_CASE("authentication modes emit one canonical transport header", "[auth]") {
+  const auto public_headers =
+      venice::detail::authentication_headers(Authentication::public_access());
+  REQUIRE(public_headers.has_value());
+  REQUIRE(public_headers->empty());
+
+  const auto bearer = venice::detail::authentication_headers(Authentication::bearer("api-token"));
+  REQUIRE(bearer.has_value());
+  REQUIRE(bearer->size() == 1);
+  const auto bearer_header = bearer->find("Authorization");
+  REQUIRE(bearer_header != bearer->end());
+  REQUIRE(bearer_header->second == "Bearer api-token");
+
+  const auto siwx =
+      venice::detail::authentication_headers(Authentication::sign_in_with_x("signed-wallet"));
+  REQUIRE(siwx.has_value());
+  REQUIRE(siwx->size() == 1);
+  const auto siwx_header = siwx->find("SIGN-IN-WITH-X");
+  REQUIRE(siwx_header != siwx->end());
+  REQUIRE(siwx_header->second == "signed-wallet");
+  REQUIRE(siwx->find("X-Sign-In-With-X") == siwx->end());
+
+  const auto payment =
+      venice::detail::authentication_headers(Authentication::x402_payment("payment-payload"));
+  REQUIRE(payment.has_value());
+  REQUIRE(payment->size() == 1);
+  const auto payment_header = payment->find("PAYMENT-SIGNATURE");
+  REQUIRE(payment_header != payment->end());
+  REQUIRE(payment_header->second == "payment-payload");
+  REQUIRE(payment->find("X-402-Payment") == payment->end());
+}
+
+TEST_CASE("empty secret-bearing authentication modes fail without disclosing a value",
+          "[auth][failure]") {
+  for (const auto& authentication : {Authentication::bearer({}),
+                                     Authentication::sign_in_with_x({}),
+                                     Authentication::x402_payment({})}) {
+    const auto headers = venice::detail::authentication_headers(authentication);
+    REQUIRE_FALSE(headers.has_value());
+    REQUIRE(headers.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(headers.error().status == 0);
+    REQUIRE(headers.error().body.empty());
+    REQUIRE(headers.error().metadata.headers.empty());
+  }
+}
+
+TEST_CASE("response metadata preserves raw headers and extracts x402 values case-insensitively",
+          "[metadata]") {
+  const httplib::Headers headers{{"x-balance-remaining", "4.230000"},
+                                 {"Payment-Required", "requirements"},
+                                 {"PAYMENT-RESPONSE", "settlement"},
+                                 {"X-Trace", "raw"}};
+  const auto metadata = venice::detail::metadata_from_headers(headers);
+
+  REQUIRE(metadata.headers.size() == 4);
+  REQUIRE(metadata.x_balance_remaining == "4.230000");
+  REQUIRE(metadata.payment_required == "requirements");
+  REQUIRE(metadata.payment_response == "settlement");
+  REQUIRE(metadata.header("x-trace") == "raw");
+  REQUIRE(metadata.header("X-BaLaNcE-ReMaInInG") == "4.230000");
+  REQUIRE_FALSE(metadata.header("missing").has_value());
 }
 
 TEST_CASE("Error carries status and body for inspection", "[error]") {
