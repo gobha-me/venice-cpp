@@ -315,14 +315,23 @@ class StreamAccumulator {
     // independent streams that may interleave in any order, and finish_reason
     // can arrive before the last tool-call argument fragment.
     if (d.finish_reason) m_finish = std::string{*d.finish_reason};
-    if (d.usage != nullptr) m_usage = d.usage->get<Usage>();
-    // Last wins, exactly as usage above. Every stream swept for VC-20 carried
-    // exactly one cost frame, so no capture discriminates last-wins from
-    // first-wins or from summing; `venice-cpp --usage` fails the run if a second
-    // frame ever arrives with a different value, which is what keeps this rule
-    // falsifiable rather than merely asserted. Unlike the usage line, this one
-    // cannot throw — both members parse through detail::opt_double, a predicate.
+    // Cost BEFORE usage, and the order is load bearing. Cost rides on the usage
+    // frame — one object, both keys — and `get<Usage>()` below is loud, so a
+    // wrong-typed token count throws out of this function. chat_stream catches
+    // that into `parse_err` and surfaces it only when the accumulator is empty,
+    // which a stream carrying content never is: the throw is silent. Read the
+    // other way round, a corrupt `usage` would take the billing figure with it,
+    // which is exactly what ChatResponse::cost's tolerant parse exists to
+    // prevent, undone one file over. test/07stream/ §9 pins it.
+    //
+    // Last wins, mirroring usage. Every stream swept for VC-20 carried exactly
+    // one cost frame, so no capture discriminates last-wins from first-wins or
+    // from summing; `venice-cpp --usage` fails the run if a second cost frame
+    // ever arrives, which is what keeps this rule falsifiable rather than merely
+    // asserted. This line cannot throw — both members go through
+    // detail::opt_double, a predicate — so nothing after it is at risk from it.
     if (d.cost != nullptr) m_cost = d.cost->get<Price>();
+    if (d.usage != nullptr) m_usage = d.usage->get<Usage>();
 
     for (const auto& frag : d.tool_calls) merge_tool_call(frag);
 

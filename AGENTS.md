@@ -141,22 +141,25 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   `ErrorKind::Parse`; a chat reply has no sibling entries to protect and
   silently zeroing a token count would hide a billing bug.
 
-  **The boundary that rule is actually drawing, and its one sanctioned
-  exception.** What makes tolerance wrong for `Usage` is not that it is a
-  response: it is that `Usage::prompt_tokens` is `int{0}` and so has **no
-  representation for "unknown"** — tolerance there maps corrupt onto a number
-  the caller cannot tell from a real one. `ChatResponse::cost` (VC-20) is
-  `optional<Price>` of `optional<double>`, where disengaged already means
-  unknown and is already a legitimate wire state callers must branch on, so
-  tolerance maps corrupt onto a state they have written code for. Two
-  mechanisms, both checkable: a loud read would turn a metadata field into
-  `ErrorKind::Parse` for a completion already paid for; and on the streamed path
-  `chat_stream`'s SSE lambda catches the throw into `parse_err`, which is
-  surfaced only when the accumulator is empty — so a loud parse there is a
-  half-ingested frame with `on_delta` silently skipped, not a loud failure. That
-  is the whole exception. A new one argues against this boundary rather than
-  rediscovering it, and `test/07stream/` §3's wrong-typed-cost case is where the
-  deviation is pinned.
+  **The boundary that rule is actually drawing.** The sentence above overstates
+  it, and VC-20 is where that showed: `ChatResponse` has read `created`,
+  `system_fingerprint` and `venice_parameters` through `opt_i64` / `opt_string`
+  / `opt_object` since before VC-20, so "do not retrofit onto `ChatResponse`"
+  was never true of the struct as a whole. What makes tolerance wrong for
+  `Usage` is not that it is a response: it is that `Usage::prompt_tokens` is
+  `int{0}` and so has **no representation for "unknown"** — tolerance there maps
+  corrupt onto a number the caller cannot tell from a real one. Where a field's
+  disengaged state already means unknown, and callers already branch on it,
+  tolerance maps corrupt onto a state they have written code for. That is the
+  line. `ChatResponse::cost` (VC-20) is `optional<Price>` of `optional<double>`
+  and sits on the tolerant side of it; `Usage`'s counts sit on the loud side.
+  Two further consequences of a loud read, both checkable: it would turn a
+  metadata field into `ErrorKind::Parse` for a completion already paid for; and
+  on the streamed path `chat_stream`'s SSE lambda catches the throw into
+  `parse_err`, which is surfaced only when the accumulator is empty — so a loud
+  parse there is a half-ingested frame with `on_delta` silently skipped, not a
+  loud failure. `test/07stream/` §3's wrong-typed-cost case is where the choice
+  is pinned.
 
   (Noted while measuring that: `StreamAccumulator::ingest`'s
   `d.usage->get<Usage>()` has the same exposure today — a wrong-typed

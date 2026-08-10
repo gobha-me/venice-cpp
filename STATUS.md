@@ -110,10 +110,16 @@ Six things are worth knowing, five measured rather than reasoned:
   `stream_options.include_usage` changes nothing — cost and usage both arrive
   without it.
 
-- **The tolerance deviation is deliberate, is the one sanctioned exception, and
-  AGENTS.md now states the boundary rather than the absolute.** `cost` is the
-  only field on `ChatResponse` parsed through the tolerant `detail::opt_double`.
-  The rule it bends protects fields with *no representation for "unknown"* —
+- **The tolerance choice is deliberate, and the first comment written to defend
+  it was wrong in the way this repo keeps being wrong.** It claimed `cost` was
+  "the one field on `ChatResponse` that deviates from the loud-parse rule". It
+  is not: `created`, `system_fingerprint` and `venice_parameters` already read
+  through `opt_i64` / `opt_string` / `opt_object`, and did before this ticket.
+  Caught in review, corrected in all three places it had been copied to, and it
+  is the **fifth** time a comment here has justified a design with a constraint
+  that does not exist — after VC-08's `json_schema`, VC-04's two, and VC-17's
+  `opt_object`. The rule the tolerant read actually bends protects fields with
+  *no representation for "unknown"* —
   `prompt_tokens` is `int{0}` — while both members here are `optional<double>`
   whose disengaged state already means unknown. The sharper half of the reason
   is structural and was found by reading rather than assumed: a throw out of

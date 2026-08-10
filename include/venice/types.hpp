@@ -855,18 +855,24 @@ struct ChatResponse {
   // Read `diem` unless you have measured otherwise for your own key. The library
   // reports what arrived and interprets nothing.
   //
-  // Parsed through the tolerant detail::opt_double, which makes this the one
-  // field on ChatResponse that deviates from the loud-parse rule at the top of
-  // this header. The rule protects fields with no representation for "unknown"
-  // — Usage::prompt_tokens is int{0}, so tolerance there maps corrupt onto a
-  // number the caller cannot tell from a real one. Both members here are
-  // optional<double> whose disengaged state already means unknown. Two
-  // mechanisms, both checkable rather than rhetorical: a loud read would turn a
-  // metadata field into ErrorKind::Parse for a completion already paid for; and
-  // on the streamed path client.hpp's SSE lambda catches the throw into
-  // `parse_err`, which is surfaced only when the accumulator is empty, so a loud
-  // parse there yields a half-ingested frame with on_delta silently skipped.
-  // This is reasoning, not measurement — no corrupt cost has ever been observed.
+  // Parsed through the tolerant detail::opt_double, and that is deliberate
+  // rather than unprecedented: `created`, `system_fingerprint` and
+  // `venice_parameters` below already read through opt_i64 / opt_string /
+  // opt_object, and did before this field existed. What the loud-parse rule at
+  // the top of this header actually protects is a field with **no
+  // representation for "unknown"** — Usage::prompt_tokens is int{0}, so
+  // tolerance there maps corrupt onto a number the caller cannot tell from a
+  // real one. Every member here is optional<double> whose disengaged state
+  // already means unknown, which puts cost on the same side of that line as the
+  // three fields above rather than on Usage's side.
+  //
+  // Two consequences of a loud read, both checkable rather than rhetorical: on
+  // the non-streamed path it turns a metadata field into ErrorKind::Parse for a
+  // completion already paid for; and on the streamed path client.hpp's SSE
+  // lambda catches the throw into `parse_err`, which is surfaced only when the
+  // accumulator is empty, so a loud parse there yields a half-ingested frame
+  // with on_delta silently skipped. Reasoning, not measurement — no corrupt
+  // cost has ever been observed.
   std::optional<Price> cost{};
 
   // The whole assistant turn, complete enough to send back as the next message.

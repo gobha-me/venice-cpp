@@ -1348,7 +1348,29 @@ TEST_CASE("the last cost frame wins", "[stream][accumulator][cost][failure]") {
       R"({"choices":[{"delta":{"content":"a"}}],"cost":{"usd":0,"diem":0.001}})",
       R"({"choices":[],"cost":{"usd":0,"diem":0.002}})",
   });
-  REQUIRE(acc.response().cost->diem == 0.002);
+  const auto r = acc.response();
+  REQUIRE(r.cost.has_value());     // guard first: the break this case exists for
+  REQUIRE(r.cost->diem == 0.002);  // leaves cost disengaged, and -> would be UB
+}
+
+TEST_CASE("a corrupt usage does not take the cost with it", "[stream][accumulator][cost][failure]") {
+  // CONSTRUCTED, and the ordering inside ingest is the whole subject. Cost rides
+  // on the usage frame — one object, both keys — and the usage read is loud, so
+  // it throws out of ingest on a wrong-typed count. chat_stream catches that
+  // into parse_err and surfaces it only when the accumulator is empty, which a
+  // stream carrying content never is: the throw is silent. If the cost read sat
+  // after the usage read, a corrupt token count would silently cost the caller
+  // the billing figure — exactly what ChatResponse::cost's tolerant parse exists
+  // to prevent, undone one file over.
+  venice::StreamAccumulator acc;
+  acc.ingest(nlohmann::json::parse(R"({"choices":[{"delta":{"content":"a"}}]})"));
+  REQUIRE_THROWS(acc.ingest(nlohmann::json::parse(
+      R"({"choices":[],"usage":{"prompt_tokens":"ten"},"cost":{"usd":0,"diem":0.5}})")));
+
+  const auto r = acc.response();
+  REQUIRE(r.cost.has_value());  // taken before the throw
+  REQUIRE(r.cost->diem == 0.5);
+  REQUIRE_FALSE(r.usage.has_value());  // and the loud half still failed loudly
 }
 
 TEST_CASE("cost is assembled with chunk retention off", "[stream][accumulator][cost]") {
@@ -1358,7 +1380,9 @@ TEST_CASE("cost is assembled with chunk retention off", "[stream][accumulator][c
   venice::StreamAccumulator acc{/*keep_chunks=*/false};
   acc.ingest(nlohmann::json::parse(R"({"choices":[],"cost":{"usd":0,"diem":0.5}})"));
   REQUIRE(acc.chunks().empty());
-  REQUIRE(acc.response().cost->diem == 0.5);
+  const auto r = acc.response();
+  REQUIRE(r.cost.has_value());
+  REQUIRE(r.cost->diem == 0.5);
 }
 
 TEST_CASE("reset clears cost", "[stream][accumulator][cost]") {
@@ -1485,6 +1509,10 @@ TEST_CASE("a streamed reply assembles to the same message as a non-streamed one"
   REQUIRE(streamed.cost == non_streamed.cost);
   // The literal, not only the equality — see the section note. Without this
   // line a read deleted from BOTH paths leaves the comparison above green.
+  // has_value() first because that break is exactly what leaves cost
+  // disengaged, and operator-> on a disengaged optional is UB rather than a red
+  // assertion — a case whose failure mode is undefined proves nothing.
+  REQUIRE(streamed.cost.has_value());
   REQUIRE(streamed.cost->diem == 0.001089404);
 
   // And they must NOT be equal in raw — a streamed body is a different wire
