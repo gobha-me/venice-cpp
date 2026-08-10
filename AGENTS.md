@@ -140,6 +140,29 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   parse inside `Client::chat`'s try/catch, where a malformed body should fail as
   `ErrorKind::Parse`; a chat reply has no sibling entries to protect and
   silently zeroing a token count would hide a billing bug.
+
+  **The boundary that rule is actually drawing, and its one sanctioned
+  exception.** What makes tolerance wrong for `Usage` is not that it is a
+  response: it is that `Usage::prompt_tokens` is `int{0}` and so has **no
+  representation for "unknown"** — tolerance there maps corrupt onto a number
+  the caller cannot tell from a real one. `ChatResponse::cost` (VC-20) is
+  `optional<Price>` of `optional<double>`, where disengaged already means
+  unknown and is already a legitimate wire state callers must branch on, so
+  tolerance maps corrupt onto a state they have written code for. Two
+  mechanisms, both checkable: a loud read would turn a metadata field into
+  `ErrorKind::Parse` for a completion already paid for; and on the streamed path
+  `chat_stream`'s SSE lambda catches the throw into `parse_err`, which is
+  surfaced only when the accumulator is empty — so a loud parse there is a
+  half-ingested frame with `on_delta` silently skipped, not a loud failure. That
+  is the whole exception. A new one argues against this boundary rather than
+  rediscovering it, and `test/07stream/` §3's wrong-typed-cost case is where the
+  deviation is pinned.
+
+  (Noted while measuring that: `StreamAccumulator::ingest`'s
+  `d.usage->get<Usage>()` has the same exposure today — a wrong-typed
+  `prompt_tokens` on a streamed usage frame half-ingests and reports nothing,
+  where the non-streamed path fails loudly on the same body. A streamed/
+  non-streamed asymmetry in `Usage`, and its own ticket.)
 - **Endpoint filters are caller-supplied strings, and an unset one sends no
   query key.** `models(type)` takes Venice's modality as a string rather than an
   enum, on the same reasoning as `response_format`: the value set is the
@@ -216,6 +239,18 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   collapsing the two loses a real distinction. Cost estimates treat absent as
   unknown. `venice-cpp --usage <model>` is how you find out for a given family,
   and it is the check that a nesting has not moved.
+
+  **What the server charged is `ChatResponse::cost`, a top-level sibling of
+  `usage` typed `optional<Price>` (VC-20).** It is authoritative where the
+  rate-card product above is a reconstruction. Unlike `Usage`'s optionals it is
+  **not** per-family — measured 2026-08-10, all seven families send it on both
+  paths, one frame per stream. Two things not to get wrong: **an engaged `usd`
+  of `0` is a value the server sent, not a claim the call was free** — it has
+  been `0` on every capture including one whose rate-card value was $0.0645, so
+  it means "not reported for this account" and `diem` is the number that
+  answers; and `cost` lives on `ChatResponse`, not on `Usage`, because
+  `Usage::from_json` only ever receives the `usage` sub-object and structurally
+  cannot reach a sibling.
 - **KDE/Qt-readiness:** keep the library UI-free and Qt-linkable. No Qt types
   in the API client; a separate service layer owns D-Bus/KF concerns.
 
@@ -268,6 +303,16 @@ asserts the second, and no fixture could contradict it. `--usage` prints the raw
 `usage` beside the parse and fails when a modeled key is in one and not the
 other, which turns the question into a check rather than a judgement call.
 
+**And it reports the verbatim ENVELOPE, not only the sub-object it was written
+for.** VC-20's finding rather than its subject. `--usage` named the unmodeled
+keys inside `usage` and nothing ever looked one level up, so `cost` — a sibling
+of `usage`, carrying what the call actually charged — rode untyped for three
+releases with no leg positioned to see it. The rule is mechanical now:
+`kModeledBodyKeys` beside `kModeledUsageKeys` in `src/bin/main.cpp`, one
+set-difference per level. Its first live run named `service_tier` on four
+families and four more keys on `llama-3.3-70b`. A leg that reports a sub-object
+reports the object it came out of too.
+
 **A convergence assertion cannot see a symmetric loss.** `test/07stream/`'s §10
 compares the streamed and non-streamed turns and is the file's payoff — and
 measured while running VC-18's break matrix, deleting the `thought_signature`
@@ -275,6 +320,16 @@ emit leaves it *green*, because both sides lose the key identically and still
 compare equal. It caught only the breaks where one path kept the field and the
 other did not. Convergence is evidence about the stream's plumbing, never about
 serialization; that has to be pinned upstream or it is not pinned at all.
+
+VC-20 measured the same blindness a second time and found one narrow mitigation.
+Deleting the `cost` read from *both* `from_json_body` and `delta_from_chunk`
+leaves §10's `streamed.cost == non_streamed.cost` **green** — `nullopt ==
+nullopt` — and only the sibling assertion pinning `cost->diem` against a literal
+goes red. So a convergence case can also pin a leaf **value**, which does catch
+a symmetric loss. That works only for a field whose value the fixture can name,
+and not at all for a serialization behaviour with no value to assert. It is a
+per-field mitigation, not a repair: anything whose loss reads as "both sides
+emit nothing" is still invisible in §10.
 
 `test/30sanitizer-smoke/` is not a unit test — it deliberately trips the active
 sanitizer to prove the toolchain is engaged rather than a silent no-op, which is
