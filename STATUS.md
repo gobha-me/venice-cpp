@@ -58,21 +58,126 @@ a single-family run.
    case in `test/07stream/` whose deliberate inversion is the ticket's
    acceptance criterion. The hard half is streaming: a merge rule for arbitrary
    unmodeled keys across fragments has no wire evidence to choose it yet.
-3. **VC-20 (#34): Venice reports what it charged, and the library models it
-   nowhere.** Found while sweeping for VC-17: both paths carry
-   `"cost":{"usd":0,"diem":0.001089404}` — the non-streaming envelope and the
-   streamed usage-bearing chunk. That is authoritative where README's rate-card
-   arithmetic is a reconstruction, and VC-17 established the reconstruction
-   cannot be exact anyway (`cached_tokens` is per-family; pricing has two cache
-   buckets where `Usage` reports one). It rides untyped in `ChatResponse::raw` /
-   `acc.chunks()` today, which is what makes it additive rather than urgent. The
-   observed `"usd":0` on a call that cost real `diem` is the first thing to
-   measure.
-4. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
+3. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
    embeddings, retries/backoff, async). Driven by real use, not
    speculatively.
-5. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
+4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-20 (#34) is done** — see v0.12.0. Venice reports what it charged, on both
+paths, and the library now types it: `ChatResponse::cost`, a `std::optional<Price>`
+read from the body's top level and assembled off the streamed chunk the same way
+`usage` is.
+
+Measured 2026-08-10, api.venice.ai — the same seven families as VC-17, so the two
+tables read as one sweep, and these are the plan's ground truth rather than its
+reasoning:
+
+| | cost, non-streaming | cost, streamed | frames |
+|---|---|---|---|
+| `deepseek-v4-pro` | ✓ | ✓ | 1 |
+| `grok-4-5` | ✓ | ✓ | 1 |
+| `zai-org-glm-4.7` | ✓ | ✓ | 1 |
+| `zai-org-glm-5` | ✓ | ✓ | 1 |
+| `llama-3.3-70b` | ✓ | ✓ | 1 |
+| `gemini-3-6-flash` | ✓ | ✓ | 1 |
+| `qwen3-235b-a22b-thinking-2507` | ✓ | ✓ | 1 |
+
+Six things are worth knowing, five measured rather than reasoned:
+
+- **`usd` is 0 on every capture, and it does not mean free — the ticket's own
+  worry, confirmed rather than dismissed.** #34 asked for this to be measured
+  before typing it as a number a caller can display. The probe was
+  `openai-gpt-55-pro` at $37.50/$225 per million: 1685 prompt + 6 completion
+  tokens, a rate-card value of **$0.0645**, and the reply was
+  `{"usd":0,"diem":0.0645375}`. `diem` carried exactly that magnitude while
+  `usd` reported zero. So `usd` is not populated for this account, an engaged 0
+  means "not reported", and both the header and README say to read `diem`. The
+  library reports what arrived and interprets nothing.
+
+- **Unlike `Usage`'s optionals, cost is not per-family.** All seven send it on
+  both paths, which is why the absence case in `test/07stream/` §3 is labelled
+  CONSTRUCTED rather than OBSERVED — and why the break matrix has no control
+  family. VC-17's discipline says to confirm a break stays *green* where the
+  server sends nothing; there is no such family here, and that is recorded
+  rather than skipped.
+
+- **The cost frame carries `"choices": []`, which decides where the read goes.**
+  `delta_from_chunk` returns early on an empty choices array, so the read sits
+  above it — a read placed below would parse perfectly in every fixture and
+  never fire on a live stream. Measured, not reasoned: break B4 moves it below
+  and reddens six cases. Exactly one cost frame per stream on every probe, and
+  `stream_options.include_usage` changes nothing — cost and usage both arrive
+  without it.
+
+- **The tolerance choice is deliberate, and the first comment written to defend
+  it was wrong in the way this repo keeps being wrong.** It claimed `cost` was
+  "the one field on `ChatResponse` that deviates from the loud-parse rule". It
+  is not: `created`, `system_fingerprint` and `venice_parameters` already read
+  through `opt_i64` / `opt_string` / `opt_object`, and did before this ticket.
+  Caught in review, corrected in all three places it had been copied to, and it
+  is the **fifth** time a comment here has justified a design with a constraint
+  that does not exist — after VC-08's `json_schema`, VC-04's two, and VC-17's
+  `opt_object`. The rule the tolerant read actually bends protects fields with
+  *no representation for "unknown"* —
+  `prompt_tokens` is `int{0}` — while both members here are `optional<double>`
+  whose disengaged state already means unknown. The sharper half of the reason
+  is structural and was found by reading rather than assumed: a throw out of
+  `StreamAccumulator::ingest` is caught into `parse_err`, which `chat_stream`
+  surfaces only when the accumulator is empty, so a loud parse on the streamed
+  path is a **half-ingested frame with `on_delta` silently skipped** — not a
+  loud failure. Break B7 makes `Price::from_json` loud and reddens five cases
+  across two binaries, so the tolerance is load bearing rather than decorative.
+  A distinct `Cost` struct was considered and rejected: it would say the
+  rate-vs-amount difference in the type system, but two structs differing only
+  in a two-line `from_json` is the second convention #34 warned against, and the
+  field name plus a header sentence carries it.
+
+- **§10's symmetric blindness reproduced, and there is one narrow mitigation.**
+  Break B3 deletes the cost read from both paths: `streamed.cost ==
+  non_streamed.cost` comes back **green** (`nullopt == nullopt`, 7 of 8
+  assertions passing) and only the sibling assertion pinning the value goes red.
+  So a convergence case can pin a leaf *value* as well as an equality — which
+  does catch a symmetric loss, but only for a field whose value a fixture can
+  name, and not at all for a serialization behaviour. Recorded in AGENTS.md as a
+  per-field mitigation, explicitly not a repair.
+
+  Review caught that the mitigation was originally written as a bare
+  `streamed.cost->diem == …`, which under the very break it exists to catch is
+  `operator->` on a disengaged optional — undefined behaviour, not a red
+  assertion, and the first B3 run's "red" rested on it. Guarded now, and the
+  same defect was in two §9 cases. A case whose failure mode is undefined proves
+  nothing, which makes this a break-matrix lesson rather than a style fix.
+
+- **Nothing in `ctest` covers the smoke binary, and this is the second ticket to
+  rely on it.** Break B9 removes the envelope unmodeled-key report and the suite
+  stays 13/13 green — confirmed on a genuinely modified tree after a first
+  attempt at the break silently failed to apply and produced a meaningless
+  green. The counter-measure is VC-17's: `Price::from_json` was pointed at a
+  misspelled key, and `--usage llama-3.3-70b` reported `RAW SAYS 0.000000: the
+  wire moved and the parse did not` on **both** paths and exited 1. Reverted.
+
+Twelve breaks were run, each reverted. Ten reddened where intended, one is a
+build break (removing `Price::operator==` fails to compile §10, which is what
+that operator is for), and one — B9 — is the expected green above. B12 came out
+of review rather than the plan: putting the cost read back *after* the loud
+usage read reddens exactly the new ordering case, so the fix is pinned by the
+thing it fixed. B11 is likewise unplanned, added because §4b makes a claim that
+needed pinning:
+narrowing `opt_double` to `is_number_float()` reddens eight cases across three
+binaries, so `is_number()` is load bearing on this path too. Venice sends `usd`
+as a JSON **integer**, and a float-only predicate would read every one of them as
+absent.
+
+`--usage` grew the envelope report that found this, and it is the transferable
+part: `cost` was not deferred, it was **unseen**, because every leg reported the
+sub-object it was written for and nothing looked one level up. Its first live run
+also named `service_tier` on four families and `kv_transfer_params`,
+`prompt_logprobs`, `prompt_text`, `prompt_token_ids` on `llama-3.3-70b`. All
+reachable via `ChatResponse::raw`; none typed, none needed yet.
+
+Additive to two public headers and `chat()`/`chat_stream()` return more than they
+did, hence the minor bump.
 
 **VC-17 (#28) is done** — see v0.11.1, and the ticket's premise was wrong. It
 said `Usage`'s nested detail objects "are modeled and fixture-pinned, but Venice

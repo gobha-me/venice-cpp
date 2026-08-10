@@ -169,7 +169,34 @@ is raw JSON: the value set is Venice's, and a list hardcoded in this header
 would start refusing valid values the day a modality is added. An unrecognised
 type comes back as the server's `ErrorKind::Http` 400.
 
-Some models reprice past a context threshold, so a cost estimate picks a tier:
+### What a call cost
+
+Venice says, so you do not have to work it out. `ChatResponse::cost` carries the
+server's own figure on **both** paths — the non-streaming reply and the
+assembled streamed one:
+
+```cpp
+if (res->cost && res->cost->diem)
+  std::cout << "this call cost " << *res->cost->diem << " diem\n";
+```
+
+Two things to know before displaying it, both measured on 2026-08-10 across the
+seven model families VC-17 swept:
+
+- **`usd` has been `0` on every capture, and `0` does not mean free.** A call to
+  `openai-gpt-55-pro` with a rate-card value of $0.0645 came back
+  `{"usd":0,"diem":0.0645375}` — `diem` carried the magnitude, `usd` reported
+  zero. So read `diem` unless you have measured otherwise for your own key. The
+  library reports what arrived and interprets nothing.
+- Both currencies are `std::optional<double>`, and **absent is not zero**. A
+  disengaged value means the server did not say.
+
+The rate card below is still useful, but for estimating *before* a call. After
+one, Venice has told you.
+
+### Estimating before the call
+
+Some models reprice past a context threshold, so an estimate picks a tier:
 
 ```cpp
 const auto& p = *m.pricing;
@@ -178,17 +205,18 @@ const venice::PriceTier& tier =
         ? *p.extended : p.base;
 ```
 
-Note that pricing carries **two** cache buckets (`cache_input` for a read,
-`cache_write` for populating it) while `Usage` reports only one
-(`cached_tokens`), so a response cannot yet be paired 1:1 with the rate card.
-And `cached_tokens` itself is **per-family**: five of the seven models VC-17
-swept report it, two report nothing but the three flat counts, so a cost
-estimate must treat an absent bucket as unknown rather than as zero. Run
-`venice-cpp --usage <model>` to see what a given family actually reports.
+Pairing that against a reply's `Usage` afterwards is a *reconstruction*, and it
+cannot be made exact — which is why `cost` above exists. Pricing carries **two**
+cache buckets (`cache_input` for a read, `cache_write` for populating it) while
+`Usage` reports only one (`cached_tokens`), so a response cannot be paired 1:1
+with the rate card. And `cached_tokens` itself is **per-family**: five of the
+seven models VC-17 swept report it, two report nothing but the three flat
+counts, so an estimate must treat an absent bucket as unknown rather than as
+zero. Run `venice-cpp --usage <model>` to see what a given family reports.
 
-Venice also returns a top-level `cost` object — `{"usd":…,"diem":…}` — on both
-the streaming and non-streaming paths, saying what it actually charged. The
-library does not model it yet; it is in `ChatResponse::raw`.
+`venice::Price` is the type on both sides, and the two are not the same
+quantity: `Model::pricing` is a **rate** (per million tokens), `res->cost` is an
+**amount** (what one call charged). Do not multiply the latter by a token count.
 
 **`Model::raw` holds the whole entry verbatim**, modeled fields included. It is
 not called `extra` because it is the opposite of the request-side hatches: it is
@@ -396,8 +424,8 @@ a source break for code that compiles today — and requiring the accumulator is
 what guarantees you cannot ask for the rich stream and then lose it.
 
 A `StreamDelta` is one SSE frame: `content`, `reasoning_content`, `role`,
-`finish_reason`, `refusal`, tool-call fragments, `usage`, and `chunk` pointing at
-the whole verbatim frame. Every field is optional because a frame carries some
+`finish_reason`, `refusal`, tool-call fragments, `usage`, `cost`, and `chunk`
+pointing at the whole verbatim frame. Every field is optional because a frame carries some
 of them, and it is a struct rather than a variant so that a future field is
 additive instead of an ABI break. **It is a view** — valid only for the duration
 of the callback. Anything worth keeping is already in the accumulator.
@@ -535,7 +563,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.11.0)
+  GIT_TAG        v0.12.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -656,7 +684,9 @@ check the nesting)", which reads as a parse bug. Both mistakes are fixed: every
 auto-picking leg now names the runners-up it did not try, and the new
 `venice-cpp --usage [model]` prints the verbatim `usage` object beside the typed
 one, because that is the only thing that tells "the server did not send it"
-apart from "we are looking in the wrong place".
+apart from "we are looking in the wrong place". Since VC-20 it reports the whole
+response **envelope** that way and not only the `usage` sub-object — which is
+how `cost` was found: a sibling key that no leg had ever been positioned to see.
 
 The original caveat, for the record: the
 **v0.8.0, v0.9.0 and v0.10.0 wire shapes were documented, not measured**. Where
@@ -672,7 +702,7 @@ came from a capture. `/models` answers for any bearer token; chat and
 VENICE_API_KEY=... venice-cpp --stream "..."   # v0.8.0: the reply shapes
 VENICE_API_KEY=... venice-cpp --tools          # v0.9.0: the request shape
 VENICE_API_KEY=... venice-cpp --characters     # v0.10.0: the character entry
-VENICE_API_KEY=... venice-cpp --usage [model]  # v0.11.1: what `usage` carries
+VENICE_API_KEY=... venice-cpp --usage [model]  # v0.12.0: usage + cost + envelope
 ```
 
 `--tools` runs two legs, and the second is the one that matters: leg one proves

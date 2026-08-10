@@ -103,6 +103,16 @@ TEST_CASE("ChatResponse::from_json_body fails loudly on malformed input", "[pars
     REQUIRE(r.content == "hi");
     REQUIRE_FALSE(r.usage.has_value());
   }
+  SECTION("absent cost leaves cost empty") {
+    // Its sibling, kept aligned here on purpose — this is the smaller of the
+    // two from_json_body sets and its job is to stay level with test/07stream/.
+    // Venice sent a cost object on every family swept for VC-20, so the shape
+    // below is constructed rather than observed; see §4b's provenance note.
+    const auto body = nlohmann::json::parse(
+        R"({"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]})");
+    auto r = ChatResponse::from_json_body(body);
+    REQUIRE_FALSE(r.cost.has_value());
+  }
 }
 
 // ── Usage cache buckets stay distinct (venice-cli #75) ───────────────────

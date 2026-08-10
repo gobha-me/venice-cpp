@@ -196,12 +196,16 @@ struct StreamDelta {
   std::span<const ToolCall> tool_calls{};
 
   const nlohmann::json* usage{nullptr};
+  // What the call charged, when the frame carries it — see ChatResponse::cost.
+  // Borrowed exactly as `usage` is, for the same reason and with the same
+  // lifetime: this is a view, and both die with `chunk`.
+  const nlohmann::json* cost{nullptr};
 
   // True when the chunk carried nothing this struct models. Not an error: Venice
   // sends role-only openers and empty keep-alive frames.
   [[nodiscard]] auto empty() const noexcept -> bool {
     return !content && !reasoning_content && !role && !finish_reason && !refusal &&
-           tool_calls.empty() && usage == nullptr;
+           tool_calls.empty() && usage == nullptr && cost == nullptr;
   }
 };
 
@@ -234,6 +238,13 @@ namespace detail {
   if (!chunk.is_object()) return d;
 
   if (const auto* u = detail::opt_object(chunk, "usage")) d.usage = u;
+  // Above the choices read below, and that ordering is load bearing rather than
+  // stylistic: the next two lines return early on a missing or empty choices
+  // array, and the cost-bearing frame is the usage frame, which Venice sends
+  // with "choices": []. Measured 2026-08-10 on every family swept for VC-20 —
+  // a read placed after the early return never fires on the only frame that
+  // carries the key. test/07stream/ §8 pins it.
+  if (const auto* c = detail::opt_object(chunk, "cost")) d.cost = c;
 
   const auto* choices = detail::opt_array(chunk, "choices");
   if (choices == nullptr || choices->empty()) return d;
@@ -304,6 +315,22 @@ class StreamAccumulator {
     // independent streams that may interleave in any order, and finish_reason
     // can arrive before the last tool-call argument fragment.
     if (d.finish_reason) m_finish = std::string{*d.finish_reason};
+    // Cost BEFORE usage, and the order is load bearing. Cost rides on the usage
+    // frame — one object, both keys — and `get<Usage>()` below is loud, so a
+    // wrong-typed token count throws out of this function. chat_stream catches
+    // that into `parse_err` and surfaces it only when the accumulator is empty,
+    // which a stream carrying content never is: the throw is silent. Read the
+    // other way round, a corrupt `usage` would take the billing figure with it,
+    // which is exactly what ChatResponse::cost's tolerant parse exists to
+    // prevent, undone one file over. test/07stream/ §9 pins it.
+    //
+    // Last wins, mirroring usage. Every stream swept for VC-20 carried exactly
+    // one cost frame, so no capture discriminates last-wins from first-wins or
+    // from summing; `venice-cpp --usage` fails the run if a second cost frame
+    // ever arrives, which is what keeps this rule falsifiable rather than merely
+    // asserted. This line cannot throw — both members go through
+    // detail::opt_double, a predicate — so nothing after it is at risk from it.
+    if (d.cost != nullptr) m_cost = d.cost->get<Price>();
     if (d.usage != nullptr) m_usage = d.usage->get<Usage>();
 
     for (const auto& frag : d.tool_calls) merge_tool_call(frag);
@@ -355,6 +382,7 @@ class StreamAccumulator {
     r.model = m_model;
     r.finish_reason = m_finish;
     r.usage = m_usage;
+    r.cost = m_cost;
     r.message = message();
     r.content = r.message->text();
     return r;
@@ -432,6 +460,7 @@ class StreamAccumulator {
 
   std::string m_role, m_content, m_reasoning, m_refusal, m_finish, m_id, m_model;
   std::optional<Usage> m_usage{};
+  std::optional<Price> m_cost{};
   std::map<int, ToolCall> m_calls{};
   std::vector<nlohmann::json> m_chunks{};
   bool m_keep_chunks{true};

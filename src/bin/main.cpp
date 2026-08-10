@@ -6,8 +6,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -316,6 +319,15 @@ auto stream_report(const venice::Client& client, const std::string& prompt) -> i
     std::cerr << "usage              : (no usage frame arrived at all)\n";
   }
 
+  // The streamed cost, off the assembled response rather than the chunks — the
+  // only place a reader looking at the reply's *shape* sees the field at all.
+  // `--usage` is the check; this is the shape report, and a field missing from
+  // it reads as a gap in the library rather than a gap in the leg.
+  std::cerr << "cost               : ";
+  if (res->cost && res->cost->diem) std::cerr << *res->cost->diem << " diem\n";
+  else if (res->cost) std::cerr << "(object arrived, no diem in it)\n";
+  else std::cerr << "(no cost frame arrived at all)\n";
+
   // The claim that matters most, and the one no fixture can settle: whether the
   // assembled turn is something Venice will accept back.
   std::cerr << "\n-- the turn, as it would be replayed --\n"
@@ -456,23 +468,31 @@ auto tools_report(const venice::Client& client, std::string_view model) -> int {
   return signature_lost ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
-// ── `--usage [model]`: what Venice actually puts in `usage` ───────────────
+// ── `--usage [model]`: what Venice actually puts in a response ────────────
 //
-// The leg VC-17 (#28) needed and did not have. `Usage` models two nested
-// fields, `prompt_tokens_details.cached_tokens` and
+// The leg VC-17 (#28) needed and did not have, since VC-20 (#34) covering the
+// response's billing metadata whole rather than only the `usage` object.
+// `Usage` models two nested fields, `prompt_tokens_details.cached_tokens` and
 // `completion_tokens_details.reasoning_tokens`, and no offline fixture can say
 // whether the API sends them — #28 was filed claiming it does not, off a single
 // model that does not.
 //
-// So this prints the **verbatim** usage object from both the streaming and the
-// non-streaming path, beside the typed Usage parsed from it. Verbatim is the
-// whole point: a typed field reading absent means either "the server did not
-// send it" or "we are looking in the wrong place", and only the raw object
-// distinguishes them. That ambiguity is what cost this ticket a wrong premise.
+// So this prints the **verbatim** objects from both the streaming and the
+// non-streaming path, beside the typed structs parsed from them. Verbatim is
+// the whole point: a typed field reading absent means either "the server did
+// not send it" or "we are looking in the wrong place", and only the raw object
+// distinguishes them. That ambiguity is what cost #28 a wrong premise.
 //
 // It is a check and not a printer. A modeled key present in the raw object but
 // absent from the typed struct is a parse bug — case (c) in #28's own scope,
 // the only one of the three that is — and fails the run.
+//
+// **And it reports the whole envelope, not only the sub-object it was written
+// for.** That is #34's finding rather than its subject: `cost` is a sibling of
+// `usage`, so the unmodeled-key report below could never have named it, and it
+// rode untyped for three releases with nothing looking one level up. The
+// envelope report found `service_tier` on four families and four more keys on
+// llama-3.3-70b the first time it ran.
 
 // Every key Usage reads, so anything else in the object can be named as
 // unmodeled rather than disappearing silently into ChatResponse::raw.
@@ -532,6 +552,132 @@ auto report_usage(const nlohmann::json& raw, const std::optional<venice::Usage>&
   return raw_cached != typed->cached_tokens || raw_reasoning != typed->reasoning_tokens;
 }
 
+// Every key `ChatResponse` reads off the response *envelope* — id, model,
+// created, system_fingerprint, venice_parameters, choices, usage, cost — plus
+// `object`, which it does NOT read. That one is here deliberately and is the
+// only entry that is not a modeled field: it is the discriminator
+// ("chat.completion" vs "chat.completion.chunk"), it is on every body, and
+// naming it every run would bury the keys this report exists to surface. Any
+// OTHER known-but-untyped key belongs in the report, not in here — the value of
+// the list is that it is short and every entry is accounted for.
+//
+// The list above is the same idea one level down, and the gap between them is
+// VC-20 (#34): `cost` is a sibling of `usage`, not a key inside it, so
+// report_usage's set-difference can never see it at any value of
+// kModeledUsageKeys. It rode untyped for three releases not because anyone
+// deferred it but because no leg ever named the keys *beside* the sub-object it
+// was written for.
+//
+// Note this is the NON-STREAMED key set. A chunk envelope models strictly less
+// — note_envelope takes only id and model, delta_from_chunk adds choices, usage
+// and cost — so created / system_fingerprint / venice_parameters on a chunk are
+// filtered out here while the accumulator does in fact drop them. Under-reports
+// the stream, and said out loud rather than left to be found.
+constexpr std::array<std::string_view, 9> kModeledBodyKeys{
+    "id",      "object", "model", "created", "system_fingerprint",
+    "choices", "usage",  "cost",  "venice_parameters"};
+
+// Name what an envelope carries that nothing models. Separate from report_cost
+// because the discovery check must not be gated on the thing being discovered:
+// if Venice renames `cost`, this still runs and still names the new key.
+void report_envelope_keys(const nlohmann::json& envelope) {
+  if (!envelope.is_object()) return;
+  std::vector<std::string> unmodeled;
+  for (const auto& [k, v] : envelope.items())
+    if (std::find(kModeledBodyKeys.begin(), kModeledBodyKeys.end(), k) == kModeledBodyKeys.end())
+      unmodeled.push_back(k);
+  if (unmodeled.empty()) return;
+  std::cerr << "unmodeled body keys: ";
+  for (std::size_t i = 0; i < unmodeled.size(); ++i)
+    std::cerr << (i != 0U ? ", " : "") << unmodeled[i];
+  std::cerr << "   (reachable via ChatResponse::raw)\n";
+}
+
+// True when the typed parse disagrees with the envelope it came from.
+//
+// Takes the whole body or chunk, not a sub-object — that is the entire point.
+auto report_cost(const nlohmann::json& envelope, const std::optional<venice::Price>& typed)
+    -> bool {
+  const auto c = envelope.find("cost");
+
+  if (c == envelope.end()) {
+    std::cerr << "cost, verbatim     : (no cost key in the body at all)\n";
+    // Not a bug. Every family swept for VC-20 sent one, but reading an absence
+    // as a parse error is exactly the mistake that filed #28 against a shape
+    // that was merely per-family.
+    return false;
+  }
+  if (!c->is_object()) {
+    // A DIFFERENT answer from the one above, and collapsing the two would undo
+    // this leg's reason for existing: the key is here and has changed shape, so
+    // the typed field is disengaged because we are looking in the wrong place,
+    // not because the server went quiet. Fails the run.
+    std::cerr << "cost, verbatim     : " << c->dump()
+              << "\n  COST IS PRESENT BUT NOT AN OBJECT -- the wire shape moved\n";
+    return true;
+  }
+  std::cerr << "cost, verbatim     : " << c->dump() << '\n';
+  if (!typed) {
+    std::cerr << "  TYPED COST ABSENT while a cost object arrived -- parse bug\n";
+    return true;
+  }
+
+  // What the envelope says, independent of the parse — and read through the
+  // SAME predicate detail::opt_double uses. is_number(), not is_number_float():
+  // the capture in #34 is `"usd":0`, a JSON *integer*, and a float-only reader
+  // would call it absent and then report a mismatch against a parse that is
+  // behaving exactly as documented.
+  const auto wire = [&c](const char* key) -> std::optional<double> {
+    const auto k = c->find(key);
+    if (k == c->end() || !k->is_number()) return std::nullopt;
+    return k->get<double>();
+  };
+  // The wire type is half the question the sweep exists to answer, so print it
+  // rather than only the value.
+  const auto kind = [&c](const char* key) -> const char* {
+    const auto k = c->find(key);
+    if (k == c->end()) return "missing";
+    if (k->is_number_integer()) return "integer";
+    if (k->is_number_float()) return "float";
+    return "not a number";
+  };
+  std::cerr << "cost wire types    : usd " << kind("usd") << ", diem " << kind("diem") << '\n';
+
+  // Read once each, so the numbers printed below and the numbers that decide
+  // the exit status are the same reads rather than two a reader has to prove
+  // equal. Matches report_usage's raw_cached / raw_reasoning above.
+  const auto raw_usd = wire("usd");
+  const auto raw_diem = wire("diem");
+
+  // max_digits10 on both sides. Default ostream precision is 6 significant
+  // digits and std::to_string is 6 *decimal places*, which on a tool whose one
+  // job is reporting the verbatim wire value would print a diem of 1.7e-7 as
+  // "0.000000" — a zero, in the leg whose entire finding is that a printed zero
+  // must not be confused with a real one.
+  const auto num = [](double v) {
+    std::ostringstream os;
+    os << std::setprecision(std::numeric_limits<double>::max_digits10) << v;
+    return os.str();
+  };
+  const auto show = [&num](const char* label, std::optional<double> from_raw,
+                           std::optional<double> from_typed) {
+    std::cerr << label << (from_typed ? num(*from_typed) : "(absent)");
+    if (from_raw != from_typed)
+      std::cerr << "   <-- RAW SAYS " << (from_raw ? num(*from_raw) : "(absent)")
+                << ": the wire moved and the parse did not";
+    std::cerr << '\n';
+  };
+  show("typed usd          : ", raw_usd, typed->usd);
+  show("typed diem         : ", raw_diem, typed->diem);
+
+  // An engaged usd of 0 is NOT a failure, and this is the one line in the leg
+  // that could most easily be written wrong. It has been 0 on every capture,
+  // including a call whose rate-card value was $0.0645 — so 0 means "not
+  // reported for this account", and a check that treated it as suspect would
+  // fire on every run forever.
+  return raw_usd != typed->usd || raw_diem != typed->diem;
+}
+
 auto usage_report(const venice::Client& client, std::string_view model) -> int {
   ModelPick pick;
   if (model.empty()) {
@@ -566,6 +712,10 @@ auto usage_report(const venice::Client& client, std::string_view model) -> int {
     mismatch = report_usage(*u, nonstream->usage) || mismatch;
   else
     std::cerr << "usage, verbatim    : (no usage key in the body at all)\n";
+  // The whole body, not the usage sub-object. `||` ordering is deliberate: both
+  // reports run, so a cost mismatch does not hide a usage one or vice versa.
+  report_envelope_keys(nonstream->raw);
+  mismatch = report_cost(nonstream->raw, nonstream->cost) || mismatch;
 
   std::cerr << "\n-- streaming --\n";
   venice::StreamAccumulator acc;
@@ -582,19 +732,69 @@ auto usage_report(const venice::Client& client, std::string_view model) -> int {
   // it needed no library change to reach.
   const nlohmann::json* frame = nullptr;
   std::size_t usage_frames = 0;
-  for (const auto& c : acc.chunks())
+  // The cost frame is scanned separately and kept as the whole *chunk*, because
+  // report_cost reads the envelope: `cost` is a sibling of `usage`, so handing
+  // it the usage sub-object would be handing it the one object that cannot
+  // contain the key. Counting them is not decoration either — a second cost
+  // frame would mean last-wins is the wrong accumulation rule, and that is the
+  // single thing the sweep can measure that changes a line of the library
+  // rather than a line of prose.
+  //
+  // Envelope keys are reported over the UNION of every chunk, not just the
+  // cost-bearing one: a new sibling could arrive on an opening or content frame,
+  // and a discovery check that only looks where the last discovery happened is
+  // how `cost` stayed invisible for three releases.
+  const nlohmann::json* cost_chunk = nullptr;
+  std::size_t cost_frames = 0;
+  std::vector<nlohmann::json> seen_costs;
+  nlohmann::json chunk_key_union = nlohmann::json::object();
+  for (const auto& c : acc.chunks()) {
+    if (!c.is_object()) continue;
+    for (const auto& [k, v] : c.items()) chunk_key_union[k] = nullptr;
     if (const auto u = c.find("usage"); u != c.end() && u->is_object()) {
       ++usage_frames;
       frame = &*u;  // last wins, matching StreamAccumulator::ingest
     }
+    if (const auto k = c.find("cost"); k != c.end()) {
+      ++cost_frames;
+      cost_chunk = &c;
+      if (std::find(seen_costs.begin(), seen_costs.end(), *k) == seen_costs.end())
+        seen_costs.push_back(*k);
+    }
+  }
+  const std::size_t distinct_costs = seen_costs.size();
+  report_envelope_keys(chunk_key_union);
 
   std::cerr << "usage frames       : " << usage_frames << '\n';
   if (frame != nullptr) mismatch = report_usage(*frame, streamed->usage) || mismatch;
   else std::cerr << "usage, verbatim    : (no chunk carried a usage object)\n";
 
+  std::cerr << "cost frames        : " << cost_frames << '\n';
+  if (cost_chunk != nullptr) mismatch = report_cost(*cost_chunk, streamed->cost) || mismatch;
+  else std::cerr << "cost, verbatim     : (no chunk carried a cost object)\n";
+
+  // The accumulation rule, checked rather than assumed. Every stream swept for
+  // VC-20 carried exactly ONE cost frame, so StreamAccumulator's last-wins is
+  // uncontradicted but also unproven.
+  //
+  // The trigger is a second frame, NOT a second *distinct value*, and that is
+  // the whole point of the check. Requiring distinctness would pass the shape
+  // most likely to mean "these are increments, sum them" — two frames each
+  // carrying 0.0005 for a call that charged 0.001 — and last-wins would then
+  // report half the true charge with the run exiting 0. Any repeat is news.
+  if (cost_frames > 1) {
+    std::cerr << "\nMULTIPLE COST FRAMES (" << cost_frames << ", " << distinct_costs
+              << " distinct) -- StreamAccumulator takes the last and that may now be wrong.\n"
+                 "VC-20 measured exactly one per stream. Equal values may be increments to\n"
+                 "sum; differing ones may mean last-wins should be first. Either way the\n"
+                 "accumulation rule needs re-opening against this capture.\n";
+    mismatch = true;
+  }
+
   if (mismatch)
-    std::cerr << "\nRAW AND TYPED DISAGREE -- Usage::from_json is reading the wrong place.\n"
-                 "This is case (c) in #28: a parse bug, not a per-family absence.\n";
+    std::cerr << "\nRAW AND TYPED DISAGREE -- a from_json is reading the wrong place.\n"
+                 "For usage this is case (c) in #28: a parse bug, not a per-family\n"
+                 "absence. For cost see #34 -- it is a top-level sibling of usage.\n";
   return mismatch ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
@@ -637,6 +837,22 @@ auto main(int argc, char** argv) -> int {
   if (res->usage) {
     std::cerr << "(" << res->usage->prompt_tokens << " prompt / "
               << res->usage->completion_tokens << " completion tokens)\n";
+  }
+  // What it actually cost, when the server says. Printed here and not only in
+  // --usage so the field is visible without running the check leg. usd has been
+  // 0 on every capture, so print whichever currency is engaged and let the
+  // reader see which one answered.
+  if (res->cost) {
+    if (res->cost->usd || res->cost->diem) {
+      std::cerr << "(cost";
+      if (res->cost->usd) std::cerr << " usd " << *res->cost->usd;
+      if (res->cost->diem) std::cerr << " diem " << *res->cost->diem;
+      std::cerr << ")\n";
+    } else {
+      // A cost object with neither currency readable. Saying so is the point of
+      // the tolerant parse — silence here would be the state it exists to avoid.
+      std::cerr << "(cost object arrived but neither currency parsed)\n";
+    }
   }
   return EXIT_SUCCESS;
 }

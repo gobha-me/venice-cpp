@@ -722,6 +722,31 @@ struct ChatRequest {
   }
 };
 
+// ── money ─────────────────────────────────────────────────────────────────
+//
+// Venice quotes every amount in two currencies at once: USD and `diem`, its
+// credit unit. Both are optional because a bucket may carry either, and
+// neither is derivable from the other — a ledger denominated in credits must
+// not have to reconstruct them from dollars at a rate this library would be
+// guessing at.
+//
+// Used on both sides of a call and the two are NOT the same quantity:
+// Model::pricing is a *rate* (per million tokens, per image), ChatResponse::cost
+// is an *amount* (what this one call charged). Do not multiply the latter by a
+// token count.
+
+struct Price {
+  std::optional<double> usd;
+  std::optional<double> diem;
+
+  friend auto operator==(const Price&, const Price&) -> bool = default;
+
+  friend void from_json(const nlohmann::json& j, Price& p) {
+    p.usd = detail::opt_double(j, "usd");
+    p.diem = detail::opt_double(j, "diem");
+  }
+};
+
 // ── usage / cost metadata ─────────────────────────────────────────────────
 //
 // Venice returns prompt/completion token counts; some responses also carry
@@ -809,6 +834,47 @@ struct ChatResponse {
   std::string finish_reason{};  // "stop" | "length" | ...
   std::optional<Usage> usage{};
 
+  // What Venice charged for THIS call, as the server reports it — authoritative
+  // where pairing Usage against Model::pricing is a reconstruction, and VC-17
+  // established that reconstruction cannot be exact anyway (cached_tokens is
+  // per-family; pricing has two cache buckets where Usage reports one).
+  //
+  // It lives here and not on Usage because it is a top-level SIBLING of `usage`
+  // on the wire, and Usage::from_json only ever receives the `usage` sub-object
+  // — it has no handle on the parent. That is a placement impossibility, not a
+  // placement preference, and test/07stream/ §3 pins it.
+  //
+  // MEASURED 2026-08-10, api.venice.ai: present on all seven VC-17 families on
+  // both paths, so unlike Usage's optional fields this is not per-family. Still
+  // optional — a 402 body, a gateway, or a future endpoint need not carry it.
+  //
+  // `usd` HAS BEEN ZERO ON EVERY CAPTURE, including a call whose rate-card value
+  // was $0.0645 (openai-gpt-55-pro, 1685 prompt + 6 completion at $37.50/$225
+  // per million, with diem reporting exactly that magnitude). So an engaged
+  // usd == 0 means "not reported for this account", NOT "this call was free".
+  // Read `diem` unless you have measured otherwise for your own key. The library
+  // reports what arrived and interprets nothing.
+  //
+  // Parsed through the tolerant detail::opt_double, and that is deliberate
+  // rather than unprecedented: `created`, `system_fingerprint` and
+  // `venice_parameters` below already read through opt_i64 / opt_string /
+  // opt_object, and did before this field existed. What the loud-parse rule at
+  // the top of this header actually protects is a field with **no
+  // representation for "unknown"** — Usage::prompt_tokens is int{0}, so
+  // tolerance there maps corrupt onto a number the caller cannot tell from a
+  // real one. Every member here is optional<double> whose disengaged state
+  // already means unknown, which puts cost on the same side of that line as the
+  // three fields above rather than on Usage's side.
+  //
+  // Two consequences of a loud read, both checkable rather than rhetorical: on
+  // the non-streamed path it turns a metadata field into ErrorKind::Parse for a
+  // completion already paid for; and on the streamed path client.hpp's SSE
+  // lambda catches the throw into `parse_err`, which is surfaced only when the
+  // accumulator is empty, so a loud parse there yields a half-ingested frame
+  // with on_delta silently skipped. Reasoning, not measurement — no corrupt
+  // cost has ever been observed.
+  std::optional<Price> cost{};
+
   // The whole assistant turn, complete enough to send back as the next message.
   // Optional because "choices": [] is a real body and a pinned non-throwing
   // case: a default-constructed Message would carry role == "" straight into a
@@ -862,6 +928,8 @@ struct ChatResponse {
         r.finish_reason = c0.at("finish_reason").get<std::string>();
     }
     if (j.contains("usage") && !j.at("usage").is_null()) r.usage = j.at("usage").get<Usage>();
+    // Top level, beside usage rather than inside it — see ChatResponse::cost.
+    if (const auto* c = detail::opt_object(j, "cost")) r.cost = c->get<Price>();
     return r;
   }
 };
@@ -869,21 +937,8 @@ struct ChatResponse {
 
 // ── model pricing ─────────────────────────────────────────────────────────
 //
-// Venice quotes every bucket in two currencies at once: USD and `diem`, its
-// credit unit. Both are optional because a bucket may carry either, and
-// neither is derivable from the other — a ledger denominated in credits must
-// not have to reconstruct them from dollars at a rate this library would be
-// guessing at.
-
-struct Price {
-  std::optional<double> usd;
-  std::optional<double> diem;
-
-  friend void from_json(const nlohmann::json& j, Price& p) {
-    p.usd = detail::opt_double(j, "usd");
-    p.diem = detail::opt_double(j, "diem");
-  }
-};
+// Rates, in the two currencies `Price` above carries. These are what a model
+// charges; ChatResponse::cost is what one call actually cost.
 
 // One complete set of rates. Buckets stay distinct for the same reason
 // Usage::cached_tokens does: they price differently, and a client that folds

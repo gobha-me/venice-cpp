@@ -78,9 +78,9 @@ namespace {
 // a tool call and both usage detail objects at once, so this is a composite. It
 // is no longer a *guess*, though, which is what it was when written: every
 // element of it has since been seen on the wire, the usage block by the VC-17
-// sweep (see §4's provenance note) and the rest by VC-05's and VC-18's live
-// runs. Message::raw and ChatResponse::raw remain what makes a wrong field name
-// here recoverable rather than lossy.
+// sweep (see §4's provenance note), the `cost` sibling by VC-20's (§4b), and
+// the rest by VC-05's and VC-18's live runs. Message::raw and ChatResponse::raw
+// remain what makes a wrong field name here recoverable rather than lossy.
 constexpr auto kReplyBody = R"({
   "id":"chatcmpl-1","model":"deepseek-r1","object":"chat.completion","created":1700000000,
   "system_fingerprint":"fp_abc",
@@ -92,7 +92,8 @@ constexpr auto kReplyBody = R"({
                    "function":{"name":"get_weather","arguments":"{\"location\":\"SF\"}"}}]}}],
   "usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,
            "prompt_tokens_details":{"cached_tokens":4},
-           "completion_tokens_details":{"reasoning_tokens":15}}})";
+           "completion_tokens_details":{"reasoning_tokens":15}},
+  "cost":{"usd":0,"diem":0.001089404}})";
 
 auto reply() -> ChatResponse {
   return ChatResponse::from_json_body(nlohmann::json::parse(kReplyBody));
@@ -477,6 +478,74 @@ TEST_CASE("the fields the old parse discarded are all present", "[response][pars
   REQUIRE(r.message->tool_calls->size() == 1);
 }
 
+TEST_CASE("cost is read from the envelope, not from usage", "[response][parse][cost][live]") {
+  // VC-20's first non-obvious point, pinned rather than left as prose. `cost`
+  // is a top-level SIBLING of `usage`; Usage::from_json only ever receives the
+  // `usage` sub-object, so it could not reach this key even if we wanted it
+  // there. Both are asserted in one case so the relationship is visible here
+  // and not only in the header comment. OBSERVED on all seven VC-20 families.
+  const auto r = reply();
+  REQUIRE(r.cost.has_value());
+  REQUIRE(r.usage.has_value());  // the sibling, parsed independently
+  REQUIRE(r.cost->diem == 0.001089404);
+  // Engaged and zero, which is not the same as absent — see §4b. Venice sends
+  // usd as a JSON *integer* here, so detail::opt_double's is_number() predicate
+  // (rather than is_number_float()) is load bearing on this path too.
+  REQUIRE(r.cost->usd == 0.0);
+}
+
+TEST_CASE("a body with no cost key leaves cost disengaged", "[response][parse][cost]") {
+  // CONSTRUCTED. Every family swept on 2026-08-10 sent a cost object on both
+  // paths, so unlike Usage's optional fields there is no observed absence. The
+  // field stays optional anyway: an error body, a gateway, or an endpoint that
+  // is not /chat/completions need not carry one, and a defaulted Price would
+  // report a call as costing nothing rather than as not saying.
+  const auto r = ChatResponse::from_json_body(nlohmann::json::parse(
+      R"({"choices":[{"message":{"role":"assistant","content":"hi"}}]})"));
+  REQUIRE_FALSE(r.cost.has_value());
+}
+
+TEST_CASE("a wrong-typed cost leaves the other currency engaged, and the reply survives",
+          "[response][parse][cost][failure]") {
+  // The tolerance deviation, turned into a contract. ChatResponse::cost is the
+  // one field on this struct parsed through the tolerant detail::opt_double,
+  // and this is what that buys: a corrupt currency reads as unknown — a state
+  // callers must already handle — instead of costing them a completion they
+  // have already paid for. The listings-side twin of this case is
+  // test/04models/ "a non-numeric usd leaves diem engaged"; changing either
+  // without the other means Price has grown two behaviours.
+  //
+  // CONSTRUCTED: no capture has ever carried a corrupt cost. The design is
+  // reasoned, and the header says so.
+  const auto r = ChatResponse::from_json_body(nlohmann::json::parse(
+      R"({"choices":[{"message":{"role":"assistant","content":"hi"}}],
+          "cost":{"usd":"free","diem":0.5}})"));
+  REQUIRE(r.cost.has_value());
+  REQUIRE_FALSE(r.cost->usd);
+  REQUIRE(r.cost->diem == 0.5);
+  REQUIRE(r.content == "hi");  // the actual claim: the answer is not thrown away
+}
+
+TEST_CASE("a non-object cost is absent, not throwing", "[response][parse][cost][failure]") {
+  // The structural read. A container that is null, an array or a scalar is a
+  // shape variation between gateways, not corruption of a value — the same
+  // split Usage::from_json draws for prompt_tokens_details.
+  for (const auto* body : {R"({"choices":[],"cost":null})", R"({"choices":[],"cost":[]})",
+                           R"({"choices":[],"cost":42})", R"({"choices":[],"cost":"free"})"}) {
+    INFO(body);
+    const auto r = ChatResponse::from_json_body(nlohmann::json::parse(body));
+    REQUIRE_FALSE(r.cost.has_value());
+  }
+}
+
+TEST_CASE("a cost object does not make the top-level shape total", "[response][parse][cost][failure]") {
+  // Guards this ticket's real regression risk: someone reading the tolerant
+  // cost parse as licence to "harmonise" from_json_body. A body with no choices
+  // is still a broken completion, cost or no cost.
+  REQUIRE_THROWS(ChatResponse::from_json_body(
+      nlohmann::json::parse(R"({"id":"x","cost":{"usd":0,"diem":0.5}})")));
+}
+
 // ── §4 Usage ──────────────────────────────────────────────────────────────
 //
 // PROVENANCE. VC-17 (#28) was filed because this section asserted nestings no
@@ -615,6 +684,87 @@ TEST_CASE("reasoning_tokens is reported", "[usage][parse]") {
   REQUIRE(r.usage->reasoning_tokens == 15);
   REQUIRE(r.usage->cached_tokens == 4);
   REQUIRE(r.usage->completion_tokens == 20);
+}
+
+// ── §4b cost ──────────────────────────────────────────────────────────────
+//
+// Inside §4 rather than a section of its own, because `cost` and `usage` are
+// two halves of one wire object and types.hpp heads that territory "usage /
+// cost metadata". The parse cases live in §3 with the rest of
+// ChatResponse::from_json_body; what is here is what the wire says.
+//
+// PROVENANCE. 2026-08-10, api.venice.ai, via `venice-cpp --usage <id>` plus
+// curl for the include_usage path. Seven families — the same seven VC-17 swept,
+// deliberately, so the two tables read as one sweep. What it settled:
+//
+//   cost present, non-streaming    7 of 7
+//   cost present, streamed         7 of 7
+//   cost frames per stream         exactly 1, on every probe
+//   usd                            integer 0 on EVERY capture
+//   diem                           float, non-zero, on every capture
+//
+// Four things worth knowing, all measured:
+//
+//   * Unlike Usage's optional fields, cost is NOT per-family. All seven send it
+//     on both paths, which is why §3's absence case is labelled CONSTRUCTED.
+//
+//   * `usd` is not populated for this account, and 0 does not mean free. The
+//     probe: openai-gpt-55-pro, 1685 prompt + 6 completion tokens at $37.50 and
+//     $225 per million — a rate-card value of $0.0645 — returned
+//     {"usd":0,"diem":0.0645375}. diem carried exactly that magnitude while usd
+//     reported zero. So an engaged usd of 0 means "not reported", and the
+//     library reports it verbatim and interprets nothing. This is the ticket's
+//     own worry ("an authoritative 0 that is actually not-reported is worse
+//     than the estimate it replaces") confirmed rather than dismissed.
+//
+//   * `usd` arrives as a JSON integer and `diem` as a float, on every capture.
+//     detail::opt_double's is_number() predicate — chosen for the rate card,
+//     where whole prices are quoted as integers — is therefore load bearing
+//     here too. Under is_number_float() every usd on this path reads absent.
+//
+//   * The cost-bearing frame carries "choices": []. That is why the read in
+//     delta_from_chunk sits above the empty-choices early return, and §8 pins
+//     it.
+//
+// What it could NOT settle: whether cost ever arrives more than once in a
+// stream. Every probe saw exactly one frame, so last-wins in
+// StreamAccumulator::ingest is uncontradicted and unproven. `venice-cpp
+// --usage` fails the run if a second frame with a different value ever lands,
+// which is what keeps §9's rule falsifiable rather than merely asserted.
+//
+// stream_options.include_usage changes nothing here: cost and usage both arrive
+// without it. Measured on deepseek-v4-pro and llama-3.3-70b.
+
+// Captured from `--usage deepseek-v4-pro`, non-streaming, 2026-08-10. The
+// streamed frame carried the same two keys with a different diem.
+constexpr auto kLiveCost = R"({"usd":0,"diem":0.001951745})";
+
+TEST_CASE("the observed cost shape parses whole", "[cost][parse][live]") {
+  const auto p = nlohmann::json::parse(kLiveCost).get<venice::Price>();
+  REQUIRE(p.usd == 0.0);
+  REQUIRE(p.diem == 0.001951745);
+}
+
+TEST_CASE("an engaged zero is not an absence", "[cost][parse][live]") {
+  // The same distinction §4 pins for "cached_tokens":0, and it matters more
+  // here: a caller displaying "$0.00" because usd was disengaged and a caller
+  // displaying it because the server said 0 are making different claims, and
+  // only one of them is reporting what arrived. Both states are reachable and
+  // they are different values.
+  const auto zero = nlohmann::json::parse(R"({"usd":0})").get<venice::Price>();
+  const auto absent = nlohmann::json::parse(R"({"diem":1})").get<venice::Price>();
+  REQUIRE(zero.usd.has_value());
+  REQUIRE(*zero.usd == 0.0);
+  REQUIRE_FALSE(absent.usd.has_value());
+  REQUIRE(zero.usd != absent.usd);
+}
+
+TEST_CASE("an integral usd survives the parse", "[cost][parse][live]") {
+  // OBSERVED: usd is a JSON integer on every capture. This is the case that
+  // goes red if detail::opt_double is ever narrowed to is_number_float().
+  const auto p = nlohmann::json::parse(R"({"usd":2,"diem":3})").get<venice::Price>();
+  REQUIRE(p.usd == 2.0);
+  REQUIRE(p.diem == 3.0);
 }
 
 // ── §5 idempotency ────────────────────────────────────────────────────────
@@ -850,6 +1000,8 @@ TEST_CASE("delta_from_chunk never throws", "[stream][delta][failure]") {
       R"({"choices":[{"delta":{"content":123}}]})",
       R"({"choices":[{"finish_reason":null}]})",
       R"({"usage":null})",
+      R"({"cost":null})",
+      R"({"cost":"free"})",
   };
   for (const auto& s : shapes) {
     INFO("shape: " << s);
@@ -878,6 +1030,35 @@ TEST_CASE("a usage-only frame with empty choices is still read", "[stream][delta
   std::vector<ToolCall> frags;
   const auto d = delta_of(R"({"choices":[],"usage":{"prompt_tokens":3}})", frags);
   REQUIRE(d.usage != nullptr);
+  REQUIRE_FALSE(d.empty());
+}
+
+TEST_CASE("a cost-bearing frame with empty choices is still read", "[stream][delta][cost][failure]") {
+  // OBSERVED on every family swept for VC-20: cost rides on the usage frame,
+  // and that frame carries "choices": []. delta_from_chunk returns early on an
+  // empty choices array, so a cost read placed below that return would never
+  // fire on the only frame that ever carries the key — a field that parses
+  // perfectly in a fixture and is silently absent on every live stream. This
+  // case is what makes the read's position in the function a contract.
+  std::vector<ToolCall> frags;
+  const auto d = delta_of(R"({"choices":[],"usage":{"prompt_tokens":3},
+                              "cost":{"usd":0,"diem":0.00171903}})", frags);
+  REQUIRE(d.cost != nullptr);
+  REQUIRE(d.cost->at("diem") == 0.00171903);
+  REQUIRE_FALSE(d.empty());
+}
+
+TEST_CASE("a cost-only frame is not nothing", "[stream][delta][cost][failure]") {
+  // CONSTRUCTED. Cost rides with usage in every capture, so no observed frame
+  // carries it alone and `usage != nullptr` would already have covered this.
+  // It is in empty()'s conjunction anyway, because empty() feeds
+  // StreamAccumulator::empty(), which is how chat_stream decides whether an SSE
+  // parse error was fatal — and a frame that carried a billing figure is not
+  // "nothing arrived at all".
+  std::vector<ToolCall> frags;
+  const auto d = delta_of(R"({"choices":[],"cost":{"usd":0,"diem":0.5}})", frags);
+  REQUIRE(d.cost != nullptr);
+  REQUIRE(d.usage == nullptr);
   REQUIRE_FALSE(d.empty());
 }
 
@@ -1156,6 +1337,62 @@ TEST_CASE("retention can be turned off without losing the assembly", "[stream][a
   REQUIRE(acc.message().text() == "a");
 }
 
+TEST_CASE("the last cost frame wins", "[stream][accumulator][cost][failure]") {
+  // CONSTRUCTED, and deliberately so. Every stream swept for VC-20 carried
+  // exactly ONE cost frame, so no capture discriminates last-wins from
+  // first-wins or from summing — the rule mirrors usage's because that is the
+  // convention, not because the wire forced it. What keeps that from being an
+  // unfalsifiable belief is live: `venice-cpp --usage` counts cost frames and
+  // fails the run if a second one ever arrives carrying a different value.
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"content":"a"}}],"cost":{"usd":0,"diem":0.001}})",
+      R"({"choices":[],"cost":{"usd":0,"diem":0.002}})",
+  });
+  const auto r = acc.response();
+  REQUIRE(r.cost.has_value());     // guard first: the break this case exists for
+  REQUIRE(r.cost->diem == 0.002);  // leaves cost disengaged, and -> would be UB
+}
+
+TEST_CASE("a corrupt usage does not take the cost with it", "[stream][accumulator][cost][failure]") {
+  // CONSTRUCTED, and the ordering inside ingest is the whole subject. Cost rides
+  // on the usage frame — one object, both keys — and the usage read is loud, so
+  // it throws out of ingest on a wrong-typed count. chat_stream catches that
+  // into parse_err and surfaces it only when the accumulator is empty, which a
+  // stream carrying content never is: the throw is silent. If the cost read sat
+  // after the usage read, a corrupt token count would silently cost the caller
+  // the billing figure — exactly what ChatResponse::cost's tolerant parse exists
+  // to prevent, undone one file over.
+  venice::StreamAccumulator acc;
+  acc.ingest(nlohmann::json::parse(R"({"choices":[{"delta":{"content":"a"}}]})"));
+  REQUIRE_THROWS(acc.ingest(nlohmann::json::parse(
+      R"({"choices":[],"usage":{"prompt_tokens":"ten"},"cost":{"usd":0,"diem":0.5}})")));
+
+  const auto r = acc.response();
+  REQUIRE(r.cost.has_value());  // taken before the throw
+  REQUIRE(r.cost->diem == 0.5);
+  REQUIRE_FALSE(r.usage.has_value());  // and the loud half still failed loudly
+}
+
+TEST_CASE("cost is assembled with chunk retention off", "[stream][accumulator][cost]") {
+  // Load bearing rather than tidy: Client::chat_stream's on_token overload
+  // constructs StreamAccumulator{false}, so those callers have no chunks() to
+  // read a verbatim cost out of. The typed field is their only path to one.
+  venice::StreamAccumulator acc{/*keep_chunks=*/false};
+  acc.ingest(nlohmann::json::parse(R"({"choices":[],"cost":{"usd":0,"diem":0.5}})"));
+  REQUIRE(acc.chunks().empty());
+  const auto r = acc.response();
+  REQUIRE(r.cost.has_value());
+  REQUIRE(r.cost->diem == 0.5);
+}
+
+TEST_CASE("reset clears cost", "[stream][accumulator][cost]") {
+  venice::StreamAccumulator acc;
+  acc.ingest(nlohmann::json::parse(R"({"choices":[],"cost":{"usd":0,"diem":0.5}})"));
+  REQUIRE(acc.response().cost.has_value());
+  acc.reset();
+  REQUIRE_FALSE(acc.response().cost.has_value());
+}
+
 TEST_CASE("empty() distinguishes nothing-arrived from no-content-arrived",
           "[stream][accumulator][failure]") {
   // The old fatal-parse test was "content is empty", which reported
@@ -1210,6 +1447,15 @@ TEST_CASE("reset clears everything but the retention setting", "[stream][accumul
 // the field and the stream does not. So convergence is evidence about the
 // stream's plumbing, never about serialization; that has to be pinned upstream,
 // in §2, or it is not pinned at all.
+//
+// VC-20 adds a per-field mitigation for `cost` and it is worth being exact
+// about how narrow it is. Besides comparing the two costs, this case pins the
+// streamed one against a LITERAL, so deleting the cost read from both
+// from_json_body and delta_from_chunk reddens §10 as well as §3 and §9. That
+// works only because cost is a leaf *value* — a number the fixture can name —
+// and not a serialization behaviour like the signature emit, which has no value
+// to assert from here. It is not a repair of the blindness above. Anything
+// whose loss shows up as "both sides emit nothing" is still invisible here.
 
 TEST_CASE("a streamed reply assembles to the same message as a non-streamed one",
           "[stream][accumulator][converge]") {
@@ -1224,7 +1470,8 @@ TEST_CASE("a streamed reply assembles to the same message as a non-streamed one"
                      "function":{"name":"clock","arguments":"{}"}}]}}],
     "usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,
              "prompt_tokens_details":{"cached_tokens":4},
-             "completion_tokens_details":{"reasoning_tokens":15}}})"));
+             "completion_tokens_details":{"reasoning_tokens":15}},
+    "cost":{"usd":0,"diem":0.001089404}})"));
 
   // The same reply as chunks: mid-word content splits, a two-fragment
   // arguments, an id present only in the opening fragment, the second call
@@ -1244,7 +1491,8 @@ TEST_CASE("a streamed reply assembles to the same message as a non-streamed one"
       R"({"choices":[{"finish_reason":"tool_calls","delta":{}}]})",
       R"({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,
            "prompt_tokens_details":{"cached_tokens":4},
-           "completion_tokens_details":{"reasoning_tokens":15}}})",
+           "completion_tokens_details":{"reasoning_tokens":15}},
+           "cost":{"usd":0,"diem":0.001089404}})",
   });
   const auto streamed = acc.response();
 
@@ -1258,6 +1506,14 @@ TEST_CASE("a streamed reply assembles to the same message as a non-streamed one"
   REQUIRE(streamed.finish_reason == non_streamed.finish_reason);
   REQUIRE(streamed.usage == non_streamed.usage);
   REQUIRE(streamed.content == non_streamed.content);
+  REQUIRE(streamed.cost == non_streamed.cost);
+  // The literal, not only the equality — see the section note. Without this
+  // line a read deleted from BOTH paths leaves the comparison above green.
+  // has_value() first because that break is exactly what leaves cost
+  // disengaged, and operator-> on a disengaged optional is UB rather than a red
+  // assertion — a case whose failure mode is undefined proves nothing.
+  REQUIRE(streamed.cost.has_value());
+  REQUIRE(streamed.cost->diem == 0.001089404);
 
   // And they must NOT be equal in raw — a streamed body is a different wire
   // object from a completion body, and asserting otherwise would invite
