@@ -1,7 +1,8 @@
 // Character listing parse and query build — offline, no API key or network.
 //
-// Charter: everything venice::characters_from_json_body and Character's
-// from_json do with a /characters body, plus what
+// Charter: everything venice::characters_from_json_body,
+// venice::character_from_json_body and Character's from_json do with the two
+// /characters response shapes, plus what
 // venice::character_query_params flattens a CharacterQuery into. The transport
 // half (Client::characters) is not exercised here and cannot be — that is the
 // point of both halves being free functions. The *encoder* those pairs are then
@@ -37,6 +38,7 @@
 
 using venice::Character;
 using venice::character_query_params;
+using venice::character_from_json_body;
 using venice::characters_from_json_body;
 using venice::CharacterQuery;
 
@@ -77,7 +79,44 @@ auto query_string(const CharacterQuery& q) -> std::string {
 
 }  // namespace
 
-// ── §0 the container: the only place the whole list may fail ──────────────
+// ── §0 detail response: its container is one object, not a list ───────────
+
+TEST_CASE("a character detail response that is not an object throws",
+          "[character][failure]") {
+  SECTION("array") {
+    REQUIRE_THROWS(character_from_json_body(nlohmann::json::parse("[]")));
+  }
+  SECTION("null") {
+    REQUIRE_THROWS(character_from_json_body(nlohmann::json::parse("null")));
+  }
+  SECTION("scalar") {
+    REQUIRE_THROWS(character_from_json_body(nlohmann::json::parse(R"("nope")")));
+  }
+  SECTION("the error names the singular endpoint") {
+    try {
+      static_cast<void>(character_from_json_body(nlohmann::json::parse("[]")));
+      FAIL("expected a throw");
+    } catch (const std::exception& e) {
+      REQUIRE(std::string{e.what()}.starts_with("character:"));
+    }
+  }
+}
+
+TEST_CASE("a partial character detail object stays partial", "[character]") {
+  const auto c = character_from_json_body(nlohmann::json::parse(kBare));
+  REQUIRE(c.slug == "s");
+  REQUIRE_FALSE(c.name.has_value());
+  REQUIRE(c.raw == nlohmann::json::parse(kBare));
+}
+
+TEST_CASE("character detail does not synthesize a missing slug", "[character][failure]") {
+  const auto c = character_from_json_body(nlohmann::json::parse(R"({"name":"Partial"})"));
+  REQUIRE(c.slug.empty());
+  REQUIRE(c.name == "Partial");
+  REQUIRE(c.raw == nlohmann::json::parse(R"({"name":"Partial"})"));
+}
+
+// ── §1 listing container: the only place the whole list may fail ──────────
 //
 // Everything below this section degrades. The second case is the one that
 // earns the check: iterating a json *object* yields its values and iterating a
@@ -126,7 +165,7 @@ TEST_CASE("an empty character list is a list, not a failure", "[characters]") {
   }
 }
 
-// ── §1 entries degrade, never throw ───────────────────────────────────────
+// ── §2 entries degrade, never throw ───────────────────────────────────────
 //
 // These two cases are a pair held in tension and neither substitutes for the
 // other. The first proves junk is skipped rather than fatal; the second proves
@@ -187,7 +226,7 @@ TEST_CASE("a partial character entry is kept", "[characters]") {
   REQUIRE(c.tags.empty());
 }
 
-// ── §2 wrong-typed fields read as absent, field by field ──────────────────
+// ── §3 wrong-typed fields read as absent, field by field ──────────────────
 //
 // The case the tolerant readers exist for. A predicate is used rather than
 // try/catch because get<int>() would not throw on most of these — it would
@@ -494,7 +533,7 @@ TEST_CASE("character query extra is additive and loses to a modeled field",
   }
 }
 
-// ── §6 happy path, last ───────────────────────────────────────────────────
+// ── §7 happy path, last ───────────────────────────────────────────────────
 
 TEST_CASE("the documented character entry parses whole", "[characters]") {
   const auto c = one(kAlanWatts);
@@ -519,6 +558,20 @@ TEST_CASE("the documented character entry parses whole", "[characters]") {
   REQUIRE(c.stats->imports == 112.0);
   REQUIRE(c.stats->rating_count == 24.0);
   REQUIRE(c.stats->rating_sum == 113.0);
+}
+
+TEST_CASE("the documented character detail object parses whole", "[character]") {
+  const auto expected = nlohmann::json::parse(kAlanWatts);
+  const auto c = character_from_json_body(expected);
+
+  REQUIRE(c.slug == "alan-watts");
+  REQUIRE(c.id == "2f460055-7595-4640-9cb6-c442c4c869b0");
+  REQUIRE(c.name == "Alan Watts");
+  REQUIRE(c.model_id == "venice-uncensored-1-2");
+  REQUIRE(c.web_enabled == true);
+  REQUIRE(c.stats.has_value());
+  REQUIRE(c.stats->average_rating == 4.7);
+  REQUIRE(c.raw == expected);
 }
 
 TEST_CASE("a full listing parses into a picker's worth of characters", "[characters]") {

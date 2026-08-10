@@ -27,7 +27,9 @@
 #include <venice/venice.hpp>
 
 using venice::detail::percent_encode;
+using venice::detail::path_segment_encode;
 using venice::detail::with_query;
+using venice::detail::with_path_segment;
 
 // ── §0 percent_encode: bytes that must NOT survive contact ────────────────
 //
@@ -115,7 +117,30 @@ TEST_CASE("percent_encode leaves the unreserved set alone", "[query]") {
   }
 }
 
-// ── §2 with_query: the empty-value skip ───────────────────────────────────
+// ── §2 path segments: same byte encoding, distinct endpoint contract ─────
+
+TEST_CASE("a character slug remains exactly one encoded path segment",
+          "[query][path][failure]") {
+  SECTION("path and query delimiters cannot select another endpoint") {
+    REQUIRE(with_path_segment("/characters", "a/b?c#d") ==
+            "/characters/a%2Fb%3Fc%23d");
+  }
+
+  SECTION("already escaped input is escaped again rather than trusted") {
+    REQUIRE(path_segment_encode("a%2Fb") == "a%252Fb");
+  }
+
+  SECTION("spaces pluses and UTF-8 encode byte-exactly") {
+    REQUIRE(path_segment_encode("a + é") == "a%20%2B%20%C3%A9");
+  }
+
+  SECTION("embedded NUL and high bytes do not truncate or sign-extend") {
+    REQUIRE(path_segment_encode(std::string_view{"a\0b", 3}) == "a%00b");
+    REQUIRE(path_segment_encode(std::string_view{"\xFF", 1}) == "%FF");
+  }
+}
+
+// ── §3 with_query: the empty-value skip ───────────────────────────────────
 //
 // The non-breaking guarantee, asserted rather than asserted-in-a-comment.
 // Client::models(std::string_view type = {}) routes through with_query on every
@@ -149,7 +174,7 @@ TEST_CASE("with_query omits pairs whose value is empty", "[query][failure]") {
   }
 }
 
-// ── §3 with_query: assembly ───────────────────────────────────────────────
+// ── §4 with_query: assembly ───────────────────────────────────────────────
 
 TEST_CASE("with_query encodes both halves of every pair", "[query]") {
   SECTION("a value needing escapes") {
@@ -172,7 +197,7 @@ TEST_CASE("with_query joins multiple pairs with '&'", "[query]") {
   REQUIRE(with_query("/models", {{"a", "1"}, {"b", "2"}, {"c", "3"}}) == "/models?a=1&b=2&c=3");
 }
 
-// ── §4 happy path: what Client::models actually builds ────────────────────
+// ── §5 happy path: what Client::models actually builds ────────────────────
 
 TEST_CASE("with_query builds the /models endpoints", "[query]") {
   // Mirrors Client::models's call site. The first line is the pre-VC-13
@@ -182,7 +207,7 @@ TEST_CASE("with_query builds the /models endpoints", "[query]") {
   REQUIRE(with_query("/models", {{"type", "image"}}) == "/models?type=image");
 }
 
-// ── §5 the owning overload (VC-04, #5) ────────────────────────────────────
+// ── §6 the owning overload (VC-04, #5) ────────────────────────────────────
 //
 // Client::characters builds its parameters at runtime, so it cannot use the
 // initializer_list form: a limit becomes text only via std::to_string, and a

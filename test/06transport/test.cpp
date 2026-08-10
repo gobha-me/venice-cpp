@@ -1,9 +1,11 @@
 // Transport timeouts and cancellation — VC-06 (#7).
 //
-// Charter: venice::RequestOptions and venice::CancelToken, i.e. everything
-// about *when a call gives up*. What goes on the wire is test/02request/ and
-// test/05query/; what comes back off it is test/04models/; what never reaches
-// the wire at all is test/03guards/. Nothing here inspects a body.
+// Charter: transport behavior that requires a peer — timeouts, cancellation,
+// authentication, exact HTTP targets and response classification. Pure request
+// bodies stay in test/02request/, pure path/query transforms in test/05query/,
+// response parsers in their endpoint suites, and socket-free request guards in
+// test/03guards/. This file inspects bodies only where the loopback peer is what
+// proves the transport preserved or classified them correctly.
 //
 // ── Why this file binds a socket, when no other test does ──────────────────
 //
@@ -104,6 +106,8 @@ class Gate {
 //        stalls. The "quiet gap mid-stream" shape, and the one on_token alone
 //        cannot escape.
 //   GET  /api/v1/models               — answers immediately. The control.
+//   GET  /api/v1/characters/{slug}    — echoes the exact encoded target or
+//                                        returns detail-specific failures.
 //
 // Request counts are exposed so a test can assert a call did not happen, which
 // no clock reading can establish.
@@ -202,6 +206,27 @@ class TestServer {
                       "application/json");
     });
 
+    m_svr.Get(R"(/api/v1/characters/(.*))",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                ++m_character_hits;
+                if (req.target == "/api/v1/characters/missing") {
+                  res.status = 404;
+                  res.set_header("X-Protocol-Trace", "character-not-found");
+                  res.set_content(R"({"error":"character not found"})", "application/json");
+                  return;
+                }
+                if (req.target == "/api/v1/characters/wrong-shape") {
+                  res.set_content("[]", "application/json");
+                  return;
+                }
+                res.set_content(nlohmann::json{{"slug", "fixture"},
+                                               {"target", req.target},
+                                               {"authorization", req.get_header_value(
+                                                                     "Authorization")}}
+                                    .dump(),
+                                "application/json");
+              });
+
     m_svr.Post("/api/v1/chat/completions",
                [this](const httplib::Request& req, httplib::Response& res) {
                  ++m_chat_hits;
@@ -290,6 +315,7 @@ class TestServer {
   [[nodiscard]] auto stall_hits() const -> int { return m_stall_hits.load(); }
   [[nodiscard]] auto models_hits() const -> int { return m_models_hits.load(); }
   [[nodiscard]] auto chat_hits() const -> int { return m_chat_hits.load(); }
+  [[nodiscard]] auto character_hits() const -> int { return m_character_hits.load(); }
   [[nodiscard]] auto multipart_stall_hits() const -> int { return m_multipart_stall_hits.load(); }
 
   static constexpr int kFrames = 2;
@@ -305,6 +331,7 @@ class TestServer {
   std::atomic<int> m_stall_hits{0};
   std::atomic<int> m_models_hits{0};
   std::atomic<int> m_chat_hits{0};
+  std::atomic<int> m_character_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
 };
 
@@ -403,6 +430,61 @@ TEST_CASE("all four authentication modes traverse the buffered fixture independe
     REQUIRE((*body)["siwx"] == test.siwx);
     REQUIRE((*body)["payment"] == test.payment);
   }
+}
+
+TEST_CASE("character detail rejects an empty slug before auth or transport",
+          "[transport][character][auth][failure]") {
+  const TestServer server;
+  const Client public_client{Authentication::public_access(), server.base_url()};
+
+  const auto empty = public_client.character("");
+  REQUIRE_FALSE(empty.has_value());
+  REQUIRE(empty.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(empty.error().status == 0);
+  REQUIRE(empty.error().message == "character slug must not be empty");
+  REQUIRE(empty.error().body.empty());
+  REQUIRE(server.character_hits() == 0);
+
+  const auto wrong_auth = public_client.character("fixture");
+  REQUIRE_FALSE(wrong_auth.has_value());
+  REQUIRE(wrong_auth.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(server.character_hits() == 0);
+}
+
+TEST_CASE("character detail keeps a slug in one encoded path segment",
+          "[transport][character]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  const auto response = client.character(
+      "a/b?c#d% e", {.authentication = Authentication::bearer("override-token")});
+  REQUIRE(response.has_value());
+  REQUIRE(response->slug == "fixture");
+  REQUIRE(response->raw["target"] ==
+          "/api/v1/characters/a%2Fb%3Fc%23d%25%20e");
+  REQUIRE(response->raw["authorization"] == "Bearer override-token");
+  REQUIRE(server.character_hits() == 1);
+}
+
+TEST_CASE("character detail preserves 404 and rejects a malformed success body",
+          "[transport][character][failure]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  const auto missing = client.character("missing");
+  REQUIRE_FALSE(missing.has_value());
+  REQUIRE(missing.error().kind == ErrorKind::Http);
+  REQUIRE(missing.error().status == 404);
+  REQUIRE(missing.error().body == R"({"error":"character not found"})");
+  REQUIRE(missing.error().metadata.header("x-protocol-trace") == "character-not-found");
+
+  const auto malformed = client.character("wrong-shape");
+  REQUIRE_FALSE(malformed.has_value());
+  REQUIRE(malformed.error().kind == ErrorKind::Parse);
+  REQUIRE(malformed.error().status == 200);
+  REQUIRE(malformed.error().message.starts_with("character parse: character:"));
+  REQUIRE(malformed.error().body == "[]");
+  REQUIRE(server.character_hits() == 2);
 }
 
 TEST_CASE("public and Bearer model calls honor per-call authentication overrides",

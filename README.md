@@ -38,10 +38,10 @@ right bridge.
   …), and a full rate card with cache buckets and extended-context tiers, plus
   the verbatim entry as `raw`. Filterable by modality — `models("image")`,
   `models("all")` — since the endpoint's own default is text-only.
-- **Characters list** (`/characters`) — the discovery half of
+- **Characters** (`/characters`, `/characters/{slug}`) — the discovery half of
   `venice_parameters.character_slug`: slug, name, description, tags, the model
   a character runs on, and its rating stats, plus the verbatim entry as `raw`.
-  Filterable and, because the endpoint pages at 50, pageable.
+  The listing is filterable and pageable; a known slug can be fetched directly.
 - **Explicit authentication** — Public, Bearer, pre-signed SIWX and pre-built
   x402 payment payloads are distinct modes, selectable per client or per call.
   The client never owns wallet private keys or constructs signatures.
@@ -60,7 +60,7 @@ retries/backoff, async.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 4/49 operations implemented.
+OpenAPI coverage: 5/49 operations implemented.
 
 The checked inventory is [`cmake/openapi_manifest.json`](cmake/openapi_manifest.json),
 keyed by HTTP method + path rather than `operationId` (the published
@@ -350,6 +350,23 @@ for (const auto& c : page->entries) {
 }
 ```
 
+A slug already stored in configuration or obtained from a link does not require
+walking the catalogue. Fetch that character directly:
+
+```cpp
+const auto character = client.character("alan-watts");
+if (!character) return;                 // inspect character.error()
+
+std::cout << character->slug;
+if (character->name) std::cout << "  " << *character->name;
+std::cout << '\n';
+```
+
+The slug is encoded as one path segment. Reserved bytes such as `/`, `?`, and
+`#` cannot change the endpoint reached; an empty slug is `InvalidArg` before a
+socket. An unknown slug remains an ordinary `Http` error with status 404 and
+the server's exact response body.
+
 Note the named `page`. Writing `for (const auto& c : *client.characters(q))`
 compiles and is a use-after-free: the `expected` is a temporary that dies at the
 end of the range-for's initializer, and the fix that extends its lifetime
@@ -409,7 +426,8 @@ response did not say*. Degradation matches `models()`: an entry with no usable
 slug is skipped, a wrong-typed field reads as absent, and only a body that is
 not a list at all is an `ErrorKind::Parse`. `Character::raw` holds the whole
 entry verbatim — worth more here than elsewhere, because Venice documents
-`/characters` as a preview API that may change.
+the Characters API as preview functionality that may change. The direct fetch
+uses the same tolerant fields and the same verbatim `raw` contract.
 
 Unlike `/models`, this endpoint is Bearer-only. Selecting Public, SIWX or an
 x402 payment for it returns `InvalidArg` before transport; server responses use
@@ -652,7 +670,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.13.0)
+  GIT_TAG        v0.14.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -791,6 +809,7 @@ came from a capture. `/models` answers for any bearer token; chat and
 VENICE_API_KEY=... venice-cpp --stream "..."   # v0.8.0: the reply shapes
 VENICE_API_KEY=... venice-cpp --tools          # v0.9.0: the request shape
 VENICE_API_KEY=... venice-cpp --characters     # v0.10.0: the character entry
+VENICE_API_KEY=... venice-cpp --character SLUG # v0.14.0: direct character fetch
 VENICE_API_KEY=... venice-cpp --usage [model]  # v0.12.0: usage + cost + envelope
 ```
 

@@ -19,13 +19,14 @@ AGENTS.md (which holds standing conventions, not state).
 - `characters()` list with typed per-character metadata and a `CharacterQuery`
   carrying the endpoint's filters and its pagination (VC-04). Verified live on
   2026-08-09: every modeled key present, no unmodeled key, default page 50.
+- `character(slug)` direct fetch with segment-safe path encoding (VC-16).
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   payment_required/rate_limited/invalid_arg/cancelled, each carrying status +
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 4/49 operations implemented. The other 45 are assigned to
+- OpenAPI coverage: 5/49 operations implemented. The other 44 are assigned to
   family issues and checked in `cmake/openapi_manifest.json` (VC-35).
 
 **Build system synced with cpp-template, tagged v0.1.0 — the first release.**
@@ -67,6 +68,21 @@ a single-family run.
    speculatively.
 4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-16 (#26) is done** — see v0.14.0. `Client::character(slug)` fetches one
+known character without paging the catalogue. The response reuses `Character`:
+its top level must be an object, its preview fields remain tolerant, and `raw`
+retains the complete server object. The requested slug is never synthesized
+into a response that omitted it.
+
+An empty slug is structural invalidity and returns `InvalidArg` before auth or
+transport. Every non-empty slug is encoded as one RFC 3986 path segment, so a
+slash, query delimiter, fragment delimiter, percent sign, high byte or embedded
+NUL cannot select another route. The loopback fixture pins that exact target and
+also proves Bearer/per-call auth, 404 body and metadata retention, and malformed
+success-body classification. `--character <slug>` is the live check and prints
+the verbatim object beside the typed fields; it was not run for this release
+because the implementing environment had no `VENICE_API_KEY`.
 
 **VC-23 (#38) and VC-15 (#25) are done** — see v0.13.0. Authentication is now
 transport state with four explicit modes: Public, Bearer, pre-signed SIWX and a
@@ -850,8 +866,8 @@ Six things are worth knowing, four of them measured rather than reasoned:
   `test/08characters/` pins it. `Model::from_json` has the same shape for `id`
   and was left alone: fixing it belongs to a change that can test it.
 
-Three things were left out on purpose. `GET /characters/{slug}` is the same
-struct behind a different path and is filed as VC-16 (#26). The
+Three things were left out on purpose. `GET /characters/{slug}` was the same
+struct behind a different path and is now implemented by VC-16 (#26). The
 README's FetchContent `GIT_TAG` was bumped by hand again, which is the drive-by
 VC-12 (#17) exists to abolish. The 402 ambiguity described by this historical
 entry is resolved in v0.13.0: it is `PaymentRequired`, while 401/403 remain

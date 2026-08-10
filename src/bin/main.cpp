@@ -230,6 +230,42 @@ auto list_characters(const venice::Client& client, std::string_view search) -> i
   return EXIT_SUCCESS;
 }
 
+// `--character <slug>`: the direct-fetch counterpart to --characters (VC-16,
+// #26). Print the whole object because this is a preview API and a typed blank
+// cannot distinguish server absence from a parser looking in the wrong place.
+// The typed-vs-raw slug comparison makes the leg a check rather than a viewer.
+auto show_character(const venice::Client& client, std::string_view slug) -> int {
+  if (slug.empty()) {
+    std::cerr << "--character requires a slug\n";
+    return EXIT_FAILURE;
+  }
+
+  const auto res = client.character(slug);
+  if (!res) {
+    std::cerr << "character failed [" << venice::to_string(res.error().kind) << "] "
+              << res.error().message << '\n';
+    if (!res.error().body.empty()) std::cerr << res.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+
+  std::cout << "character, verbatim: " << res->raw.dump() << '\n';
+  std::cout << "typed slug         : " << (res->slug.empty() ? "(absent)" : res->slug) << '\n';
+  std::cout << "typed model        : "
+            << (res->model_id ? *res->model_id : "(absent)") << '\n';
+  std::cout << "typed name         : " << (res->name ? *res->name : "(absent)") << '\n';
+
+  const auto raw_slug = res->raw.find("slug");
+  if (raw_slug != res->raw.end() && !raw_slug->is_string()) {
+    std::cerr << "RAW SLUG IS NOT A STRING -- the wire shape moved\n";
+    return EXIT_FAILURE;
+  }
+  if (raw_slug != res->raw.end() && raw_slug->get<std::string>() != res->slug) {
+    std::cerr << "RAW AND TYPED SLUG DISAGREE -- Character::from_json moved\n";
+    return EXIT_FAILURE;
+  }
+  return EXIT_SUCCESS;
+}
+
 // The live check VC-05 could not run offline, and the reason the PR says
 // "documented, not measured".
 //
@@ -812,6 +848,8 @@ auto main(int argc, char** argv) -> int {
     return list_models(client, argc > 2 ? argv[2] : "");
   if (argc > 1 && std::string_view{argv[1]} == "--characters")
     return list_characters(client, argc > 2 ? argv[2] : "");
+  if (argc > 1 && std::string_view{argv[1]} == "--character")
+    return show_character(client, argc > 2 ? argv[2] : "");
   if (argc > 1 && std::string_view{argv[1]} == "--stream")
     return stream_report(client, argc > 2 ? argv[2]
                                           : "Think step by step: what is 17 * 23?");
