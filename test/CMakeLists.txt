@@ -9,6 +9,14 @@ add_test(
   COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/cmake/version_selftest.cmake
 )
 
+# Checked OpenAPI operation inventory: pure CMake structural validation, with no
+# parser, network, or compiler dependency. The maintainer-only YAML comparison
+# tool is deliberately outside the normal build and test dependency graph.
+add_test(
+  NAME openapi-manifest-selftest
+  COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/cmake/openapi_manifest_selftest.cmake
+)
+
 # Leftover-artifact and wiring-drift check (cmake/check_artifacts.cmake), also
 # standalone. venice-cpp is a fork, never the template, so this always runs in
 # enforce mode: every rule must report zero hits. Upstream keys the mode on

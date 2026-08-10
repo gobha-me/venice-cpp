@@ -1,6 +1,7 @@
 # Build directories, root only — narrowed so files like docs/building.md,
 # src/rebuild.cpp, buildinfo.hpp aren't silently excluded.
 /build*/
+/tools/__pycache__/
 # CTest's output dir at repo root (the in-build-tree Testing/ is covered by /build*/).
 /Testing/
 # Generated at build time from include/version.hpp.in.cmake — never commit.

@@ -1,0 +1,1724 @@
+{
+  "schema_version": 1,
+  "source": {
+    "url": "https://api.venice.ai/doc/api/swagger.yaml",
+    "repository_url": "https://github.com/veniceai/api-docs/blob/3e9f4dde61cbe2454afd05841a963463f6e14446/swagger.yaml",
+    "version": "20260806.142021",
+    "sha256": "afb975c4aa80b85c7f0866f3abd6c184ac98a07e8471ffe18e6a1875efb93ee2",
+    "audited_on": "2026-08-10"
+  },
+  "operations": [
+    {
+      "method": "DELETE",
+      "path": "/api_keys",
+      "family": "api-keys",
+      "state": "planned",
+      "tracking_issue": 45,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api_keys",
+      "family": "api-keys",
+      "state": "planned",
+      "tracking_issue": 45,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "PATCH",
+      "path": "/api_keys",
+      "family": "api-keys",
+      "state": "planned",
+      "tracking_issue": 45,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api_keys",
+      "family": "api-keys",
+      "state": "planned",
+      "tracking_issue": 45,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api_keys/generate_web3_key",
+      "family": "api-keys",
+      "state": "planned",
+      "tracking_issue": 45,
+      "security": [
+        []
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api_keys/generate_web3_key",
+      "family": "api-keys",
+      "state": "planned",
+      "tracking_issue": 45,
+      "security": [
+        []
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api_keys/rate_limits",
+      "family": "api-keys",
+      "state": "implemented",
+      "tracking_issue": 45,
+      "public_api": [
+        "Client::balance"
+      ],
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api_keys/rate_limits/log",
+      "family": "api-keys",
+      "state": "planned",
+      "tracking_issue": 45,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api_keys/{id}",
+      "family": "api-keys",
+      "state": "planned",
+      "tracking_issue": 45,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/audio/complete",
+      "family": "audio",
+      "state": "planned",
+      "tracking_issue": 43,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/audio/queue",
+      "family": "audio",
+      "state": "planned",
+      "tracking_issue": 43,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "422": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/audio/quote",
+      "family": "audio",
+      "state": "planned",
+      "tracking_issue": 43,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/audio/retrieve",
+      "family": "audio",
+      "state": "planned",
+      "tracking_issue": 43,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json",
+          "audio/flac",
+          "audio/mpeg",
+          "audio/wav"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "404": [
+          "application/json"
+        ],
+        "422": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/audio/speech",
+      "family": "audio",
+      "state": "planned",
+      "tracking_issue": 43,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "audio/aac",
+          "audio/flac",
+          "audio/mpeg",
+          "audio/opus",
+          "audio/pcm",
+          "audio/wav"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "403": [
+          "application/json"
+        ],
+        "415": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/audio/transcriptions",
+      "family": "audio",
+      "state": "planned",
+      "tracking_issue": 43,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "multipart/form-data"
+      ],
+      "response_media": {
+        "200": [
+          "application/json",
+          "text/plain"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "403": [
+          "application/json"
+        ],
+        "413": [
+          "application/json"
+        ],
+        "415": [
+          "application/json"
+        ],
+        "422": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/audio/voices",
+      "family": "audio",
+      "state": "planned",
+      "tracking_issue": 43,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "multipart/form-data"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "403": [
+          "application/json"
+        ],
+        "413": [
+          "application/json"
+        ],
+        "415": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/augment/scrape",
+      "family": "augment",
+      "state": "planned",
+      "tracking_issue": 47,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "403": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/augment/search",
+      "family": "augment",
+      "state": "planned",
+      "tracking_issue": 47,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "403": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/augment/text-parser",
+      "family": "augment",
+      "state": "planned",
+      "tracking_issue": 47,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "multipart/form-data"
+      ],
+      "response_media": {
+        "200": [
+          "application/json",
+          "text/plain"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "403": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/billing/balance",
+      "family": "billing",
+      "state": "planned",
+      "tracking_issue": 46,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/billing/usage",
+      "family": "billing",
+      "state": "planned",
+      "tracking_issue": 46,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json",
+          "text/csv"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "410": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/billing/usage-analytics",
+      "family": "billing",
+      "state": "planned",
+      "tracking_issue": 46,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "504": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/billing/usage-history",
+      "family": "billing",
+      "state": "planned",
+      "tracking_issue": 46,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json",
+          "text/csv"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/characters",
+      "family": "characters",
+      "state": "implemented",
+      "tracking_issue": 42,
+      "public_api": [
+        "Client::characters"
+      ],
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/characters/{slug}",
+      "family": "characters",
+      "state": "planned",
+      "tracking_issue": 42,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "404": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/characters/{slug}/reviews",
+      "family": "characters",
+      "state": "planned",
+      "tracking_issue": 42,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "404": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/chat/completions",
+      "family": "chat",
+      "state": "implemented",
+      "tracking_issue": 39,
+      "public_api": [
+        "Client::chat",
+        "Client::chat_stream"
+      ],
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "415": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ],
+        "504": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/crypto/rpc/networks",
+      "family": "crypto-rpc",
+      "state": "planned",
+      "tracking_issue": 48,
+      "security": [
+        []
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/crypto/rpc/{network}",
+      "family": "crypto-rpc",
+      "state": "planned",
+      "tracking_issue": 48,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/embeddings",
+      "family": "embeddings",
+      "state": "planned",
+      "tracking_issue": 41,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "415": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/image/background-remove",
+      "family": "images",
+      "state": "planned",
+      "tracking_issue": 10,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "response_media": {
+        "200": [
+          "image/png"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "415": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/image/edit",
+      "family": "images",
+      "state": "planned",
+      "tracking_issue": 10,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "response_media": {
+        "200": [
+          "image/jpeg",
+          "image/png",
+          "image/webp"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "415": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/image/generate",
+      "family": "images",
+      "state": "planned",
+      "tracking_issue": 10,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json",
+          "image/jpeg",
+          "image/png",
+          "image/webp"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "415": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/image/multi-edit",
+      "family": "images",
+      "state": "planned",
+      "tracking_issue": 10,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "response_media": {
+        "200": [
+          "image/jpeg",
+          "image/png",
+          "image/webp"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "415": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/image/styles",
+      "family": "images",
+      "state": "planned",
+      "tracking_issue": 10,
+      "security": [
+        [],
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/image/upscale",
+      "family": "images",
+      "state": "planned",
+      "tracking_issue": 10,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "response_media": {
+        "200": [
+          "image/png"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "415": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/images/generations",
+      "family": "images",
+      "state": "planned",
+      "tracking_issue": 10,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "415": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/models",
+      "family": "models",
+      "state": "implemented",
+      "tracking_issue": 40,
+      "public_api": [
+        "Client::models"
+      ],
+      "security": [
+        [],
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/models/compatibility_mapping",
+      "family": "models",
+      "state": "planned",
+      "tracking_issue": 40,
+      "security": [
+        [],
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/models/traits",
+      "family": "models",
+      "state": "planned",
+      "tracking_issue": 40,
+      "security": [
+        [],
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/responses",
+      "family": "responses",
+      "state": "planned",
+      "tracking_issue": 39,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/video/complete",
+      "family": "video",
+      "state": "planned",
+      "tracking_issue": 44,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/video/queue",
+      "family": "video",
+      "state": "planned",
+      "tracking_issue": 44,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "403": [
+          "application/json"
+        ],
+        "409": [
+          "application/json"
+        ],
+        "413": [
+          "application/json"
+        ],
+        "422": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/video/quote",
+      "family": "video",
+      "state": "planned",
+      "tracking_issue": 44,
+      "security": [
+        [
+          "BearerAuth"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "403": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/video/retrieve",
+      "family": "video",
+      "state": "planned",
+      "tracking_issue": 44,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json",
+          "video/mp4"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "403": [
+          "application/json"
+        ],
+        "404": [
+          "application/json"
+        ],
+        "422": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ],
+        "503": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/video/transcriptions",
+      "family": "video",
+      "state": "planned",
+      "tracking_issue": 44,
+      "security": [
+        [
+          "BearerAuth"
+        ],
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json",
+          "text/plain"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "403": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/x402/balance/{walletAddress}",
+      "family": "x402",
+      "state": "planned",
+      "tracking_issue": 49,
+      "security": [
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "403": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/x402/top-up",
+      "family": "x402",
+      "state": "planned",
+      "tracking_issue": 49,
+      "security": [
+        []
+      ],
+      "request_media": [
+        "application/json"
+      ],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "402": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/x402/transactions/{walletAddress}",
+      "family": "x402",
+      "state": "planned",
+      "tracking_issue": 49,
+      "security": [
+        [
+          "siwx"
+        ]
+      ],
+      "request_media": [],
+      "response_media": {
+        "200": [
+          "application/json"
+        ],
+        "400": [
+          "application/json"
+        ],
+        "401": [
+          "application/json"
+        ],
+        "403": [
+          "application/json"
+        ],
+        "429": [
+          "application/json"
+        ],
+        "500": [
+          "application/json"
+        ]
+      }
+    }
+  ]
+}

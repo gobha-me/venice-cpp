@@ -132,13 +132,15 @@ jobs:
           # real is part of what this job tests.
         run: ./example/consumer/verify.sh
 
-  # Fast, dependency-free guard: the git-describe version parser self-test on its
-  # own (no compiler, no network). It also runs inside every build job above via
-  # ctest; this job gives quick, isolated feedback.
-  version-selftest:
-    name: version parser self-test
+  # Fast, dependency-free guards for checked repository metadata (no compiler,
+  # parser, or network). They also run inside every build job above via ctest;
+  # this job gives quick, isolated feedback.
+  metadata-selftests:
+    name: metadata self-tests
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Run version_selftest.cmake
         run: cmake -P cmake/version_selftest.cmake
+      - name: Run openapi_manifest_selftest.cmake
+        run: cmake -P cmake/openapi_manifest_selftest.cmake
