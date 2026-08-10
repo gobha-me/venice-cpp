@@ -23,6 +23,8 @@ AGENTS.md (which holds standing conventions, not state).
   rate_limited/invalid_arg, each carrying status + raw body.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
+- OpenAPI coverage: 4/49 operations implemented. The other 45 are assigned to
+  family issues and checked in `cmake/openapi_manifest.json` (VC-35).
 
 **Build system synced with cpp-template, tagged v0.1.0 — the first release.**
 The repo was scaffolded before upstream's fix rounds landed, so it was running a
@@ -32,7 +34,7 @@ version parsing with a self-test, working sanitizer toolchains (ASan/TSan were
 silent no-ops — `find_library` sets `ASAN`, never `ASAN_FOUND`) plus UBSan and a
 smoke test proving engagement, the leftover-artifact/wiring-drift check, test
 discovery fixes, `.clangd` off its C++20 pin, narrowed `.gitignore`, and CI
-enforcing the dual-compiler rule across nine jobs.
+enforcing the dual-compiler rule across eleven jobs.
 
 Two defects were found *in* the ported artifact checker and fixed here: rule B3's
 unanchored token regex gave a false pass on suffix-appended renames, and rule B2
@@ -49,20 +51,41 @@ in full: a leg that auto-picks one model settles nothing about a shape that
 varies by model family, and two tickets have now been filed on the strength of
 a single-family run.
 
-1. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
+1. **VC-22 (#37) and VC-23 (#38): transport/auth foundations for the OpenAPI
+   program.** VC-35 made the 49-operation inventory durable; these two shared
+   substrates are the next dependency before endpoint-family work.
+2. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
    Both foundations are proven, and now measured rather than assumed.
-2. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
+3. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
    m.raw` is overwritten for `tool_calls` because that key is modeled, and
    `ToolCall` has `raw` but no `extra`, so an unmodeled tool-call key is
    unrecoverable. VC-18 was exactly that failure. The limit is pinned by a §0
    case in `test/07stream/` whose deliberate inversion is the ticket's
    acceptance criterion. The hard half is streaming: a merge rule for arbitrary
    unmodeled keys across fragments has no wire evidence to choose it yet.
-3. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
+4. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
    embeddings, retries/backoff, async). Driven by real use, not
    speculatively.
-4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
+5. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-35 (#50) is done** — see v0.12.1. Full API coverage is now an inventory
+rather than a hand count: 49 method/path pairs, four implemented and 45 planned,
+each assigned to its family issue. The manifest also snapshots effective
+security alternatives and request/response media types, so a new operation is
+not the only kind of drift the audit can name.
+
+The ticket's own baseline was already stale when implementation began. It
+recorded OpenAPI version `20260520.112759`, SHA-256 `e29a…`, and 48 operations.
+The official document on 2026-08-10 was version `20260806.142021`, SHA-256
+`afb975c4…`, and 49 operations: `GET /billing/usage-history` had joined the
+Billing family. That is the audit's first real failure case, not a constructed
+fixture. The source and its exact digest now live beside the rows they justify.
+
+Normal builds remain dependency-free beyond the library's existing CMake/C++
+requirements. Structural checks are pure CMake and run in ctest; the supplied-
+file audit is explicitly maintainer-only, uses a pinned YAML 1.2 parser so
+`16:9` stays a string, and never downloads a specification itself.
 
 **VC-20 (#34) is done** — see v0.12.0. Venice reports what it charged, on both
 paths, and the library now types it: `ChatResponse::cost`, a `std::optional<Price>`

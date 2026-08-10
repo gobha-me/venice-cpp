@@ -53,6 +53,33 @@ right bridge.
 Later phases (fed by real use): image/audio/video, TTS, embeddings,
 retries/backoff, async.
 
+## OpenAPI coverage
+
+OpenAPI coverage: 4/49 operations implemented.
+
+The checked inventory is [`cmake/openapi_manifest.json`](cmake/openapi_manifest.json),
+keyed by HTTP method + path rather than `operationId` (the published
+`GET /image/styles` operation has none). It records which family issue owns
+every planned operation and snapshots the effective authentication and request/
+response media contracts. The dependency-free CMake self-test checks the
+manifest's structure and this coverage line during every normal test run.
+
+To compare it with a newly downloaded Venice specification, use the
+maintainer-only audit tool. Its YAML parser lives in an isolated environment and
+is not a library, build, test, or consumer dependency:
+
+```bash
+python3 -m venv build-openapi-audit
+build-openapi-audit/bin/pip install -r tools/openapi_audit_requirements.txt
+curl -fsSL https://api.venice.ai/doc/api/swagger.yaml -o /tmp/venice-openapi.yaml
+build-openapi-audit/bin/python tools/openapi_audit.py /tmp/venice-openapi.yaml
+```
+
+The tool itself performs no network access. It returns 0 only when the supplied
+document's version, SHA-256, operations, effective security alternatives, and
+request/response media types match the audited manifest; drift returns 1 and an
+invalid or unsupported input returns 2.
+
 ## Dependencies
 
 Header-only library; consumers link the CMake target and get everything
@@ -563,7 +590,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.12.0)
+  GIT_TAG        v0.12.1)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
