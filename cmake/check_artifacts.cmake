@@ -29,6 +29,8 @@
 
 cmake_minimum_required(VERSION 3.28)
 
+include(${CMAKE_CURRENT_LIST_DIR}/readme_tag_check.cmake)
+
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
 if(NOT DEFINED MODE)
@@ -459,6 +461,44 @@ if(GIT_FOUND)
   endif()
 endif()
 report_b("B5" "shell scripts keep their exec bit" _b5 _r)
+
+# README's FetchContent block is release wiring: a stale pin gives the caller
+# older code than the documentation around it. Release PRs intentionally name
+# the next tag before it exists, so the pin may be newer than the repository's
+# highest reachable release tag, but it must never be older. In a shallow clone
+# or source tarball there may be no tags to compare; syntax and uniqueness still
+# remain enforceable there.
+set(_latest_release_tag "")
+if(GIT_FOUND)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} tag --merged HEAD --list
+    WORKING_DIRECTORY ${REPO_ROOT}
+    OUTPUT_VARIABLE _release_tags
+    RESULT_VARIABLE _release_tags_rc
+    ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  if(_release_tags_rc EQUAL 0 AND NOT _release_tags STREQUAL "")
+    string(REPLACE "\n" ";" _release_tags "${_release_tags}")
+    foreach(_tag IN LISTS _release_tags)
+      if(NOT "${_tag}" MATCHES "^[rv]?[0-9]+\\.[0-9]+\\.[0-9]+$")
+        continue()
+      endif()
+      release_tag_is_newer("${_tag}" "${_latest_release_tag}" _tag_is_newer)
+      if(_tag_is_newer)
+        set(_latest_release_tag "${_tag}")
+      endif()
+    endforeach()
+  endif()
+endif()
+
+check_readme_fetchcontent_tag(
+  "${REPO_ROOT}/README.md" "${_latest_release_tag}"
+  _b6 _r _readme_release_tag _b6_comparison_skipped)
+if(_b6_comparison_skipped AND NOT QUIET)
+  message(STATUS "skip : B6 tag-age comparison — no reachable release tags; README shape is still checked")
+endif()
+report_b("B6" "README FetchContent tag is not older than the latest release" _b6 _r)
 
 # ── Verdict ─────────────────────────────────────────────────────────────────
 if(_fail_count GREATER 0)
