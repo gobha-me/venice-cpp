@@ -142,5 +142,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run version_selftest.cmake
         run: cmake -P cmake/version_selftest.cmake
+      - name: Run readme_tag_selftest.cmake
+        run: cmake -P cmake/readme_tag_selftest.cmake
       - name: Run openapi_manifest_selftest.cmake
         run: cmake -P cmake/openapi_manifest_selftest.cmake
+      # actions/checkout is shallow here. This deliberately proves artifact
+      # rule B6 skips only its tag-age comparison when no tags are present.
+      - name: Run check_artifacts.cmake without fetched tags
+        run: cmake -P cmake/check_artifacts.cmake

@@ -69,6 +69,16 @@ a single-family run.
 4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
 
+**VC-12 (#17) is done** — see v0.14.1. Artifact rule B6 parses README's
+`FetchContent_Declare(venice-cpp ...)` block and rejects a missing, ambiguous,
+malformed, or stale `GIT_TAG`. A release PR may name a tag newer than the latest
+existing tag because the tag is created only after merge; once released the two
+are equal. Shallow clones and source tarballs still validate the README shape
+but skip the age comparison when no release tag is reachable. The pure CMake
+failure matrix covers stale patch/minor pins, malformed and describe-style
+values, missing/duplicate declarations, the no-tag path, a future patch, and an
+equal release.
+
 **VC-16 (#26) is done** — see v0.14.0. `Client::character(slug)` fetches one
 known character without paging the catalogue. The response reuses `Character`:
 its top level must be an object, its preview fields remain tolerant, and `raw`

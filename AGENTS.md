@@ -37,7 +37,8 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   and naming a dep with no recipe is a hard configure error. Adding a dep means
   editing both. This repo previously glob-included everything in that directory
   and pulled two libraries nothing linked (VC-01, #2); `artifact-check` rule B2
-  now fails the build if that recurs.
+  now fails the build if that recurs. Rule B6 likewise keeps README's
+  `FetchContent` release pin from falling behind the newest reachable tag.
 - cpp-httplib API notes (v0.18.x): `Request` has `body` + `set_header()` for
   content type (no `set_content`, no `content_type_`); `send(req,res,err)`
   returns `bool`. These bit once — check the vendored header before assuming.
@@ -473,7 +474,9 @@ and PRs note what was actually run to verify.
   template artifacts; Class B catches wiring drift that stays relevant for the
   life of the project: every listed dep has a recipe (B1), no dep is fetched but
   unused (B2), the UBSan define matches on both sides (B3), target-guarded test
-  dirs exist (B4), fixture scripts keep mode 100755 (B5). Run it directly with
-  `cmake -P`. If a rule fires on something legitimate, fix the citation rather
-  than loosening the rule — a rule that matches nothing passes everything.
+  dirs exist (B4), fixture scripts keep mode 100755 (B5), and README's
+  `FetchContent` tag is not older than the newest reachable release (B6). Run it
+  directly with `cmake -P`. If a rule fires on something legitimate, fix the
+  citation rather than loosening the rule — a rule that matches nothing passes
+  everything.
 - Build dirs (`build*/`) are gitignored — don't commit them.

@@ -9,6 +9,12 @@ add_test(
   COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/cmake/version_selftest.cmake
 )
 
+# Pure CMake failure matrix for README's FetchContent release pin (VC-12).
+add_test(
+  NAME readme-tag-selftest
+  COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/cmake/readme_tag_selftest.cmake
+)
+
 # Checked OpenAPI operation inventory: pure CMake structural validation, with no
 # parser, network, or compiler dependency. The maintainer-only YAML comparison
 # tool is deliberately outside the normal build and test dependency graph.
