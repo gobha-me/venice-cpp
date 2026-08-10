@@ -62,6 +62,7 @@ using venice::ChatRequest;
 using venice::Client;
 using venice::ErrorKind;
 using venice::Message;
+using venice::Authentication;
 
 using namespace std::chrono_literals;
 
@@ -115,6 +116,9 @@ class TestServer {
       body["target"] = req.target;
       body["content_type"] = req.get_header_value("Content-Type");
       body["x_test"] = req.get_header_value("X-Test-Request");
+      body["authorization"] = req.get_header_value("Authorization");
+      body["siwx"] = req.get_header_value("SIGN-IN-WITH-X");
+      body["payment"] = req.get_header_value("PAYMENT-SIGNATURE");
       body["body"] = req.body;
       res.set_header("X-Test-Response", "retained");
       res.set_content(body.dump(), "application/json; charset=utf-8");
@@ -158,8 +162,12 @@ class TestServer {
       res.set_content(bytes.data(), bytes.size(), "Application/Octet-Stream; version=1");
     });
     m_svr.Get("/api/v1/transport/missing-type",
-              [](const httplib::Request&, httplib::Response& res) { res.body = R"({"ok":true})"; });
+              [](const httplib::Request&, httplib::Response& res) {
+                res.set_header("X-Protocol-Trace", "parse-metadata");
+                res.body = R"({"ok":true})";
+              });
     m_svr.Get("/api/v1/transport/wrong-type", [](const httplib::Request&, httplib::Response& res) {
+      res.set_header("X-Protocol-Trace", "parse-metadata");
       res.set_content(R"({"ok":true})", "text/plain");
     });
     m_svr.Get("/api/v1/transport/vendor-json", [](const httplib::Request&, httplib::Response& res) {
@@ -167,10 +175,12 @@ class TestServer {
     });
     m_svr.Get("/api/v1/transport/malformed-json",
               [](const httplib::Request&, httplib::Response& res) {
+                res.set_header("X-Protocol-Trace", "parse-metadata");
                 res.set_content("{", "application/json");
               });
     m_svr.Get("/api/v1/transport/http-error", [](const httplib::Request&, httplib::Response& res) {
       res.status = 418;
+      res.set_header("X-Protocol-Trace", "http-metadata");
       res.set_content("not JSON and that does not matter", "text/plain");
     });
 
@@ -183,19 +193,33 @@ class TestServer {
 
     m_svr.Get("/api/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
       ++m_models_hits;
-      if (req.get_header_value("Authorization") != "Bearer not-a-real-key") {
-        res.status = 401;
-        res.set_content(R"({"error":"missing test bearer"})", "application/json");
-        return;
-      }
-      res.set_content(R"({"data":[{"id":"test-model","type":"text"}]})", "application/json");
+      const nlohmann::json model{{"id", "test-model"},
+                                 {"type", "text"},
+                                 {"authorization", req.get_header_value("Authorization")},
+                                 {"siwx", req.get_header_value("SIGN-IN-WITH-X")},
+                                 {"payment", req.get_header_value("PAYMENT-SIGNATURE")}};
+      res.set_content(nlohmann::json{{"data", nlohmann::json::array({model})}}.dump(),
+                      "application/json");
     });
 
     m_svr.Post("/api/v1/chat/completions",
                [this](const httplib::Request& req, httplib::Response& res) {
-                 if (req.get_header_value("Authorization") != "Bearer not-a-real-key") {
+                 ++m_chat_hits;
+                 const auto bearer = req.get_header_value("Authorization");
+                 const auto siwx = req.get_header_value("SIGN-IN-WITH-X");
+                 if (bearer.empty() && siwx.empty()) {
                    res.status = 401;
-                   res.set_content(R"({"error":"missing test bearer"})", "application/json");
+                   res.set_content(R"({"error":"missing test authentication"})",
+                                   "application/json");
+                   return;
+                 }
+                 if (siwx == "needs-payment") {
+                   res.status = 402;
+                   res.set_header("payment-required", "base64-payment-requirements");
+                   res.set_header("X-Protocol-Trace", "retained-on-error");
+                   res.set_content(
+                       R"({"code":"PAYMENT_REQUIRED","message":"top up this wallet"})",
+                       "application/json");
                    return;
                  }
                  if (req.get_header_value("Content-Type") != "application/json") {
@@ -204,10 +228,17 @@ class TestServer {
                    return;
                  }
                  const auto body = nlohmann::json::parse(req.body);
+                 res.set_header("x-balance-remaining", "4.230000");
+                 res.set_header("X-Protocol-Trace", "retained-on-success");
                  if (!body.at("stream").get<bool>()) {
-                   res.set_content(
-                       R"({"id":"buffered-chat","choices":[{"message":{"role":"assistant","content":"ok"}}]})",
-                       "application/json");
+                   const nlohmann::json response{
+                       {"id", "buffered-chat"},
+                       {"seen_authorization", bearer},
+                       {"seen_siwx", siwx},
+                       {"choices", nlohmann::json::array({{{"message",
+                                                            {{"role", "assistant"},
+                                                             {"content", "ok"}}}}})}};
+                   res.set_content(response.dump(), "application/json");
                    return;
                  }
                  // Per-request, not per-server: two tests drive this endpoint,
@@ -215,14 +246,20 @@ class TestServer {
                  // mid-stream. The shared_ptr is what gives the provider — which
                  // outlives this lambda — somewhere to keep it.
                  auto sent = std::make_shared<int>(0);
+                 const bool complete_without_stall = siwx == "complete-stream";
                  res.set_chunked_content_provider(
                      "text/event-stream",
-                     [this, sent](size_t /*offset*/, httplib::DataSink& sink) {
+                     [this, sent, complete_without_stall](size_t /*offset*/,
+                                                          httplib::DataSink& sink) {
                        if (*sent < kFrames) {
                          const std::string frame = std::string{"data: {\"choices\":[{\"delta\":"} +
                                                    "{\"content\":\"" + kDelta[*sent] + "\"}}]}\n\n";
                          ++*sent;
                          return sink.write(frame.data(), frame.size());
+                       }
+                       if (complete_without_stall) {
+                         sink.done();
+                         return true;
                        }
                        m_gate.wait(kStallCap);
                        sink.done();
@@ -252,6 +289,7 @@ class TestServer {
 
   [[nodiscard]] auto stall_hits() const -> int { return m_stall_hits.load(); }
   [[nodiscard]] auto models_hits() const -> int { return m_models_hits.load(); }
+  [[nodiscard]] auto chat_hits() const -> int { return m_chat_hits.load(); }
   [[nodiscard]] auto multipart_stall_hits() const -> int { return m_multipart_stall_hits.load(); }
 
   static constexpr int kFrames = 2;
@@ -266,6 +304,7 @@ class TestServer {
   int m_port = 0;
   std::atomic<int> m_stall_hits{0};
   std::atomic<int> m_models_hits{0};
+  std::atomic<int> m_chat_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
 };
 
@@ -289,6 +328,165 @@ auto timed(F&& fn) -> std::chrono::milliseconds {
 // magnitude below the 300s default it is standing in for.
 constexpr auto kPromptly = 5000ms;
 
+// ── authentication/payment foundation: failure matrix first (VC-23) ─────
+
+TEST_CASE("endpoint authentication policies reject impossible modes before the socket",
+          "[transport][auth][failure]") {
+  const TestServer server;
+  const Client public_client{Authentication::public_access(), server.base_url()};
+
+  const auto public_chat = public_client.chat(minimal_chat());
+  REQUIRE_FALSE(public_chat.has_value());
+  REQUIRE(public_chat.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(server.chat_hits() == 0);
+
+  const auto public_characters = public_client.characters();
+  REQUIRE_FALSE(public_characters.has_value());
+  REQUIRE(public_characters.error().kind == ErrorKind::InvalidArg);
+
+  const auto public_balance = public_client.balance();
+  REQUIRE_FALSE(public_balance.has_value());
+  REQUIRE(public_balance.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(server.stall_hits() == 0);
+
+  const Client siwx_client{Authentication::sign_in_with_x("signed-wallet"), server.base_url()};
+  const auto siwx_models = siwx_client.models();
+  REQUIRE_FALSE(siwx_models.has_value());
+  REQUIRE(siwx_models.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(server.models_hits() == 0);
+
+  const Client payment_client{Authentication::x402_payment("payment-payload"),
+                              server.base_url()};
+  const auto payment_chat = payment_client.chat(minimal_chat());
+  REQUIRE_FALSE(payment_chat.has_value());
+  REQUIRE(payment_chat.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(payment_chat.error().message.find("payment-payload") == std::string::npos);
+  REQUIRE(payment_chat.error().body.empty());
+  REQUIRE(payment_chat.error().metadata.headers.empty());
+  REQUIRE(server.chat_hits() == 0);
+
+  const Client empty_bearer{"", server.base_url()};
+  const auto empty_models = empty_bearer.models();
+  REQUIRE_FALSE(empty_models.has_value());
+  REQUIRE(empty_models.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(server.models_hits() == 0);
+}
+
+TEST_CASE("all four authentication modes traverse the buffered fixture independently",
+          "[transport][auth]") {
+  const TestServer server;
+  struct Case {
+    Authentication authentication;
+    std::string authorization;
+    std::string siwx;
+    std::string payment;
+  };
+  const std::vector<Case> cases{
+      {Authentication::public_access(), "", "", ""},
+      {Authentication::bearer("bearer-value"), "Bearer bearer-value", "", ""},
+      {Authentication::sign_in_with_x("siwx-value"), "", "siwx-value", ""},
+      {Authentication::x402_payment("payment-value"), "", "", "payment-value"},
+  };
+
+  for (const auto& test : cases) {
+    const auto headers = venice::detail::authentication_headers(test.authentication);
+    REQUIRE(headers.has_value());
+    const auto response = venice::detail::send_buffered(
+        server.base_url(),
+        {.method = venice::detail::HttpMethod::Get,
+         .endpoint = "/transport/echo",
+         .headers = *headers});
+    REQUIRE(response.has_value());
+    const auto body = venice::detail::decode_json(*response);
+    REQUIRE(body.has_value());
+    REQUIRE((*body)["authorization"] == test.authorization);
+    REQUIRE((*body)["siwx"] == test.siwx);
+    REQUIRE((*body)["payment"] == test.payment);
+  }
+}
+
+TEST_CASE("public and Bearer model calls honor per-call authentication overrides",
+          "[transport][auth]") {
+  const TestServer server;
+  const Client public_client{Authentication::public_access(), server.base_url()};
+
+  const auto public_models = public_client.models();
+  REQUIRE(public_models.has_value());
+  REQUIRE(public_models->front().raw["authorization"] == "");
+  REQUIRE(public_models->front().raw["siwx"] == "");
+  REQUIRE(public_models->front().raw["payment"] == "");
+
+  const auto bearer_override = public_client.models(
+      {}, {.authentication = Authentication::bearer("override-token")});
+  REQUIRE(bearer_override.has_value());
+  REQUIRE(bearer_override->front().raw["authorization"] == "Bearer override-token");
+
+  const Client bearer_client{"default-token", server.base_url()};
+  const auto public_override = bearer_client.models(
+      {}, {.authentication = Authentication::public_access()});
+  REQUIRE(public_override.has_value());
+  REQUIRE(public_override->front().raw["authorization"] == "");
+}
+
+TEST_CASE("SIWX buffered and streamed successes expose response metadata",
+          "[transport][auth][metadata]") {
+  const TestServer server;
+  const Client bearer_client{"default-token", server.base_url()};
+
+  const auto buffered = bearer_client.chat(
+      minimal_chat(), {.authentication = Authentication::sign_in_with_x("signed-wallet")});
+  REQUIRE(buffered.has_value());
+  REQUIRE(buffered->raw["seen_authorization"] == "");
+  REQUIRE(buffered->raw["seen_siwx"] == "signed-wallet");
+  REQUIRE(buffered->metadata.x_balance_remaining == "4.230000");
+  REQUIRE(buffered->metadata.header("x-protocol-trace") == "retained-on-success");
+
+  venice::StreamAccumulator completed_acc;
+  const auto completed = bearer_client.chat_stream(
+      minimal_chat(), completed_acc,
+      {.authentication = Authentication::sign_in_with_x("complete-stream")});
+  REQUIRE(completed.has_value());
+  REQUIRE(completed->content == "hello");
+  REQUIRE(completed->metadata.x_balance_remaining == "4.230000");
+  REQUIRE(completed->metadata.header("X-Protocol-Trace") == "retained-on-success");
+
+  venice::StreamAccumulator early_acc;
+  const auto early = bearer_client.chat_stream(
+      minimal_chat(), early_acc, [](const venice::StreamDelta&) { return false; },
+      {.authentication = Authentication::sign_in_with_x("signed-wallet")});
+  REQUIRE(early.has_value());
+  REQUIRE(early->content == "hel");
+  REQUIRE(early->metadata.x_balance_remaining == "4.230000");
+}
+
+TEST_CASE("402 is payment-required and preserves body and headers on both chat paths",
+          "[transport][auth][payment][failure]") {
+  const TestServer server;
+  const std::string secret = "needs-payment";
+  const Client client{Authentication::sign_in_with_x(secret), server.base_url()};
+
+  const auto assert_payment_error = [&](const venice::Error& error) {
+    REQUIRE(error.kind == ErrorKind::PaymentRequired);
+    REQUIRE(error.status == 402);
+    REQUIRE(error.message == "HTTP 402");
+    REQUIRE(error.body == R"({"code":"PAYMENT_REQUIRED","message":"top up this wallet"})");
+    REQUIRE(error.metadata.payment_required == "base64-payment-requirements");
+    REQUIRE(error.metadata.header("x-protocol-trace") == "retained-on-error");
+    REQUIRE(error.message.find(secret) == std::string::npos);
+    REQUIRE(error.body.find(secret) == std::string::npos);
+  };
+
+  const auto buffered = client.chat(minimal_chat());
+  REQUIRE_FALSE(buffered.has_value());
+  assert_payment_error(buffered.error());
+
+  venice::StreamAccumulator acc;
+  const auto streamed = client.chat_stream(minimal_chat(), acc);
+  REQUIRE_FALSE(streamed.has_value());
+  assert_payment_error(streamed.error());
+  REQUIRE(acc.empty());
+}
+
 // ── buffered substrate: failure matrix first (VC-22) ──────────────────────────
 
 TEST_CASE("buffered JSON decoding rejects missing and wrong success content types",
@@ -305,6 +503,7 @@ TEST_CASE("buffered JSON decoding rejects missing and wrong success content type
     REQUIRE(decoded.error().kind == ErrorKind::Parse);
     REQUIRE(decoded.error().status == 200);
     REQUIRE(decoded.error().body == R"({"ok":true})");
+    REQUIRE(decoded.error().metadata.header("x-protocol-trace") == "parse-metadata");
   }
 }
 
@@ -321,6 +520,7 @@ TEST_CASE("buffered JSON decoding rejects malformed JSON after accepting its med
   REQUIRE(decoded.error().kind == ErrorKind::Parse);
   REQUIRE(decoded.error().status == 200);
   REQUIRE(decoded.error().body == "{");
+  REQUIRE(decoded.error().metadata.header("x-protocol-trace") == "parse-metadata");
 }
 
 TEST_CASE("a non-success status wins over an unexpected content type",
@@ -336,6 +536,7 @@ TEST_CASE("a non-success status wins over an unexpected content type",
   REQUIRE(decoded.error().kind == ErrorKind::Http);
   REQUIRE(decoded.error().status == 418);
   REQUIRE(decoded.error().body == "not JSON and that does not matter");
+  REQUIRE(decoded.error().metadata.header("x-protocol-trace") == "http-metadata");
 }
 
 TEST_CASE("multipart is rejected on methods the audited contract never uses",

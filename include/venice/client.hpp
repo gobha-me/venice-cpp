@@ -20,7 +20,8 @@
 // Message; see venice/stream.hpp.
 //
 // Every one of them takes a trailing venice::RequestOptions (defaulted) for
-// per-call timeouts and cancellation — see venice/options.hpp (VC-06).
+// per-call timeouts, cancellation and authentication override — see
+// venice/options.hpp (VC-06/VC-23).
 //
 // Not in Phase 0 (later phases, fed by real use): image/audio/video, TTS,
 // embeddings, retries/backoff, async.
@@ -206,6 +207,58 @@ struct BufferedResponse {
   std::string body = {};
 };
 
+struct JsonResponse {
+  int status = 0;
+  nlohmann::json body = {};
+  std::string raw_body = {};
+  ResponseMetadata metadata = {};
+};
+
+enum class AuthPolicy { PublicOrBearer, BearerOnly, BearerOrSignInWithX };
+
+[[nodiscard]] inline auto authentication_headers(const Authentication& authentication)
+    -> std::expected<httplib::Headers, Error> {
+  const auto invalid = [](std::string_view name) {
+    return std::unexpected{
+        Error{ErrorKind::InvalidArg, 0, std::string{name} + " credential is empty", {}}};
+  };
+
+  switch (authentication.kind()) {
+    case AuthenticationKind::Public: return httplib::Headers{};
+    case AuthenticationKind::Bearer:
+      if (authentication.value().empty()) return invalid("Bearer");
+      return httplib::Headers{{"Authorization", "Bearer " + std::string{authentication.value()}}};
+    case AuthenticationKind::SignInWithX:
+      if (authentication.value().empty()) return invalid("Sign-In-With-X");
+      return httplib::Headers{{"SIGN-IN-WITH-X", std::string{authentication.value()}}};
+    case AuthenticationKind::X402Payment:
+      if (authentication.value().empty()) return invalid("x402 payment");
+      return httplib::Headers{{"PAYMENT-SIGNATURE", std::string{authentication.value()}}};
+  }
+  return std::unexpected{Error{ErrorKind::InvalidArg, 0, "unknown authentication mode", {}}};
+}
+
+[[nodiscard]] inline auto authentication_allowed(AuthenticationKind kind, AuthPolicy policy)
+    -> bool {
+  switch (policy) {
+    case AuthPolicy::PublicOrBearer:
+      return kind == AuthenticationKind::Public || kind == AuthenticationKind::Bearer;
+    case AuthPolicy::BearerOnly: return kind == AuthenticationKind::Bearer;
+    case AuthPolicy::BearerOrSignInWithX:
+      return kind == AuthenticationKind::Bearer || kind == AuthenticationKind::SignInWithX;
+  }
+  return false;
+}
+
+[[nodiscard]] inline auto auth_policy_name(AuthPolicy policy) -> std::string_view {
+  switch (policy) {
+    case AuthPolicy::PublicOrBearer: return "public or Bearer";
+    case AuthPolicy::BearerOnly: return "Bearer";
+    case AuthPolicy::BearerOrSignInWithX: return "Bearer or Sign-In-With-X";
+  }
+  return "supported";
+}
+
 [[nodiscard]] inline auto host_from_base_url(std::string_view base_url) -> std::string {
   const auto pos = base_url.find("/api/");
   return pos == std::string_view::npos ? std::string{base_url} : std::string{base_url.substr(0, pos)};
@@ -236,8 +289,10 @@ struct BufferedResponse {
   return Error{ErrorKind::Cancelled, 0, "cancelled by caller", {}};
 }
 
-[[nodiscard]] inline auto http_error(int status, const std::string& body) -> Error {
-  return Error{kind_for_status(status), status, "HTTP " + std::to_string(status), body};
+[[nodiscard]] inline auto http_error(int status, const std::string& body,
+                                     ResponseMetadata metadata = {}) -> Error {
+  return Error{kind_for_status(status), status, "HTTP " + std::to_string(status), body,
+               std::move(metadata)};
 }
 
 [[nodiscard]] inline auto normalize_media_type(std::string_view value) -> std::string {
@@ -260,6 +315,17 @@ struct BufferedResponse {
     content_type = normalize_media_type(it->second);
   return BufferedResponse{response.status, std::move(response.headers), std::move(content_type),
                           std::move(response.body)};
+}
+
+[[nodiscard]] inline auto metadata_from_headers(const httplib::Headers& headers)
+    -> ResponseMetadata {
+  ResponseMetadata metadata;
+  metadata.headers.reserve(headers.size());
+  for (const auto& [name, value] : headers) metadata.headers.emplace_back(name, value);
+  metadata.x_balance_remaining = metadata.header("X-Balance-Remaining");
+  metadata.payment_required = metadata.header("PAYMENT-REQUIRED");
+  metadata.payment_response = metadata.header("PAYMENT-RESPONSE");
+  return metadata;
 }
 
 [[nodiscard]] inline auto method_name(HttpMethod method) -> const char* {
@@ -335,7 +401,8 @@ struct BufferedResponse {
                                              std::span<const std::string_view> allowed)
     -> std::expected<void, Error> {
   if (response.status < 200 || response.status >= 300)
-    return std::unexpected{http_error(response.status, response.body)};
+    return std::unexpected{
+        http_error(response.status, response.body, metadata_from_headers(response.headers))};
 
   for (const auto candidate : allowed) {
     if (response.content_type == normalize_media_type(candidate)) return {};
@@ -343,35 +410,52 @@ struct BufferedResponse {
 
   const std::string actual = response.content_type.empty() ? "<missing>" : response.content_type;
   return std::unexpected{Error{ErrorKind::Parse, response.status,
-                               "unexpected response content type: " + actual, response.body}};
+                               "unexpected response content type: " + actual, response.body,
+                               metadata_from_headers(response.headers)}};
 }
 
 [[nodiscard]] inline auto decode_json(const BufferedResponse& response)
     -> std::expected<nlohmann::json, Error> {
   if (response.status < 200 || response.status >= 300)
-    return std::unexpected{http_error(response.status, response.body)};
+    return std::unexpected{
+        http_error(response.status, response.body, metadata_from_headers(response.headers))};
   if (!is_json_media_type(response.content_type)) {
     const std::string actual = response.content_type.empty() ? "<missing>" : response.content_type;
     return std::unexpected{Error{ErrorKind::Parse, response.status,
-                                 "expected JSON response, got " + actual, response.body}};
+                                 "expected JSON response, got " + actual, response.body,
+                                 metadata_from_headers(response.headers)}};
   }
   try {
     return nlohmann::json::parse(response.body);
   } catch (const std::exception& e) {
     return std::unexpected{Error{ErrorKind::Parse, response.status,
-                                 std::string{"json parse: "} + e.what(), response.body}};
+                                 std::string{"json parse: "} + e.what(), response.body,
+                                 metadata_from_headers(response.headers)}};
   }
+}
+
+[[nodiscard]] inline auto decode_json_response(const BufferedResponse& response)
+    -> std::expected<JsonResponse, Error> {
+  auto body = decode_json(response);
+  if (!body) return std::unexpected{std::move(body.error())};
+  return JsonResponse{response.status, std::move(*body), response.body,
+                      metadata_from_headers(response.headers)};
 }
 
 }  // namespace detail
 
 class Client {
  public:
-  // api_key: Venice API key (Bearer). base_url defaults to the public API;
-  // honor VENICE_BASE_URL-style overrides by passing an explicit value.
+  // The string constructor remains the source-compatible Bearer spelling.
+  // Public and wallet-authenticated clients use the explicit Authentication
+  // overload so an empty Bearer is never confused with no authentication.
   explicit Client(std::string api_key,
                   std::string base_url = "https://api.venice.ai/api/v1")
-      : m_api_key(std::move(api_key)), m_base_url(std::move(base_url)) {}
+      : Client(Authentication::bearer(std::move(api_key)), std::move(base_url)) {}
+
+  explicit Client(Authentication authentication,
+                  std::string base_url = "https://api.venice.ai/api/v1")
+      : m_authentication(std::move(authentication)), m_base_url(std::move(base_url)) {}
 
   // ── chat (non-streaming) ──────────────────────────────────────────────
   //
@@ -382,13 +466,18 @@ class Client {
       -> std::expected<ChatResponse, Error> {
     if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
 
-    auto res = post_json("/chat/completions", req.to_json_body(/*stream=*/false), opts);
+    auto res = post_json_response("/chat/completions", req.to_json_body(/*stream=*/false),
+                                  detail::AuthPolicy::BearerOrSignInWithX, opts);
     if (!res) return std::unexpected{std::move(res.error())};
 
     try {
-      return ChatResponse::from_json_body(*res);
+      auto response = ChatResponse::from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
     } catch (const std::exception& e) {
-      return std::unexpected{Error{ErrorKind::Parse, 0, std::string{"chat parse: "} + e.what(), res->dump()}};
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"chat parse: "} + e.what(), res->raw_body,
+                                   std::move(res->metadata)}};
     }
   }
 
@@ -449,11 +538,15 @@ class Client {
                                  const RequestOptions& opts = {}) const
       -> std::expected<ChatResponse, Error> {
     if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto headers = request_headers(detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!headers) return std::unexpected{std::move(headers.error())};
     acc.reset();
 
     const std::string payload = req.to_json_body(/*stream=*/true).dump();
 
     bool early_stop = false;  // on_delta said stop — NOT opts.cancel; see above
+    bool response_is_success = false;
+    std::string error_body;
     std::string parse_err;
     detail::SseFramer framer;
     std::vector<ToolCall> frags;  // backing store for the span in each delta
@@ -465,15 +558,18 @@ class Client {
     const detail::CancelGuard guard{opts.cancel, cli};
     if (guard.cancelled()) return std::unexpected{detail::cancel_error()};
 
-    httplib::Headers headers = auth_headers();
-    headers.emplace("Accept", "text/event-stream");
+    headers->emplace("Accept", "text/event-stream");
 
     httplib::Request hreq;
     hreq.method = "POST";
     hreq.path = detail::request_path(m_base_url, "/chat/completions");
-    hreq.headers = headers;
+    hreq.headers = *headers;
     hreq.body = payload;
     hreq.set_header("Content-Type", "application/json");
+    hreq.response_handler = [&](const httplib::Response& response) {
+      response_is_success = response.status >= 200 && response.status < 300;
+      return true;
+    };
 
     // One SSE payload -> one delta -> the accumulator, then the observer.
     // Ingest happens before the callback on purpose: a callback that stops the
@@ -494,6 +590,10 @@ class Client {
     };
 
     hreq.content_receiver = [&](const char* data, size_t len, size_t /*off*/, uint64_t /*total*/) {
+      if (!response_is_success) {
+        error_body.append(data, len);
+        return true;
+      }
       framer.feed(std::string_view{data, len}, on_payload);
       return !early_stop;  // false stops the transfer
     };
@@ -508,6 +608,13 @@ class Client {
     // both mean nobody wants more frames.
     if (sent && !early_stop && !guard.cancelled()) framer.finish(on_payload);
 
+    auto metadata = detail::metadata_from_headers(hres.headers);
+    const auto assembled_response = [&] {
+      auto response = acc.response();
+      response.metadata = metadata;
+      return response;
+    };
+
     // The token is tested first, ahead of both the transport error and the
     // early stop. It has to be: a cancel is delivered by shutting the socket
     // down, so it *arrives* as a transport failure and would otherwise be
@@ -519,15 +626,17 @@ class Client {
     if (guard.cancelled()) return std::unexpected{detail::cancel_error()};
     if (!sent && !early_stop)
       return std::unexpected{detail::transport_error(herr)};
-    if (early_stop) return acc.response();  // deliberate early stop
+    if (early_stop) return assembled_response();  // deliberate early stop
     if (hres.status < 200 || hres.status >= 300)
-      return std::unexpected{detail::http_error(hres.status, hres.body)};
+      return std::unexpected{
+          detail::http_error(hres.status, error_body, std::move(metadata))};
     // "nothing arrived at all", not "no content arrived". The old test was
     // assembled.content.empty(), which reported ErrorKind::Parse on a
     // reasoning-only stream that had in fact been received perfectly.
     if (!parse_err.empty() && acc.empty())
-      return std::unexpected{Error{ErrorKind::Parse, hres.status, "stream parse: " + parse_err, {}}};
-    return acc.response();
+      return std::unexpected{Error{ErrorKind::Parse, hres.status, "stream parse: " + parse_err,
+                                   {}, std::move(metadata)}};
+    return assembled_response();
   }
 
   // Accumulate with no observer, for a caller that only wants the storage.
@@ -567,12 +676,15 @@ class Client {
   // test/04models/ pins that with a captured image entry.
   [[nodiscard]] auto models(std::string_view type = {}, const RequestOptions& opts = {}) const
       -> std::expected<std::vector<Model>, Error> {
-    auto res = get_json(detail::with_query("/models", {{"type", type}}), opts);
+    auto res = get_json_response(detail::with_query("/models", {{"type", type}}),
+                                 detail::AuthPolicy::PublicOrBearer, opts);
     if (!res) return std::unexpected{std::move(res.error())};
     try {
-      return models_from_json_body(*res);
+      return models_from_json_body(res->body);
     } catch (const std::exception& e) {
-      return std::unexpected{Error{ErrorKind::Parse, 0, std::string{"models parse: "} + e.what(), res->dump()}};
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"models parse: "} + e.what(), res->raw_body,
+                                   std::move(res->metadata)}};
     }
   }
 
@@ -609,13 +721,9 @@ class Client {
   // failed page mid-walk — abandon, retry, or return what it has — and every
   // answer is wrong for someone. Retries are a later phase (AGENTS.md).
   //
-  // Unlike /models, this endpoint needs a real key: it answers 402 to an
-  // unauthenticated request and 401 to a junk bearer, both measured. Note the
-  // 402 — `kind_for_status` maps 401/403 to ErrorKind::Auth and everything else
-  // to ErrorKind::Http, so a *credential-less* call to this endpoint reports
-  // Http, not Auth. Widening that mapping is an error-model change affecting
-  // every endpoint and is filed separately rather than smuggled in here; until
-  // then, check `status` as well as `kind`.
+  // Unlike /models, this endpoint is Bearer-only. A Public, SIWX or x402
+  // payment selection is rejected before transport; 401/403 responses are
+  // Auth and a server-side 402 is PaymentRequired (VC-23, #38 / VC-15, #25).
   //
   // Venice documents this as a preview API that may change, which is why
   // Character::raw and CharacterPage::raw matter more here than elsewhere.
@@ -623,26 +731,30 @@ class Client {
                                 const RequestOptions& opts = {}) const
       -> std::expected<CharacterPage, Error> {
     const auto params = character_query_params(query);
-    auto res = get_json(detail::with_query("/characters", params), opts);
+    auto res = get_json_response(detail::with_query("/characters", params),
+                                 detail::AuthPolicy::BearerOnly, opts);
     if (!res) return std::unexpected{std::move(res.error())};
     try {
-      return characters_from_json_body(*res);
+      return characters_from_json_body(res->body);
     } catch (const std::exception& e) {
-      return std::unexpected{
-          Error{ErrorKind::Parse, 0, std::string{"characters parse: "} + e.what(), res->dump()}};
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"characters parse: "} + e.what(), res->raw_body,
+                                   std::move(res->metadata)}};
     }
   }
 
   // ── balance / rate limits ─────────────────────────────────────────────
   [[nodiscard]] auto balance(const RequestOptions& opts = {}) const
       -> std::expected<nlohmann::json, Error> {
-    return get_json("/api_keys/rate_limits", opts);
+    auto res = get_json_response("/api_keys/rate_limits", detail::AuthPolicy::BearerOnly, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    return std::move(res->body);
   }
 
   [[nodiscard]] auto base_url() const noexcept -> const std::string& { return m_base_url; }
 
  private:
-  std::string m_api_key;
+  Authentication m_authentication;
   std::string m_base_url;
 
   // ── preconditions ─────────────────────────────────────────────────────
@@ -721,42 +833,59 @@ class Client {
     return {};
   }
 
-  [[nodiscard]] auto auth_headers() const -> httplib::Headers {
-    return {{"Authorization", "Bearer " + m_api_key}};
+  [[nodiscard]] auto request_headers(detail::AuthPolicy policy,
+                                     const RequestOptions& opts) const
+      -> std::expected<httplib::Headers, Error> {
+    const Authentication& authentication = opts.authentication ? *opts.authentication
+                                                                : m_authentication;
+    if (!detail::authentication_allowed(authentication.kind(), policy)) {
+      return std::unexpected{Error{
+          ErrorKind::InvalidArg, 0,
+          "endpoint requires " + std::string{detail::auth_policy_name(policy)} +
+              " authentication",
+          {}}};
+    }
+    return detail::authentication_headers(authentication);
   }
 
-  // Both typed JSON helpers route through detail::send_buffered. The raw
-  // response remains available there for endpoint methods that need headers or
-  // a non-JSON body; these two deliberately return only the parsed value to
-  // preserve the established public signatures.
+  // Both typed JSON helpers route through detail::send_buffered and retain the
+  // response metadata long enough for endpoint parsing to attach it to a
+  // success or a shape error.
   //
   // Guard placement and ordering are identical to chat_stream's; see there. The
   // substrate's post-call token test comes before its transport-result test for
   // the same reason it does over there.
-  [[nodiscard]] auto get_json(std::string_view endpoint, const RequestOptions& opts) const
-      -> std::expected<nlohmann::json, Error> {
+  [[nodiscard]] auto get_json_response(std::string_view endpoint, detail::AuthPolicy policy,
+                                       const RequestOptions& opts) const
+      -> std::expected<detail::JsonResponse, Error> {
+    auto headers = request_headers(policy, opts);
+    if (!headers) return std::unexpected{std::move(headers.error())};
     auto response = detail::send_buffered(
         m_base_url,
         detail::BufferedRequest{.method = detail::HttpMethod::Get,
                                 .endpoint = std::string{endpoint},
-                                .headers = auth_headers()},
+                                .headers = std::move(*headers)},
         opts);
     if (!response) return std::unexpected{std::move(response.error())};
-    return detail::decode_json(*response);
+    return detail::decode_json_response(*response);
   }
 
-  [[nodiscard]] auto post_json(std::string_view endpoint, const nlohmann::json& body,
-                               const RequestOptions& opts) const
-      -> std::expected<nlohmann::json, Error> {
+  [[nodiscard]] auto post_json_response(std::string_view endpoint,
+                                        const nlohmann::json& body,
+                                        detail::AuthPolicy policy,
+                                        const RequestOptions& opts) const
+      -> std::expected<detail::JsonResponse, Error> {
+    auto headers = request_headers(policy, opts);
+    if (!headers) return std::unexpected{std::move(headers.error())};
     auto response = detail::send_buffered(
         m_base_url,
         detail::BufferedRequest{.method = detail::HttpMethod::Post,
                                 .endpoint = std::string{endpoint},
-                                .headers = auth_headers(),
+                                .headers = std::move(*headers),
                                 .body = detail::ByteBody{body.dump(), "application/json"}},
         opts);
     if (!response) return std::unexpected{std::move(response.error())};
-    return detail::decode_json(*response);
+    return detail::decode_json_response(*response);
   }
 
   // SSE framing used to live here as a private static plus a "\n\n" loop inside

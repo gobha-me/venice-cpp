@@ -875,6 +875,11 @@ struct ChatResponse {
   // cost has ever been observed.
   std::optional<Price> cost{};
 
+  // HTTP response metadata, populated by Client rather than from the JSON body.
+  // X-Balance-Remaining is meaningful for SIWX-authenticated inference; raw
+  // headers remain available for forward-compatible protocol additions.
+  ResponseMetadata metadata{};
+
   // The whole assistant turn, complete enough to send back as the next message.
   // Optional because "choices": [] is a real body and a pinned non-throwing
   // case: a default-constructed Message would carry role == "" straight into a

@@ -54,20 +54,37 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
 - **Errors:** `std::expected<T, venice::Error>` everywhere fallible. Never throw
   across the public API; a transport/parse/HTTP failure is a value the caller
   inspects. Error kinds: network / http / parse / auth / rate_limited /
-  invalid_arg / cancelled, each carrying `status` + raw `body`. `cancelled` is
+  payment_required / invalid_arg / cancelled, each carrying `status` + raw
+  `body`. A response-derived error also carries `ResponseMetadata`; 402 is
+  `PaymentRequired`, while 401/403 remain `Auth`. `cancelled` is
   deliberately not folded into `network` (VC-06): a dead network is a fault to
   report or retry, a cancellation is the caller's own decision arriving back at
   them, and collapsing the two leaves the difference reachable only by parsing
   message text.
 - **Per-call concerns go in `RequestOptions`, not on the request.** Timeout
-  overrides and the cancel token are a property of *this call* — never
-  serialized, and applying identically to `models()` and `balance()`, which have
-  no request object at all. Same reasoning that keeps `stream` off
+  overrides, the cancel token and an authentication override are a property of
+  *this call* — never serialized, and applying identically to `models()` and
+  `balance()`, which have no request object at all. Same reasoning that keeps `stream` off
   `ChatRequest`. Every member of `RequestOptions` carries an explicit default
   initializer even where the type already default-constructs empty: without
   them `-Wmissing-field-initializers` fires once per omitted member on the
   designated-initializer spelling the type exists for, i.e. on every correct
   caller.
+- **Authentication is explicit transport state.** `Authentication` distinguishes
+  Public, Bearer, pre-signed SIWX and pre-built x402 payment payloads. The
+  compatible `Client(std::string)` constructor means Bearer even when the
+  string is empty; empty credentials and endpoint/mode mismatches are
+  `InvalidArg` before a socket. `RequestOptions::authentication` overrides the
+  client default for one call. Emit the audited canonical headers
+  (`Authorization: Bearer`, `SIGN-IN-WITH-X`, `PAYMENT-SIGNATURE`), not Venice's
+  legacy migration aliases. This library does not own wallet keys, sign SIWX,
+  decode payment requirements, or construct USDC transactions.
+- **Response protocol metadata stays owned and exact.** `ResponseMetadata`
+  preserves all response headers and extracts `X-Balance-Remaining`,
+  `PAYMENT-REQUIRED` and `PAYMENT-RESPONSE` as strings. It is attached to every
+  response-derived `Error` and to `ChatResponse` on buffered, completed-stream
+  and deliberate early-stop success paths. Do not parse a decimal balance into
+  binary floating point or decode/sign an opaque payment envelope here.
 - **Cancellation is a watcher thread, and that is measured rather than
   stylistic.** httplib's `ClientImpl::send_` holds `socket_mutex_` only around
   setup and teardown, so `Client::stop()` from another thread interrupts a
