@@ -811,8 +811,10 @@
       "method": "GET",
       "path": "/characters/{slug}",
       "family": "characters",
-      "state": "planned",
-      "tracking_issue": 42,
+      "state": "implemented",
+      "public_api": [
+        "Client::character"
+      ],
       "security": [
         [
           "BearerAuth"

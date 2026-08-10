@@ -12,6 +12,7 @@
 //   * chat_stream(req, acc[, on_delta])                         (structured)
 //   * models()                      -> expected<vector<Model>>
 //   * characters(query)             -> expected<CharacterPage>
+//   * character(slug)               -> expected<Character>
 //   * balance()                     -> expected<json>           (rate-limit/balance)
 //
 // A ChatResponse carries the whole assistant turn as a Message, so a reply can
@@ -104,6 +105,23 @@ namespace detail {
       out.push_back(kHex[byte & 0x0FU]);
     }
   }
+  return out;
+}
+
+// A path segment and a query component use the same RFC 3986 unreserved set,
+// but they are different contracts at the call site. The distinct spelling
+// makes any future query-specific encoding change confront the path contract
+// explicitly. The implementation stays shared today so the signed-char and
+// uppercase-hex fixes above cannot drift into two copies.
+[[nodiscard]] inline auto path_segment_encode(std::string_view segment) -> std::string {
+  return percent_encode(segment);
+}
+
+[[nodiscard]] inline auto with_path_segment(std::string_view path,
+                                            std::string_view segment) -> std::string {
+  std::string out{path};
+  out.push_back('/');
+  out += path_segment_encode(segment);
   return out;
 }
 
@@ -739,6 +757,34 @@ class Client {
     } catch (const std::exception& e) {
       return std::unexpected{Error{ErrorKind::Parse, res->status,
                                    std::string{"characters parse: "} + e.what(), res->raw_body,
+                                   std::move(res->metadata)}};
+    }
+  }
+
+  // Fetch one character by the slug a listing or stored configuration carries
+  // (VC-16, #26). The slug is one path segment, never a path fragment: a slash
+  // or other reserved byte is percent-encoded before transport, so caller data
+  // cannot turn this into the reviews endpoint or any other route.
+  //
+  // Empty is structural invalidity rather than server-owned value policy. It
+  // would produce /characters/, a different endpoint, so reject it before even
+  // resolving authentication. Like the listing, this preview endpoint is
+  // Bearer-only and the response retains every unmodeled field in Character::raw.
+  [[nodiscard]] auto character(std::string_view slug,
+                               const RequestOptions& opts = {}) const
+      -> std::expected<Character, Error> {
+    if (slug.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "character slug must not be empty", {}}};
+
+    auto res = get_json_response(detail::with_path_segment("/characters", slug),
+                                 detail::AuthPolicy::BearerOnly, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      return character_from_json_body(res->body);
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"character parse: "} + e.what(), res->raw_body,
                                    std::move(res->metadata)}};
     }
   }

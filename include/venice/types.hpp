@@ -1340,6 +1340,17 @@ struct Character {
   }
 };
 
+// Parse a /characters/{slug} response. Unlike the listing, there is no sibling
+// entry to protect, so the top-level object shape is loud; fields inside it keep
+// Character's tolerant preview-API reads. In particular, this does not invent a
+// missing response slug from the requested path — raw remains what the server
+// actually returned and an absent modeled field remains absent.
+[[nodiscard]] inline auto character_from_json_body(const nlohmann::json& j) -> Character {
+  if (!j.is_object())
+    throw std::runtime_error{"character: response is not an object"};
+  return j.get<Character>();
+}
+
 // One page of /characters.
 //
 // A page and not a bare vector, which is where this type differs from
