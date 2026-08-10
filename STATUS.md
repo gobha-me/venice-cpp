@@ -136,11 +136,18 @@ Six things are worth knowing, five measured rather than reasoned:
 - **§10's symmetric blindness reproduced, and there is one narrow mitigation.**
   Break B3 deletes the cost read from both paths: `streamed.cost ==
   non_streamed.cost` comes back **green** (`nullopt == nullopt`, 7 of 8
-  assertions passing) and only the sibling assertion pinning `cost->diem`
-  against a literal goes red. So a convergence case can pin a leaf *value* as
-  well as an equality — which does catch a symmetric loss, but only for a field
-  whose value a fixture can name, and not at all for a serialization behaviour.
-  Recorded in AGENTS.md as a per-field mitigation, explicitly not a repair.
+  assertions passing) and only the sibling assertion pinning the value goes red.
+  So a convergence case can pin a leaf *value* as well as an equality — which
+  does catch a symmetric loss, but only for a field whose value a fixture can
+  name, and not at all for a serialization behaviour. Recorded in AGENTS.md as a
+  per-field mitigation, explicitly not a repair.
+
+  Review caught that the mitigation was originally written as a bare
+  `streamed.cost->diem == …`, which under the very break it exists to catch is
+  `operator->` on a disengaged optional — undefined behaviour, not a red
+  assertion, and the first B3 run's "red" rested on it. Guarded now, and the
+  same defect was in two §9 cases. A case whose failure mode is undefined proves
+  nothing, which makes this a break-matrix lesson rather than a style fix.
 
 - **Nothing in `ctest` covers the smoke binary, and this is the second ticket to
   rely on it.** Break B9 removes the envelope unmodeled-key report and the suite
@@ -150,10 +157,13 @@ Six things are worth knowing, five measured rather than reasoned:
   misspelled key, and `--usage llama-3.3-70b` reported `RAW SAYS 0.000000: the
   wire moved and the parse did not` on **both** paths and exited 1. Reverted.
 
-Eleven breaks were run, each reverted. Nine reddened where intended, one is a
+Twelve breaks were run, each reverted. Ten reddened where intended, one is a
 build break (removing `Price::operator==` fails to compile §10, which is what
-that operator is for), and one — B9 — is the expected green above. B11 is not in
-the ticket's matrix and was added because §4b makes a claim that needed pinning:
+that operator is for), and one — B9 — is the expected green above. B12 came out
+of review rather than the plan: putting the cost read back *after* the loud
+usage read reddens exactly the new ordering case, so the fix is pinned by the
+thing it fixed. B11 is likewise unplanned, added because §4b makes a claim that
+needed pinning:
 narrowing `opt_double` to `is_number_float()` reddens eight cases across three
 binaries, so `is_number()` is load bearing on this path too. Venice sends `usd`
 as a JSON **integer**, and a float-only predicate would read every one of them as
