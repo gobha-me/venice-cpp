@@ -138,17 +138,119 @@ namespace detail {
   return it != j.end() && it->is_array() ? &*it : nullptr;
 }
 
-// Every string in a string array, skipping anything that is not one. A
-// non-array yields an empty vector — `traits` is "what this model is tagged
-// with", and no tags is a truthful answer to a malformed tag list.
-[[nodiscard]] inline auto string_array(const nlohmann::json& j, const char* key)
-    -> std::vector<std::string> {
-  std::vector<std::string> out;
+// Every string in a string array, skipping anything that is not one, with
+// "absent" and "present but not an array" kept distinct from "present and
+// empty".
+//
+// That distinction is not always worth having, which is why there are two
+// helpers rather than one. `Model::traits` takes the plain vector below,
+// because no caller behaves differently for absent-vs-empty. Video's
+// `aspect_ratios` takes this one, because the specification assigns the empty
+// array a meaning of its own — "the model does not support a defined aspect
+// ratio" — and 40 of the 111 video models sent exactly that on 2026-08-11.
+// Flattening the two there would answer "what ratios may I ask for?" with
+// silence in both the case where the answer is none and the case where the
+// server never said.
+//
+// Neither helper can tell `[]` from an array whose every element was
+// unusable — both yield an engaged empty vector. That is recoverable through
+// `raw` and deliberately not modeled: a third state here would have to be
+// carried by every caller to be worth anything.
+[[nodiscard]] inline auto opt_string_array(const nlohmann::json& j, const char* key)
+    -> std::optional<std::vector<std::string>> {
   const auto it = j.find(key);
-  if (it == j.end() || !it->is_array()) return out;
+  if (it == j.end() || !it->is_array()) return std::nullopt;
+  std::vector<std::string> out;
   for (const auto& e : *it)
     if (e.is_string()) out.push_back(e.get<std::string>());
   return out;
+}
+
+// As opt_string_array, with absent and malformed both flattened onto empty.
+[[nodiscard]] inline auto string_array(const nlohmann::json& j, const char* key)
+    -> std::vector<std::string> {
+  return opt_string_array(j, key).value_or(std::vector<std::string>{});
+}
+
+// ── wire key ↔ field tables ───────────────────────────────────────────────
+//
+// A row pairs a pointer-to-member with the key it is read from, so the two
+// travel together and a field cannot be added to a struct while being
+// forgotten in the parse. kCapabilityBoolFields established the shape; VC-39
+// generalised it because the per-modality structs need the same table five
+// times over in four different field types.
+//
+// Every table is at namespace scope and none is private, because that is what
+// makes them checkable: test/10modalities/ iterates them against verbatim
+// captured payloads in both directions — every table key is one the API sent,
+// and every key the API sent is in some table. A typo'd key yields nullopt
+// forever and is invisible to any test that hand-copies the same typo, and a
+// deleted row is invisible to the forward check alone.
+//
+// The reader is the member type, not a guess from it: `Field<int, T>` is read
+// with opt_int and `Field<double, T>` with opt_double, and picking the wrong
+// one is what break #7 of the VC-39 matrix demonstrates you cannot do by
+// accident.
+template <typename T, typename Struct>
+struct Field {
+  std::optional<T> Struct::*field;
+  const char* key;
+};
+
+template <typename T, typename Struct>
+struct VectorField {
+  std::optional<std::vector<T>> Struct::*field;
+  const char* key;
+};
+
+// A nested modeled object — `steps`, `voice_cloning`, `constraints`, each text
+// sampling parameter. Same shape as Field, under its own name because the
+// reader differs: opt_object then the sub-struct's own from_json, so a
+// `"constraints": []` reads as absent rather than throwing.
+//
+// Its own name rather than a Field overload, so that adding a modeled struct
+// type can never silently select a scalar reader.
+template <typename T, typename Struct>
+struct ObjectField {
+  std::optional<T> Struct::*field;
+  const char* key;
+};
+
+template <typename Struct, std::size_t N>
+inline void read_table(const nlohmann::json& j, Struct& s,
+                       const std::array<Field<bool, Struct>, N>& table) {
+  for (const auto& [field, key] : table) s.*field = opt_bool(j, key);
+}
+
+template <typename Struct, std::size_t N>
+inline void read_table(const nlohmann::json& j, Struct& s,
+                       const std::array<Field<int, Struct>, N>& table) {
+  for (const auto& [field, key] : table) s.*field = opt_int(j, key);
+}
+
+template <typename Struct, std::size_t N>
+inline void read_table(const nlohmann::json& j, Struct& s,
+                       const std::array<Field<double, Struct>, N>& table) {
+  for (const auto& [field, key] : table) s.*field = opt_double(j, key);
+}
+
+template <typename Struct, std::size_t N>
+inline void read_table(const nlohmann::json& j, Struct& s,
+                       const std::array<Field<std::string, Struct>, N>& table) {
+  for (const auto& [field, key] : table) s.*field = opt_string(j, key);
+}
+
+template <typename Struct, std::size_t N>
+inline void read_table(const nlohmann::json& j, Struct& s,
+                       const std::array<VectorField<std::string, Struct>, N>& table) {
+  for (const auto& [field, key] : table) s.*field = opt_string_array(j, key);
+}
+
+template <typename Struct, typename T, std::size_t N>
+inline void read_table(const nlohmann::json& j, Struct& s,
+                       const std::array<ObjectField<T, Struct>, N>& table) {
+  for (const auto& [field, key] : table)
+    if (const auto* nested = opt_object(j, key)) s.*field = nested->template get<T>();
 }
 
 }  // namespace detail
@@ -1059,10 +1161,12 @@ namespace detail {
 // payload and asserts every key is one the API actually sends. A typo'd key
 // yields nullopt forever and is invisible to any test that hand-copies the
 // same typo — the live payload is the only honest oracle.
-struct CapabilityFlag {
-  std::optional<bool> ModelCapabilities::*field;
-  const char* key;
-};
+//
+// An alias since VC-39 rather than its own struct: the per-modality tables
+// need the identical shape, and the name stays because callers and two tests
+// spell it. Field<bool, ModelCapabilities> has the same two members in the
+// same order, so the structured bindings over this table are unchanged.
+using CapabilityFlag = Field<bool, ModelCapabilities>;
 
 inline constexpr std::array<CapabilityFlag, 14> kCapabilityBoolFields{{
     {&ModelCapabilities::supports_function_calling, "supportsFunctionCalling"},
@@ -1095,15 +1199,472 @@ inline void from_json(const nlohmann::json& j, ModelCapabilities& c) {
   c.reasoning_effort_options = detail::string_array(j, "reasoningEffortOptions");
 }
 
+// ── per-modality model metadata ───────────────────────────────────────────
+//
+// `model_spec` is polymorphic by model type, and until VC-39 only its text
+// shape was modeled. Everything below is the rest of it: the values a caller
+// building an image, inpaint, video, TTS or embedding request needs in order
+// to know whether its request is even well-formed.
+//
+// Four things about this block are measured rather than assumed, each from a
+// keyless capture of every modality on 2026-08-11, and each is the reason a
+// design taken from the specification alone would have been wrong:
+//
+//  * **Wire spelling is per-modality in the same wire position.** Image and
+//    inpaint send `aspectRatios` and `promptCharacterLimit`; video sends
+//    `aspect_ratios` and `prompt_character_limit`. The tables below carry
+//    literal keys for exactly this reason — a mechanical camelCase rule would
+//    read one of the two families as absent, on every entry, forever.
+//  * **Seven keys on 100% of video models are documented nowhere**, including
+//    in swagger 20260811.123440 fetched the same day. They are marked below.
+//    They are also precisely what a video request builder needs, so they are
+//    modeled and their provenance is recorded rather than inferred later.
+//  * **The specification documents keys the wire has never sent**:
+//    `frequency_penalty` and `presence_penalty` on text constraints,
+//    `regionRestrictions` and `beta` on model_spec. Those are not modeled;
+//    `startsAt` and `replacementModelId` are, because they sit inside a
+//    Deprecation that is modeled anyway and cost one row each. The
+//    `--modality` leg reports what it has never observed without failing on
+//    it.
+//  * **Music and ASR are deliberately out of scope** (VC-39). Music carries
+//    nineteen model_spec keys of its own and no epic consumes them yet; ASR
+//    carries none beyond pricing. Both stay reachable through `Model::raw`,
+//    and `--modality music` prints their full key inventory so the follow-up
+//    ticket starts from a measurement rather than a guess.
+//
+// Every string list here is optional<vector>, unlike Model::traits. In a
+// constraints block "the server said none" and "the server did not say" are
+// different answers a request builder must branch on differently — video sent
+// `aspect_ratios: []` on 40 of 111 models, where the specification assigns the
+// empty array the meaning "no defined aspect ratio". traits keeps its plain
+// vector because no caller there behaves differently for absent-vs-empty.
+
+// Image generation step bounds. A nested object rather than two scalars
+// because that is how it arrives, and because it already proves such an object
+// can carry more than one key.
+struct StepsConstraint {
+  std::optional<int> default_value;  // wire: "default"
+  std::optional<int> max;
+};
+
+// One sampling parameter's server-side default, from text constraints. A
+// single-key object today; `steps` above is the standing evidence that a
+// single-key object is not a scalar with extra punctuation.
+struct TextParamConstraint {
+  std::optional<double> default_value;  // wire: "default"
+};
+
+// What a TTS model will accept as a voice-cloning reference sample.
+//
+// Absence is not a "no". The specification states that models whose cloning is
+// gated behind a private alpha omit this field for non-staff callers while
+// still appearing in the listing, so a disengaged optional means "this
+// response did not say" and never "this model cannot clone". One of the
+// eleven live TTS models carried it on 2026-08-11.
+struct VoiceCloning {
+  std::optional<std::string> mode;  // "zero_shot" | "persistent" — no enum
+  std::optional<std::vector<std::string>> accepted_formats;
+  std::optional<double> min_sample_seconds;
+  std::optional<int> retention_days;
+};
+
+// When a model id stops working, and what to move to.
+//
+// Every instant stays a string. They arrive as ISO 8601 and converting them
+// here would pick a calendar library for every consumer and lose the offset;
+// `date` is additionally marked legacy by the specification, which prefers
+// `startsAt`/`removesAt` — so a caller that coalesced the three would be
+// building on the one the server is moving away from.
+struct Deprecation {
+  std::optional<bool> auto_remap;
+  std::optional<std::string> date;        // legacy; prefer removes_at
+  std::optional<std::string> removes_at;  // wire: "removesAt"
+  std::optional<std::string> starts_at;   // wire: "startsAt" — never observed
+  std::optional<std::string> replacement_model_id;  // never observed
+};
+
+struct ImageConstraints {
+  std::optional<int> prompt_character_limit;
+  std::optional<int> width_height_divisor;  // width and height must divide by it
+  std::optional<int> max_style_references;
+  std::optional<bool> supports_style_reference_strength;
+  std::optional<std::string> default_aspect_ratio;
+  std::optional<std::string> default_resolution;
+  std::optional<std::string> default_quality;
+  // Strings such as "16:9", never numbers. Worth stating because video's
+  // reference_image_min/max_aspect_ratio are doubles: "aspect ratio" implies
+  // no single type in this API.
+  std::optional<std::vector<std::string>> aspect_ratios;
+  std::optional<std::vector<std::string>> resolutions;
+  std::optional<std::vector<std::string>> qualities;
+  std::optional<StepsConstraint> steps;
+};
+
+// Overlaps ImageConstraints on six keys and is a different shape all the same
+// — combineImages and maxInputImages have no image counterpart, steps and
+// widthHeightDivisor no inpaint one. The overlap is why Model dispatches on
+// `type` rather than on the shape of the object: no set of present keys
+// distinguishes these two branches, and the specification's own anyOf carries
+// no discriminator to help.
+struct InpaintConstraints {
+  std::optional<int> prompt_character_limit;
+  std::optional<int> max_input_images;
+  std::optional<bool> combine_images;
+  std::optional<bool> single_image_aspect_ratio;
+  std::optional<std::string> default_resolution;
+  std::optional<std::string> default_quality;
+  std::optional<std::vector<std::string>> aspect_ratios;
+  std::optional<std::vector<std::string>> resolutions;
+  std::optional<std::vector<std::string>> qualities;
+};
+
+struct VideoConstraints {
+  std::optional<std::string> model_type;  // "image-to-video" | "text-to-video" | "video"
+  std::optional<int> prompt_character_limit;
+  std::optional<bool> audio;
+  std::optional<bool> audio_configurable;
+  // The three below sit on all 111 video models and appear in no published
+  // specification — measured 2026-08-11 against swagger 20260811.123440. They
+  // are what answers "may I hand this model an image, or a video, or a
+  // per-reference audio track", which is the first question an image-to-video
+  // caller has.
+  std::optional<bool> audio_input;
+  std::optional<bool> per_reference_audio;
+  std::optional<bool> video_input;
+  // Also undocumented, same capture. Doubles, not strings and not ints: the
+  // live values include 0.5, and opt_double accepts a whole number so a model
+  // quoting 2 still parses.
+  std::optional<int> reference_image_min_short_side_pixels;
+  std::optional<double> reference_image_min_aspect_ratio;
+  std::optional<double> reference_image_max_aspect_ratio;
+  // Engaged-but-empty is a real answer here — see the block comment above.
+  std::optional<std::vector<std::string>> aspect_ratios;
+  std::optional<std::vector<std::string>> resolutions;
+  std::optional<std::vector<std::string>> durations;  // "5s", "10s" — not numbers
+};
+
+// Text models carry constraints too — 5 of 106 on 2026-08-11 — which is why
+// this ticket is not only about media. The specification also lists
+// frequency_penalty and presence_penalty; neither has ever been observed, so
+// neither is modeled.
+struct TextConstraints {
+  std::optional<TextParamConstraint> temperature;
+  std::optional<TextParamConstraint> top_p;
+  std::optional<TextParamConstraint> repetition_penalty;
+};
+
+// Image models carry no `capabilities` block at all. These three flags sit
+// directly on model_spec, one level above `constraints`, and folding them into
+// ModelCapabilities would both invent a block the server never sent and put
+// image flags in a struct whose every existing reader is a text caller.
+struct ImageModelSpec {
+  std::optional<ImageConstraints> constraints;
+  std::optional<bool> supports_web_search;
+  std::optional<bool> supports_style_references;
+  std::optional<bool> supports_optimize_prompt_thinking;  // undocumented, 37/37
+};
+
+struct InpaintModelSpec {
+  std::optional<InpaintConstraints> constraints;
+  std::optional<bool> supports_optimize_prompt_thinking;  // undocumented, 20/20
+};
+
+struct VideoModelSpec {
+  std::optional<VideoConstraints> constraints;
+};
+
+struct TtsModelSpec {
+  std::optional<std::vector<std::string>> voices;
+  std::optional<std::vector<std::string>> supported_formats;
+  std::optional<std::string> default_format;
+  std::optional<bool> supports_custom_voice_id;
+  std::optional<VoiceCloning> voice_cloning;  // absent is not a "no" — see above
+};
+
+struct EmbeddingModelSpec {
+  std::optional<int> embedding_dimensions;
+  std::optional<int> max_input_tokens;
+  std::optional<bool> supports_custom_dimensions;
+};
+
+namespace detail {
+
+inline constexpr std::array<Field<int, StepsConstraint>, 2> kStepsIntFields{{
+    {&StepsConstraint::default_value, "default"},
+    {&StepsConstraint::max, "max"},
+}};
+
+inline constexpr std::array<Field<double, TextParamConstraint>, 1> kTextParamDoubleFields{{
+    {&TextParamConstraint::default_value, "default"},
+}};
+
+inline constexpr std::array<Field<std::string, VoiceCloning>, 1> kVoiceCloningStringFields{{
+    {&VoiceCloning::mode, "mode"},
+}};
+inline constexpr std::array<Field<double, VoiceCloning>, 1> kVoiceCloningDoubleFields{{
+    {&VoiceCloning::min_sample_seconds, "min_sample_seconds"},
+}};
+inline constexpr std::array<Field<int, VoiceCloning>, 1> kVoiceCloningIntFields{{
+    {&VoiceCloning::retention_days, "retention_days"},
+}};
+inline constexpr std::array<VectorField<std::string, VoiceCloning>, 1> kVoiceCloningListFields{{
+    {&VoiceCloning::accepted_formats, "accepted_formats"},
+}};
+
+inline constexpr std::array<Field<bool, Deprecation>, 1> kDeprecationBoolFields{{
+    {&Deprecation::auto_remap, "autoRemap"},
+}};
+inline constexpr std::array<Field<std::string, Deprecation>, 4> kDeprecationStringFields{{
+    {&Deprecation::date, "date"},
+    {&Deprecation::removes_at, "removesAt"},
+    {&Deprecation::starts_at, "startsAt"},
+    {&Deprecation::replacement_model_id, "replacementModelId"},
+}};
+
+// camelCase throughout — the image family's spelling. Compare the video table.
+inline constexpr std::array<Field<int, ImageConstraints>, 3> kImageConstraintIntFields{{
+    {&ImageConstraints::prompt_character_limit, "promptCharacterLimit"},
+    {&ImageConstraints::width_height_divisor, "widthHeightDivisor"},
+    {&ImageConstraints::max_style_references, "maxStyleReferences"},
+}};
+inline constexpr std::array<Field<bool, ImageConstraints>, 1> kImageConstraintBoolFields{{
+    {&ImageConstraints::supports_style_reference_strength, "supportsStyleReferenceStrength"},
+}};
+inline constexpr std::array<Field<std::string, ImageConstraints>, 3> kImageConstraintStringFields{{
+    {&ImageConstraints::default_aspect_ratio, "defaultAspectRatio"},
+    {&ImageConstraints::default_resolution, "defaultResolution"},
+    {&ImageConstraints::default_quality, "defaultQuality"},
+}};
+inline constexpr std::array<VectorField<std::string, ImageConstraints>, 3>
+    kImageConstraintListFields{{
+        {&ImageConstraints::aspect_ratios, "aspectRatios"},
+        {&ImageConstraints::resolutions, "resolutions"},
+        {&ImageConstraints::qualities, "qualities"},
+    }};
+inline constexpr std::array<ObjectField<StepsConstraint, ImageConstraints>, 1>
+    kImageConstraintObjectFields{{
+        {&ImageConstraints::steps, "steps"},
+    }};
+
+inline constexpr std::array<Field<int, InpaintConstraints>, 2> kInpaintConstraintIntFields{{
+    {&InpaintConstraints::prompt_character_limit, "promptCharacterLimit"},
+    {&InpaintConstraints::max_input_images, "maxInputImages"},
+}};
+inline constexpr std::array<Field<bool, InpaintConstraints>, 2> kInpaintConstraintBoolFields{{
+    {&InpaintConstraints::combine_images, "combineImages"},
+    {&InpaintConstraints::single_image_aspect_ratio, "singleImageAspectRatio"},
+}};
+inline constexpr std::array<Field<std::string, InpaintConstraints>, 2>
+    kInpaintConstraintStringFields{{
+        {&InpaintConstraints::default_resolution, "defaultResolution"},
+        {&InpaintConstraints::default_quality, "defaultQuality"},
+    }};
+inline constexpr std::array<VectorField<std::string, InpaintConstraints>, 3>
+    kInpaintConstraintListFields{{
+        {&InpaintConstraints::aspect_ratios, "aspectRatios"},
+        {&InpaintConstraints::resolutions, "resolutions"},
+        {&InpaintConstraints::qualities, "qualities"},
+    }};
+
+// snake_case throughout — video's spelling, in the same wire position as the
+// camelCase image table above. Neither is derivable from the other.
+inline constexpr std::array<Field<int, VideoConstraints>, 2> kVideoConstraintIntFields{{
+    {&VideoConstraints::prompt_character_limit, "prompt_character_limit"},
+    {&VideoConstraints::reference_image_min_short_side_pixels,
+     "reference_image_min_short_side_pixels"},
+}};
+inline constexpr std::array<Field<double, VideoConstraints>, 2> kVideoConstraintDoubleFields{{
+    {&VideoConstraints::reference_image_min_aspect_ratio, "reference_image_min_aspect_ratio"},
+    {&VideoConstraints::reference_image_max_aspect_ratio, "reference_image_max_aspect_ratio"},
+}};
+inline constexpr std::array<Field<bool, VideoConstraints>, 5> kVideoConstraintBoolFields{{
+    {&VideoConstraints::audio, "audio"},
+    {&VideoConstraints::audio_configurable, "audio_configurable"},
+    {&VideoConstraints::audio_input, "audio_input"},
+    {&VideoConstraints::per_reference_audio, "per_reference_audio"},
+    {&VideoConstraints::video_input, "video_input"},
+}};
+inline constexpr std::array<Field<std::string, VideoConstraints>, 1> kVideoConstraintStringFields{{
+    {&VideoConstraints::model_type, "model_type"},
+}};
+inline constexpr std::array<VectorField<std::string, VideoConstraints>, 3>
+    kVideoConstraintListFields{{
+        {&VideoConstraints::aspect_ratios, "aspect_ratios"},
+        {&VideoConstraints::resolutions, "resolutions"},
+        {&VideoConstraints::durations, "durations"},
+    }};
+
+inline constexpr std::array<ObjectField<TextParamConstraint, TextConstraints>, 3>
+    kTextConstraintObjectFields{{
+        {&TextConstraints::temperature, "temperature"},
+        {&TextConstraints::top_p, "top_p"},
+        {&TextConstraints::repetition_penalty, "repetition_penalty"},
+    }};
+
+inline constexpr std::array<Field<bool, ImageModelSpec>, 3> kImageSpecBoolFields{{
+    {&ImageModelSpec::supports_web_search, "supportsWebSearch"},
+    {&ImageModelSpec::supports_style_references, "supportsStyleReferences"},
+    {&ImageModelSpec::supports_optimize_prompt_thinking, "supportsOptimizePromptThinking"},
+}};
+inline constexpr std::array<ObjectField<ImageConstraints, ImageModelSpec>, 1>
+    kImageSpecObjectFields{{
+        {&ImageModelSpec::constraints, "constraints"},
+    }};
+
+inline constexpr std::array<Field<bool, InpaintModelSpec>, 1> kInpaintSpecBoolFields{{
+    {&InpaintModelSpec::supports_optimize_prompt_thinking, "supportsOptimizePromptThinking"},
+}};
+inline constexpr std::array<ObjectField<InpaintConstraints, InpaintModelSpec>, 1>
+    kInpaintSpecObjectFields{{
+        {&InpaintModelSpec::constraints, "constraints"},
+    }};
+
+inline constexpr std::array<ObjectField<VideoConstraints, VideoModelSpec>, 1>
+    kVideoSpecObjectFields{{
+        {&VideoModelSpec::constraints, "constraints"},
+    }};
+
+inline constexpr std::array<Field<bool, TtsModelSpec>, 1> kTtsSpecBoolFields{{
+    {&TtsModelSpec::supports_custom_voice_id, "supports_custom_voice_id"},
+}};
+inline constexpr std::array<Field<std::string, TtsModelSpec>, 1> kTtsSpecStringFields{{
+    {&TtsModelSpec::default_format, "default_format"},
+}};
+inline constexpr std::array<VectorField<std::string, TtsModelSpec>, 2> kTtsSpecListFields{{
+    {&TtsModelSpec::voices, "voices"},
+    {&TtsModelSpec::supported_formats, "supported_formats"},
+}};
+inline constexpr std::array<ObjectField<VoiceCloning, TtsModelSpec>, 1> kTtsSpecObjectFields{{
+    {&TtsModelSpec::voice_cloning, "voice_cloning"},
+}};
+
+inline constexpr std::array<Field<int, EmbeddingModelSpec>, 2> kEmbeddingSpecIntFields{{
+    {&EmbeddingModelSpec::embedding_dimensions, "embeddingDimensions"},
+    {&EmbeddingModelSpec::max_input_tokens, "maxInputTokens"},
+}};
+inline constexpr std::array<Field<bool, EmbeddingModelSpec>, 1> kEmbeddingSpecBoolFields{{
+    {&EmbeddingModelSpec::supports_custom_dimensions, "supportsCustomDimensions"},
+}};
+
+}  // namespace detail
+
+// Free rather than friends, for the same reason ModelCapabilities' is: the
+// tables above must be declared first and need the structs complete. Found by
+// ADL all the same.
+
+inline void from_json(const nlohmann::json& j, StepsConstraint& s) {
+  detail::read_table(j, s, detail::kStepsIntFields);
+}
+
+inline void from_json(const nlohmann::json& j, TextParamConstraint& t) {
+  detail::read_table(j, t, detail::kTextParamDoubleFields);
+}
+
+inline void from_json(const nlohmann::json& j, VoiceCloning& v) {
+  detail::read_table(j, v, detail::kVoiceCloningStringFields);
+  detail::read_table(j, v, detail::kVoiceCloningDoubleFields);
+  detail::read_table(j, v, detail::kVoiceCloningIntFields);
+  detail::read_table(j, v, detail::kVoiceCloningListFields);
+}
+
+inline void from_json(const nlohmann::json& j, Deprecation& d) {
+  detail::read_table(j, d, detail::kDeprecationBoolFields);
+  detail::read_table(j, d, detail::kDeprecationStringFields);
+}
+
+inline void from_json(const nlohmann::json& j, ImageConstraints& c) {
+  detail::read_table(j, c, detail::kImageConstraintIntFields);
+  detail::read_table(j, c, detail::kImageConstraintBoolFields);
+  detail::read_table(j, c, detail::kImageConstraintStringFields);
+  detail::read_table(j, c, detail::kImageConstraintListFields);
+  detail::read_table(j, c, detail::kImageConstraintObjectFields);
+}
+
+inline void from_json(const nlohmann::json& j, InpaintConstraints& c) {
+  detail::read_table(j, c, detail::kInpaintConstraintIntFields);
+  detail::read_table(j, c, detail::kInpaintConstraintBoolFields);
+  detail::read_table(j, c, detail::kInpaintConstraintStringFields);
+  detail::read_table(j, c, detail::kInpaintConstraintListFields);
+}
+
+inline void from_json(const nlohmann::json& j, VideoConstraints& c) {
+  detail::read_table(j, c, detail::kVideoConstraintIntFields);
+  detail::read_table(j, c, detail::kVideoConstraintDoubleFields);
+  detail::read_table(j, c, detail::kVideoConstraintBoolFields);
+  detail::read_table(j, c, detail::kVideoConstraintStringFields);
+  detail::read_table(j, c, detail::kVideoConstraintListFields);
+}
+
+inline void from_json(const nlohmann::json& j, TextConstraints& c) {
+  detail::read_table(j, c, detail::kTextConstraintObjectFields);
+}
+
+inline void from_json(const nlohmann::json& j, ImageModelSpec& s) {
+  detail::read_table(j, s, detail::kImageSpecBoolFields);
+  detail::read_table(j, s, detail::kImageSpecObjectFields);
+}
+
+inline void from_json(const nlohmann::json& j, InpaintModelSpec& s) {
+  detail::read_table(j, s, detail::kInpaintSpecBoolFields);
+  detail::read_table(j, s, detail::kInpaintSpecObjectFields);
+}
+
+inline void from_json(const nlohmann::json& j, VideoModelSpec& s) {
+  detail::read_table(j, s, detail::kVideoSpecObjectFields);
+}
+
+inline void from_json(const nlohmann::json& j, TtsModelSpec& s) {
+  detail::read_table(j, s, detail::kTtsSpecBoolFields);
+  detail::read_table(j, s, detail::kTtsSpecStringFields);
+  detail::read_table(j, s, detail::kTtsSpecListFields);
+  detail::read_table(j, s, detail::kTtsSpecObjectFields);
+}
+
+inline void from_json(const nlohmann::json& j, EmbeddingModelSpec& s) {
+  detail::read_table(j, s, detail::kEmbeddingSpecIntFields);
+  detail::read_table(j, s, detail::kEmbeddingSpecBoolFields);
+}
+
 // ── models ────────────────────────────────────────────────────────────────
 //
 // One entry from /models. `id` and `type` are the two fields the endpoint
 // always sets and every caller needs, so they stay plain strings; everything
 // else is optional, because `model_spec` is polymorphic by model type. Text
 // models carry capabilities and a context window; image models carry
-// generation pricing and style-reference flags; tts carries a voice list. The
-// typed surface here is the text shape — the one this client's chat endpoints
-// can actually use — and `raw` keeps the rest.
+// generation pricing and style-reference flags; tts carries a voice list.
+//
+// Until VC-39 the typed surface here was the text shape alone and `raw` kept
+// the rest, which made this struct the one place that knew an image model's
+// constraints and could not state them. It now carries each modality's shape
+// as an optional view, and three rules govern them:
+//
+//  * **At most one view is ever engaged, chosen by `type`.** `m.video`
+//    engaged means the server called this a video model — not merely that the
+//    entry happened to hold keys a video parse recognises. Image and inpaint
+//    constraints overlap on six keys and no set of present keys tells them
+//    apart, so shape-dispatch was never available; the specification's own
+//    anyOf has no discriminator either.
+//
+//    What makes that true is dispatching on ONE string against distinct
+//    literals, not the else-if chain in from_json: VC-39's break matrix
+//    rewrote the chain as independent ifs and the suite stayed green, because
+//    at most one comparison can match either way. Worth writing down rather
+//    than leaving as an inference — the chain is there so the exclusivity
+//    reads locally, and it is not the part a test can hold. The break that
+//    does go red is replacing the `type` test with a structural one, which is
+//    test/10modalities/ §1.
+//  * **An unmodeled modality degrades to every view disengaged**, with `raw`
+//    whole. A modality Venice adds tomorrow costs this header nothing and
+//    costs its callers a `raw` walk, which is where they are today for all of
+//    them.
+//  * **Scope is image, inpaint, video, text, tts and embedding.** Music and
+//    ASR are deliberately not modeled — see the block above `StepsConstraint`
+//    — and upscale carries nothing beyond pricing.
+//
+// `deprecation` and `model_sets` sit on Model rather than inside a view
+// because they are cross-modality: deprecation was observed on video and is
+// documented for any type, and model_sets arrived on video, image and text
+// alike.
 //
 // `raw` is the escape hatch, and three things about it are deliberate:
 //
@@ -1157,6 +1718,25 @@ struct Model {
   std::optional<ModelCapabilities> capabilities;
   std::optional<Pricing> pricing;
 
+  // At most one of these six is engaged, selected by `type`. See the note
+  // above; `text_constraints` is spelled out rather than wrapped in a
+  // TextModelSpec because text's other metadata has been flat on Model since
+  // VC-03 and moving it would break every existing caller to buy symmetry.
+  std::optional<ImageModelSpec> image;
+  std::optional<InpaintModelSpec> inpaint;
+  std::optional<VideoModelSpec> video;
+  std::optional<TtsModelSpec> tts;
+  std::optional<EmbeddingModelSpec> embedding;
+  std::optional<TextConstraints> text_constraints;  // 5 of 106 text models
+
+  // Cross-modality, so read for every type rather than inside a view.
+  std::optional<Deprecation> deprecation;
+  // Undocumented in swagger 20260811.123440; observed on all 111 video, 17 of
+  // 37 image and 13 of 106 text models on 2026-08-11. Plain vector, like
+  // traits and unlike the constraint lists: it is a tag set, and no caller
+  // behaves differently for absent-vs-empty.
+  std::vector<std::string> model_sets;
+
   nlohmann::json raw;  // the verbatim entry — see the note above
 
   friend void from_json(const nlohmann::json& j, Model& m) {
@@ -1185,6 +1765,36 @@ struct Model {
       m.capabilities = caps->get<ModelCapabilities>();
     if (const auto* price = detail::opt_object(*spec, "pricing"))
       m.pricing = price->get<Pricing>();
+
+    // Cross-modality, so before the dispatch rather than repeated inside it.
+    if (const auto* dep = detail::opt_object(*spec, "deprecation"))
+      m.deprecation = dep->get<Deprecation>();
+    m.model_sets = detail::string_array(*spec, "model_sets");
+
+    // One branch, chosen by `type`. The chain is else-if so the exclusivity
+    // reads locally, but the exclusivity comes from comparing one string
+    // against distinct literals — measured, not assumed: rewriting this as
+    // independent ifs leaves the whole suite green. What a stray *structural*
+    // test here would break is test/10modalities/ §1, since image and inpaint
+    // share six constraint keys.
+    //
+    // A type this client has never heard of falls off the end with every view
+    // disengaged and `raw` intact, which is the correct answer and not a
+    // failure. "music", "asr" and "upscale" take that path deliberately.
+    if (m.type == "image")
+      m.image = spec->get<ImageModelSpec>();
+    else if (m.type == "inpaint")
+      m.inpaint = spec->get<InpaintModelSpec>();
+    else if (m.type == "video")
+      m.video = spec->get<VideoModelSpec>();
+    else if (m.type == "tts")
+      m.tts = spec->get<TtsModelSpec>();
+    else if (m.type == "embedding")
+      m.embedding = spec->get<EmbeddingModelSpec>();
+    else if (m.type == "text") {
+      if (const auto* c = detail::opt_object(*spec, "constraints"))
+        m.text_constraints = c->get<TextConstraints>();
+    }
   }
 };
 

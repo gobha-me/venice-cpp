@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -349,6 +350,382 @@ auto show_compatibility_mapping(const venice::Client& client, std::string_view t
     return EXIT_FAILURE;
   }
   return report_catalogue(*res, client, "compatibility", type);
+}
+
+// ── `--modality [type]` (VC-39, #60) ──────────────────────────────────────
+//
+// The third leg that needs no key: /models answers 200 with no Authorization
+// header for every modality, measured 2026-08-11. It is dispatched above the
+// guard for the same reason --traits and --compat are.
+//
+// What it checks, and why it does not pick a model:
+//
+// AGENTS.md makes naming the runners-up a rule after VC-18, and asks a leg
+// that skips pick_by_capability to say why rather than stay silent. There is
+// no per-model pick to make here — this leg walks EVERY entry rather than
+// choosing one. What replaces the runners-up list is the coverage column: for
+// each modeled key, how many of the modality's entries carried it. That is a
+// strictly stronger answer to the question the rule exists to force. A single
+// chosen model could never show that `maxStyleReferences` is on 4 of 37 image
+// models while `promptCharacterLimit` is on all 37, and that difference is
+// precisely the per-family variation VC-18 was filed for missing.
+//
+// Three kinds of finding, deliberately not treated alike:
+//
+//   * A RECONCILIATION MISMATCH fails the leg. Either a typed field engaged
+//     while its key is absent from raw at that level — VC-37's bug, which was
+//     a read one level too high — or raw carried a usable value the typed
+//     field did not take. Both are library defects an edit here can fix.
+//   * An UNMODELED KEY fails nothing and is printed per nesting level. It is
+//     how a wire key nothing here names becomes visible, which is the only way
+//     the seven undocumented video keys were found in the first place, and it
+//     is what a renamed table row would surface as.
+//   * A NEVER-OBSERVED modeled key is reported and does not fail. `startsAt`
+//     and `replacementModelId` are documented, modeled and have never been on
+//     a wire; that is Venice's data, and no change here makes it green.
+
+struct Mismatch {
+  std::string model;
+  std::string level;
+  std::string key;
+  std::string why;
+};
+
+// Every key a set of tables names. The keys are string literals with static
+// storage, so views into them outlive any call.
+template <typename... Tables>
+auto table_keys(const Tables&... tables) -> std::vector<std::string_view> {
+  std::vector<std::string_view> out;
+  (
+      [&] {
+        for (const auto& row : tables) out.emplace_back(row.key);
+      }(),
+      ...);
+  return out;
+}
+
+// One row's worth of raw-vs-typed. `usable` is the JSON predicate the parse
+// itself applies, so "raw has it and the type is right" means the same thing
+// in both places; what the comparison adds is that the key is looked for at
+// THIS level, which is the half the parse cannot check about itself.
+template <typename Engaged>
+void reconcile_row(const nlohmann::json& obj, bool typed, const char* key, Engaged usable,
+                   std::string_view model, std::string_view level,
+                   std::vector<Mismatch>& out) {
+  const auto it = obj.find(key);
+  const bool present = it != obj.end();
+  if (typed && !present)
+    out.push_back({std::string{model}, std::string{level}, key,
+                   "typed field engaged but raw carries no such key at this level"});
+  if (present && usable(*it) && !typed)
+    out.push_back({std::string{model}, std::string{level}, key,
+                   "raw carries a usable value but the typed field is absent"});
+}
+
+// Walk one table: reconcile every row and count the engaged ones.
+template <typename Struct, typename Row, std::size_t N, typename Engaged>
+void walk(const nlohmann::json& obj, const Struct& s, const std::array<Row, N>& table,
+          Engaged usable, std::string_view model, std::string_view level,
+          std::map<std::string, int>& coverage, std::vector<Mismatch>& out) {
+  for (const auto& [field, key] : table) {
+    const bool typed = (s.*field).has_value();
+    if (typed) ++coverage[std::string{level} + '.' + key];
+    else coverage.try_emplace(std::string{level} + '.' + key, 0);
+    reconcile_row(obj, typed, key, usable, model, level, out);
+  }
+}
+
+const auto kIsBool = [](const nlohmann::json& v) { return v.is_boolean(); };
+const auto kIsString = [](const nlohmann::json& v) { return v.is_string(); };
+const auto kIsArray = [](const nlohmann::json& v) { return v.is_array(); };
+const auto kIsObject = [](const nlohmann::json& v) { return v.is_object(); };
+// Mirrors opt_int: an integer this field can represent. A past-INT_MAX value
+// legitimately reads absent, so calling it usable here would report a
+// reconciliation failure for correct behaviour.
+const auto kIsInt = [](const nlohmann::json& v) {
+  return v.is_number_integer() && v.get<std::int64_t>() >= std::numeric_limits<int>::min() &&
+         v.get<std::int64_t>() <= std::numeric_limits<int>::max();
+};
+// Mirrors opt_double: is_number(), not is_number_float().
+const auto kIsNumber = [](const nlohmann::json& v) { return v.is_number(); };
+
+// The model_spec keys Model has read since VC-03, plus the two VC-39 reads for
+// every type. Per-modality keys are appended from that modality's tables.
+constexpr std::array<std::string_view, 14> kSharedSpecKeys{
+    "name",        "description",          "privacy",             "modelSource",
+    "offline",     "betaModel",            "traits",              "availableContextTokens",
+    "maxCompletionTokens", "capabilities", "pricing",             "constraints",
+    "model_sets",  "deprecation"};
+
+constexpr std::array<std::string_view, 7> kModeledEntryKeys{
+    "id", "type", "created", "object", "owned_by", "model_spec", "context_length"};
+
+// The modalities this ticket deliberately does not model. Naming them here,
+// and printing their inventory below, is what keeps the scope boundary a
+// decision rather than a gap nobody noticed.
+constexpr std::array<std::string_view, 3> kUnmodeledModalities{"music", "asr", "upscale"};
+
+void report_coverage(const std::map<std::string, int>& coverage, std::size_t total) {
+  std::cout << "coverage (engaged / " << total << "):\n";
+  std::vector<std::string> never;
+  for (const auto& [key, n] : coverage) {
+    if (n == 0) {
+      never.push_back(key);
+      continue;
+    }
+    std::cout << "  " << std::left << std::setw(48) << key << ' ' << n << '/' << total << '\n';
+  }
+  if (!never.empty()) {
+    // Reported, not failed: a modeled key the wire has never carried is
+    // Venice's data, and no edit here turns it green.
+    std::cout << "  NEVER OBSERVED (reported, not a failure): ";
+    for (std::size_t i = 0; i < never.size(); ++i)
+      std::cout << (i != 0U ? ", " : "") << never[i];
+    std::cout << '\n';
+  }
+}
+
+// One modality: the verbatim first entry, the per-level differences, the
+// reconciliation and the coverage column.
+auto report_modality(const std::vector<venice::Model>& models, std::string_view type) -> int {
+  if (models.empty()) {
+    std::cout << "  (no models of this type)\n";
+    return EXIT_SUCCESS;
+  }
+
+  std::map<std::string, int> coverage;
+  std::vector<Mismatch> mismatches;
+  std::vector<std::string_view> spec_keys{kSharedSpecKeys.begin(), kSharedSpecKeys.end()};
+
+  {
+    using namespace venice::detail;
+    std::vector<std::string_view> extra;
+    if (type == "image") extra = table_keys(kImageSpecBoolFields);
+    else if (type == "inpaint") extra = table_keys(kInpaintSpecBoolFields);
+    else if (type == "tts")
+      extra = table_keys(kTtsSpecBoolFields, kTtsSpecStringFields, kTtsSpecListFields,
+                         kTtsSpecObjectFields);
+    else if (type == "embedding")
+      extra = table_keys(kEmbeddingSpecIntFields, kEmbeddingSpecBoolFields);
+    spec_keys.insert(spec_keys.end(), extra.begin(), extra.end());
+  }
+
+  const auto constraint_keys = [&]() -> std::vector<std::string_view> {
+    using namespace venice::detail;
+    if (type == "image")
+      return table_keys(kImageConstraintIntFields, kImageConstraintBoolFields,
+                        kImageConstraintStringFields, kImageConstraintListFields,
+                        kImageConstraintObjectFields);
+    if (type == "inpaint")
+      return table_keys(kInpaintConstraintIntFields, kInpaintConstraintBoolFields,
+                        kInpaintConstraintStringFields, kInpaintConstraintListFields);
+    if (type == "video")
+      return table_keys(kVideoConstraintIntFields, kVideoConstraintDoubleFields,
+                        kVideoConstraintBoolFields, kVideoConstraintStringFields,
+                        kVideoConstraintListFields);
+    if (type == "text") return table_keys(kTextConstraintObjectFields);
+    return {};
+  }();
+
+  std::cout << "first entry model_spec, verbatim: " << models.front().raw["model_spec"].dump()
+            << '\n';
+
+  for (const auto& m : models) {
+    using namespace venice::detail;
+    const auto& raw = m.raw;
+    const auto* spec = opt_object(raw, "model_spec");
+
+    // One set-difference per nesting level. These print and do not fail: a key
+    // nothing here names is how the seven undocumented video keys surfaced.
+    report_unmodeled("unmodeled entry keys [" + m.id + "]: ", raw, kModeledEntryKeys, "Model::raw");
+    if (spec == nullptr) continue;
+    report_unmodeled("unmodeled model_spec keys [" + m.id + "]: ", *spec, spec_keys,
+                     "Model::raw[\"model_spec\"]");
+    if (const auto* c = opt_object(*spec, "constraints"))
+      report_unmodeled("unmodeled constraint keys [" + m.id + "]: ", *c, constraint_keys,
+                       "Model::raw[\"model_spec\"][\"constraints\"]");
+
+    if (const auto* dep = opt_object(*spec, "deprecation")) {
+      report_unmodeled("unmodeled deprecation keys [" + m.id + "]: ", *dep,
+                       table_keys(kDeprecationBoolFields, kDeprecationStringFields),
+                       "Model::raw[...][\"deprecation\"]");
+      walk(*dep, *m.deprecation, kDeprecationBoolFields, kIsBool, m.id, "deprecation", coverage,
+           mismatches);
+      walk(*dep, *m.deprecation, kDeprecationStringFields, kIsString, m.id, "deprecation",
+           coverage, mismatches);
+    }
+
+    if (type == "image" && m.image) {
+      walk(*spec, *m.image, kImageSpecBoolFields, kIsBool, m.id, "model_spec", coverage,
+           mismatches);
+      walk(*spec, *m.image, kImageSpecObjectFields, kIsObject, m.id, "model_spec", coverage,
+           mismatches);
+      if (const auto* c = opt_object(*spec, "constraints"); c != nullptr && m.image->constraints) {
+        const auto& cc = *m.image->constraints;
+        walk(*c, cc, kImageConstraintIntFields, kIsInt, m.id, "constraints", coverage, mismatches);
+        walk(*c, cc, kImageConstraintBoolFields, kIsBool, m.id, "constraints", coverage,
+             mismatches);
+        walk(*c, cc, kImageConstraintStringFields, kIsString, m.id, "constraints", coverage,
+             mismatches);
+        walk(*c, cc, kImageConstraintListFields, kIsArray, m.id, "constraints", coverage,
+             mismatches);
+        walk(*c, cc, kImageConstraintObjectFields, kIsObject, m.id, "constraints", coverage,
+             mismatches);
+        if (const auto* st = opt_object(*c, "steps"); st != nullptr && cc.steps) {
+          report_unmodeled("unmodeled steps keys [" + m.id + "]: ", *st,
+                           table_keys(kStepsIntFields), "raw[...][\"constraints\"][\"steps\"]");
+          walk(*st, *cc.steps, kStepsIntFields, kIsInt, m.id, "steps", coverage, mismatches);
+        }
+      }
+    } else if (type == "inpaint" && m.inpaint) {
+      walk(*spec, *m.inpaint, kInpaintSpecBoolFields, kIsBool, m.id, "model_spec", coverage,
+           mismatches);
+      walk(*spec, *m.inpaint, kInpaintSpecObjectFields, kIsObject, m.id, "model_spec", coverage,
+           mismatches);
+      if (const auto* c = opt_object(*spec, "constraints");
+          c != nullptr && m.inpaint->constraints) {
+        const auto& cc = *m.inpaint->constraints;
+        walk(*c, cc, kInpaintConstraintIntFields, kIsInt, m.id, "constraints", coverage,
+             mismatches);
+        walk(*c, cc, kInpaintConstraintBoolFields, kIsBool, m.id, "constraints", coverage,
+             mismatches);
+        walk(*c, cc, kInpaintConstraintStringFields, kIsString, m.id, "constraints", coverage,
+             mismatches);
+        walk(*c, cc, kInpaintConstraintListFields, kIsArray, m.id, "constraints", coverage,
+             mismatches);
+      }
+    } else if (type == "video" && m.video) {
+      walk(*spec, *m.video, kVideoSpecObjectFields, kIsObject, m.id, "model_spec", coverage,
+           mismatches);
+      if (const auto* c = opt_object(*spec, "constraints"); c != nullptr && m.video->constraints) {
+        const auto& cc = *m.video->constraints;
+        walk(*c, cc, kVideoConstraintIntFields, kIsInt, m.id, "constraints", coverage, mismatches);
+        walk(*c, cc, kVideoConstraintDoubleFields, kIsNumber, m.id, "constraints", coverage,
+             mismatches);
+        walk(*c, cc, kVideoConstraintBoolFields, kIsBool, m.id, "constraints", coverage,
+             mismatches);
+        walk(*c, cc, kVideoConstraintStringFields, kIsString, m.id, "constraints", coverage,
+             mismatches);
+        walk(*c, cc, kVideoConstraintListFields, kIsArray, m.id, "constraints", coverage,
+             mismatches);
+      }
+    } else if (type == "tts" && m.tts) {
+      walk(*spec, *m.tts, kTtsSpecBoolFields, kIsBool, m.id, "model_spec", coverage, mismatches);
+      walk(*spec, *m.tts, kTtsSpecStringFields, kIsString, m.id, "model_spec", coverage,
+           mismatches);
+      walk(*spec, *m.tts, kTtsSpecListFields, kIsArray, m.id, "model_spec", coverage, mismatches);
+      walk(*spec, *m.tts, kTtsSpecObjectFields, kIsObject, m.id, "model_spec", coverage,
+           mismatches);
+      if (const auto* vc = opt_object(*spec, "voice_cloning"); vc != nullptr && m.tts->voice_cloning) {
+        report_unmodeled("unmodeled voice_cloning keys [" + m.id + "]: ", *vc,
+                         table_keys(kVoiceCloningStringFields, kVoiceCloningDoubleFields,
+                                    kVoiceCloningIntFields, kVoiceCloningListFields),
+                         "raw[...][\"voice_cloning\"]");
+        const auto& c = *m.tts->voice_cloning;
+        walk(*vc, c, kVoiceCloningStringFields, kIsString, m.id, "voice_cloning", coverage,
+             mismatches);
+        walk(*vc, c, kVoiceCloningDoubleFields, kIsNumber, m.id, "voice_cloning", coverage,
+             mismatches);
+        walk(*vc, c, kVoiceCloningIntFields, kIsInt, m.id, "voice_cloning", coverage, mismatches);
+        walk(*vc, c, kVoiceCloningListFields, kIsArray, m.id, "voice_cloning", coverage,
+             mismatches);
+      }
+    } else if (type == "embedding" && m.embedding) {
+      walk(*spec, *m.embedding, kEmbeddingSpecIntFields, kIsInt, m.id, "model_spec", coverage,
+           mismatches);
+      walk(*spec, *m.embedding, kEmbeddingSpecBoolFields, kIsBool, m.id, "model_spec", coverage,
+           mismatches);
+    } else if (type == "text" && m.text_constraints) {
+      if (const auto* c = opt_object(*spec, "constraints"))
+        walk(*c, *m.text_constraints, kTextConstraintObjectFields, kIsObject, m.id, "constraints",
+             coverage, mismatches);
+    }
+  }
+
+  // Absolute checks, written against what must be true rather than against
+  // what this response happens to contain — the VC-37 rule. A guard that only
+  // fires when the field is present cannot fire when the field is the thing
+  // that went missing.
+  int broken = 0;
+  const bool modeled_type = type == "image" || type == "inpaint" || type == "video" ||
+                            type == "tts" || type == "embedding";
+  for (const auto& m : models) {
+    const int engaged = static_cast<int>(m.image.has_value()) +
+                        static_cast<int>(m.inpaint.has_value()) +
+                        static_cast<int>(m.video.has_value()) + static_cast<int>(m.tts.has_value()) +
+                        static_cast<int>(m.embedding.has_value()) +
+                        static_cast<int>(m.text_constraints.has_value());
+    if (engaged > 1) {
+      std::cerr << "  TWO VIEWS ENGAGED AT ONCE [" << m.id << "] -- the dispatch is not exclusive\n";
+      ++broken;
+    }
+    if (modeled_type && m.raw["model_spec"].is_object() && engaged == 0) {
+      std::cerr << "  NO VIEW ENGAGED [" << m.id << "] for a modeled type, model_spec: "
+                << m.raw["model_spec"].dump() << '\n';
+      ++broken;
+    }
+    if (modeled_type && venice::detail::opt_object(m.raw["model_spec"], "constraints") != nullptr) {
+      const bool parsed = (m.image && m.image->constraints) ||
+                          (m.inpaint && m.inpaint->constraints) ||
+                          (m.video && m.video->constraints);
+      if (!parsed && type != "tts" && type != "embedding") {
+        std::cerr << "  CONSTRAINTS IN RAW BUT NOT PARSED [" << m.id << "]\n";
+        ++broken;
+      }
+    }
+  }
+
+  for (const auto& mm : mismatches) {
+    std::cerr << "  RECONCILIATION MISMATCH [" << mm.model << "] " << mm.level << '.' << mm.key
+              << " -- " << mm.why << '\n';
+    ++broken;
+  }
+
+  report_coverage(coverage, models.size());
+  return broken == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+// The modalities VC-39 does not model: print what they carry, so the boundary
+// is visible and the next ticket starts from a measurement.
+void report_unmodeled_modality(const std::vector<venice::Model>& models, std::string_view type) {
+  std::cout << "  nothing typed here by design (VC-39 scope). model_spec keys carried:\n";
+  std::map<std::string, int> keys;
+  for (const auto& m : models)
+    if (const auto* spec = venice::detail::opt_object(m.raw, "model_spec"))
+      for (const auto& [k, v] : spec->items()) ++keys[k];
+  for (const auto& [k, n] : keys)
+    std::cout << "    " << std::left << std::setw(34) << k << ' ' << n << '/' << models.size()
+              << '\n';
+  (void)type;
+}
+
+// `--modality [type]`: the per-modality typed metadata, against every entry.
+auto show_modality(const venice::Client& client, std::string_view type) -> int {
+  const std::vector<std::string_view> types =
+      type.empty() || type == "all"
+          ? std::vector<std::string_view>{"text",  "image", "inpaint", "video",  "tts",
+                                          "embedding", "music", "asr",  "upscale"}
+          : std::vector<std::string_view>{type};
+
+  int worst = EXIT_SUCCESS;
+  for (const auto& t : types) {
+    const auto res = client.models(t);
+    if (!res) {
+      std::cerr << "models(" << t << ") failed [" << venice::to_string(res.error().kind) << "] "
+                << res.error().message << '\n';
+      worst = EXIT_FAILURE;
+      continue;
+    }
+    std::cout << "\n=== " << t << ": " << res->size() << " models ===\n";
+
+    if (std::find(kUnmodeledModalities.begin(), kUnmodeledModalities.end(), t) !=
+        kUnmodeledModalities.end()) {
+      report_unmodeled_modality(*res, t);
+      continue;
+    }
+    if (report_modality(*res, t) != EXIT_SUCCESS) worst = EXIT_FAILURE;
+  }
+  return worst;
 }
 
 // `--characters [search]`: the live check VC-04 could not run offline, and the
@@ -1178,13 +1555,14 @@ auto main(int argc, char** argv) -> int {
   const std::string_view leg = argc > 1 ? std::string_view{argv[1]} : std::string_view{};
   const std::string_view arg = argc > 2 ? std::string_view{argv[2]} : std::string_view{};
 
-  // The two legs that need no credential (VC-38, #59), dispatched above the key
-  // lookup deliberately. Measured 2026-08-11: /models/traits and
-  // /models/compatibility_mapping both answer 200 with no Authorization header
-  // at all. Leaving them below the guard would have made them unrunnable in
-  // exactly the configuration they exist to prove, and would have left the
-  // guard's message — "nothing to call" — saying something about this library
-  // that is no longer true.
+  // The three legs that need no credential, dispatched above the key lookup
+  // deliberately. Measured 2026-08-11: /models/traits and
+  // /models/compatibility_mapping (VC-38, #59) and /models itself (VC-39, #60)
+  // all answer 200 with no Authorization header at all, for every modality.
+  // Leaving them below the guard would have made them unrunnable in exactly the
+  // configuration they exist to prove, and would have left the guard's message
+  // — "nothing to call" — saying something about this library that is no longer
+  // true.
   //
   // They use public_access() even when a key IS set, so the leg tests the public
   // path rather than whatever the environment happens to hold.
@@ -1193,11 +1571,13 @@ auto main(int argc, char** argv) -> int {
   if (leg == "--compat")
     return show_compatibility_mapping(venice::Client{venice::Authentication::public_access()},
                                       arg);
+  if (leg == "--modality")
+    return show_modality(venice::Client{venice::Authentication::public_access()}, arg);
 
   const char* key = std::getenv("VENICE_API_KEY");
   if (key == nullptr || *key == '\0') {
     std::cerr << "VENICE_API_KEY not set; nothing to call with a credential.\n"
-                 "(--traits and --compat need no key and run without one.)\n";
+                 "(--traits, --compat and --modality need no key and run without one.)\n";
     return EXIT_SUCCESS;
   }
 

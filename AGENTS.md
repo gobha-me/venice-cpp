@@ -230,6 +230,34 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   another quietly loses it. A filter set wide enough to need a struct
   (`CharacterQuery`) flattens to pairs in a free function of its own, so the
   ordering and the encoding stay checkable offline.
+- **Wire spelling is per-modality, and is never derived.** The same concept in
+  the same wire position arrives as `aspectRatios` on image and inpaint models
+  and `aspect_ratios` on video ones, `promptCharacterLimit` beside
+  `prompt_character_limit` — measured 2026-08-11, on 111 and 37 live entries
+  respectively. A mechanical camelCase→snake_case rule would read one family as
+  absent on every entry, forever, and nothing but a verbatim capture would say
+  so. Key tables carry literal strings, and `test/10modalities/` §5 pins each
+  family as **deaf to the other's spelling** rather than merely fluent in its
+  own — the one-directional version of that check passes with either table
+  wrong.
+- **An empty list equals an absent one only where measurement says so, and the
+  reasoning goes next to the field.** `Model::traits` is a plain vector because
+  no caller branches on absent-vs-empty; `VideoConstraints::aspect_ratios` is
+  an `optional<vector>` because 40 of 111 live video models send `[]` and the
+  specification defines that as "no defined aspect ratio", which a request
+  builder must tell from silence. Two calls, opposite ways, on adjacent fields
+  — so each comment names the other. `detail::string_array` now delegates to
+  `opt_string_array` so the two cannot drift.
+- **A key the document does not have is not thereby absent from the wire, and a
+  key it does have is not thereby present.** VC-39 measured seven keys on 100%
+  of video models that appear nowhere in the swagger fetched the same day, and
+  four documented keys that have never been sent. Model what the wire carries,
+  record per field which of the two it is, and leave the never-observed in
+  `raw`. What turns that from a bet into a check is the live leg's
+  set-difference **per nesting level** — a new server key surfaces as unmodeled
+  rather than as silence — plus a raw↔typed reconciliation in both directions,
+  which is where a read at the wrong nesting level shows up (VC-37's bug, in
+  the shape it would take on a struct rather than an envelope).
 - **Response-side escape hatches are named `raw`, not `extra`.** `Model::raw`
   holds the verbatim entry — modeled fields included — because a *subtractive*
   hatch breaks its readers every time a key graduates to a typed field. The

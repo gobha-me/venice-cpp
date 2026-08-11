@@ -333,10 +333,16 @@ TEST_CASE("a captured text entry parses field for field", "[models]") {
           std::vector<std::string>{"none", "low", "medium", "high"});
 }
 
-// A non-text model, last of all: nothing about this schema had to change to
-// hold one, which is what keeps a future ?type= parameter (VC-13) from being a
-// breaking change to Model.
-TEST_CASE("a captured image entry degrades without losing anything", "[models]") {
+// A non-text model, last of all: the text-shaped half of this schema still
+// holds one without changing, which is what keeps a ?type= parameter (VC-13)
+// from being a breaking change to Model.
+//
+// Since VC-39 its constraints no longer degrade — see test/10modalities/,
+// which owns the per-modality surface. What this case is worth keeping for is
+// the cross-check: this capture is months older than the ones that file was
+// built from, and the tables read it the same way. A key Venice renamed
+// between the two captures would show up here and nowhere else.
+TEST_CASE("a captured image entry degrades only where it should", "[models]") {
   const auto m = one(kImage);
 
   REQUIRE(m.id == "venice-sd35");
@@ -344,7 +350,9 @@ TEST_CASE("a captured image entry degrades without losing anything", "[models]")
   REQUIRE(m.name == "Venice SD35");
   REQUIRE(m.traits == std::vector<std::string>{"eliza-default"});
 
-  // No context window and no capability block on an image model.
+  // No context window and no capability block on an image model. Still true,
+  // and still not synthesised: the three supportsX flags this entry carries
+  // live on the image view, not in a manufactured ModelCapabilities.
   REQUIRE_FALSE(m.context_length.has_value());
   REQUIRE_FALSE(m.available_context_tokens.has_value());
   REQUIRE_FALSE(m.capabilities.has_value());
@@ -357,4 +365,35 @@ TEST_CASE("a captured image entry degrades without losing anything", "[models]")
   REQUIRE_FALSE(m.pricing->extended.has_value());
   REQUIRE(m.raw["model_spec"]["pricing"]["generation"]["usd"] == 0.01);
   REQUIRE(m.raw["model_spec"]["pricing"]["upscale"]["2x"]["usd"] == 0.02);
+
+  // The half that stopped degrading. An older capture, read by the same
+  // tables.
+  REQUIRE(m.image.has_value());
+  REQUIRE(m.image->constraints->prompt_character_limit == 1500);
+  REQUIRE(m.image->constraints->steps->default_value == 25);
+  REQUIRE(m.image->constraints->steps->max == 30);
+  REQUIRE(m.image->constraints->width_height_divisor == 16);
+  REQUIRE(m.image->supports_style_references == false);
+  // This entry states no ratios at all, which is not the same as stating none.
+  REQUIRE_FALSE(m.image->constraints->aspect_ratios.has_value());
+  // And raw is still the whole entry, modeled keys included.
+  REQUIRE(m.raw["model_spec"]["constraints"]["widthHeightDivisor"] == 16);
+}
+
+TEST_CASE("a text entry engages no per-modality view", "[models]") {
+  // The complement of the case above, and the reason the dispatch keys on
+  // `type` at all: every existing caller of this struct is a text caller, and
+  // none of them should acquire an engaged image or video view.
+  const auto m = one(kGrok);
+  REQUIRE(m.type == "text");
+  REQUIRE_FALSE(m.image.has_value());
+  REQUIRE_FALSE(m.inpaint.has_value());
+  REQUIRE_FALSE(m.video.has_value());
+  REQUIRE_FALSE(m.tts.has_value());
+  REQUIRE_FALSE(m.embedding.has_value());
+  // This capture carries no constraints block; 5 of the 106 live text models
+  // do, and test/10modalities/ holds one of them.
+  REQUIRE_FALSE(m.text_constraints.has_value());
+  REQUIRE_FALSE(m.deprecation.has_value());
+  REQUIRE(m.model_sets.empty());
 }

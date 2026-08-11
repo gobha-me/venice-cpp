@@ -38,6 +38,11 @@ right bridge.
   …), and a full rate card with cache buckets and extended-context tiers, plus
   the verbatim entry as `raw`. Filterable by modality — `models("image")`,
   `models("all")` — since the endpoint's own default is text-only.
+- **Each modality's own shape**, not just text's — an image model's step and
+  aspect-ratio constraints, a video model's durations and whether it takes an
+  image or a video as input, a TTS model's voices and voice-cloning terms, an
+  embedding model's dimensions, and deprecation dates with a replacement id.
+  One optional view per modality, engaged by the model's `type`.
 - **The catalogue's own answer to "which model"** (`/models/traits`,
   `/models/compatibility_mapping`) — the model currently holding a capability
   (`default`, `fastest`, `default_vision`), and what a foreign vendor's model id
@@ -250,20 +255,77 @@ not say* — not `false` and not zero. `m.capabilities->supports_vision != true`
 above is deliberate: an unset flag is not a "no".
 
 **The bare call lists text models only** — that is Venice's default for the
-endpoint, not a choice this client makes, and it is 105 of the 299 models the
+endpoint, not a choice this client makes, and it is 106 of the 314 models the
 API actually serves. Pass a type to reach the rest:
 
 ```cpp
 client.models();          // no query string — text, as before
 client.models("image");   // 37
-client.models("all");     // 299: text, video, image, inpaint, music, tts,
-                          //      embedding, asr, upscale
+client.models("all");     // 314: text 106, video 111, image 37, inpaint 20,
+                          //      music 14, tts 11, embedding 9, asr 5,
+                          //      upscale 1   (measured 2026-08-11)
 ```
 
 The type is a plain string, not an enum, for the same reason `response_format`
 is raw JSON: the value set is Venice's, and a list hardcoded in this header
 would start refusing valid values the day a modality is added. An unrecognised
 type comes back as the server's `ErrorKind::Http` 400.
+
+### Picking a non-text model
+
+A media caller's first question is not "which is cheapest" but "will this model
+accept the request I am about to build". `Model` answers that per modality —
+one optional view, engaged by the model's `type`:
+
+```cpp
+const auto list = client.models("video");   // named, not a temporary
+if (!list) return;
+
+for (const auto& m : *list) {
+  if (!m.video || !m.video->constraints) continue;
+  const auto& c = *m.video->constraints;
+
+  if (c.model_type != "image-to-video") continue;  // a server-owned string
+  if (c.audio_configurable != true) continue;      // absent is not a "no"
+
+  std::cout << m.id;
+  if (c.durations) for (const auto& d : *c.durations) std::cout << ' ' << d;
+  std::cout << '\n';
+}
+```
+
+That prints 30 of the 111 video models, the longest offering fifteen one-second
+steps. Note `c.audio_configurable != true` rather than `!c.audio_configurable`:
+an unset flag is not a "no", the same rule `supports_vision` follows.
+
+Five things that surprise people, all of them measured rather than read off the
+specification:
+
+- **`model_type` and `video_input` are not independent.** All six models that
+  accept a video as input are the six whose `model_type` is `"video"`; no
+  `image-to-video` model has `video_input` true. A filter that asks for both is
+  empty, which is easier to discover from here than from a run that silently
+  prints nothing.
+
+- **Image models carry no `capabilities` block at all.** Their feature flags —
+  `supports_web_search`, `supports_style_references` — sit on `m.image`, beside
+  the constraints rather than inside a `ModelCapabilities` this library refuses
+  to invent for them.
+- **An empty list is an answer; an absent one is not.** `m.video->constraints
+  ->aspect_ratios` is `optional<vector>`, and 40 of the 111 live video models
+  send `[]` — which the API defines as "no defined aspect ratio", not "we did
+  not say". `Model::traits` stays a plain vector because nothing branches on
+  that difference there.
+- **`voice_cloning` absent does not mean the model cannot clone.** Models whose
+  cloning is behind a private alpha omit the field for non-staff callers while
+  still appearing in the listing.
+- **Music and ASR are not typed yet** and stay reachable through `Model::raw`.
+  `venice-cpp --modality music` prints exactly what they carry.
+
+The wire spelling differs by modality in the same position — image sends
+`aspectRatios` and `promptCharacterLimit`, video sends `aspect_ratios` and
+`prompt_character_limit` — which is why the key tables are literal and why
+nothing here derives one spelling from the other.
 
 ### Letting the catalogue pick
 
@@ -303,11 +365,11 @@ not be read were skipped — so `returned != entries.size()` tells you something
 arrived unusable, and `raw` holds the whole envelope either way.
 
 **Both answer without a credential**, and so does `models()` — measured
-2026-08-11, all three return 200 with no `Authorization` header, while
-`/characters` answers 402. A `Client` built with
+2026-08-11, all three return 200 with no `Authorization` header, for every
+modality, while `/characters` answers 402. A `Client` built with
 `venice::Authentication::public_access()` reaches the whole Models family, and
-`venice-cpp --traits` and `--compat` run with no `VENICE_API_KEY` set at all —
-the first legs here that do.
+`venice-cpp --traits`, `--compat` and `--modality` run with no
+`VENICE_API_KEY` set at all — the three legs here that do.
 
 One asymmetry worth knowing before you hit it: **these two do not accept the
 same `type` values**, despite identical parameter definitions in Venice's
@@ -931,7 +993,20 @@ VENICE_API_KEY=... venice-cpp --tools          # v0.9.0: the request shape
 VENICE_API_KEY=... venice-cpp --characters     # v0.10.0: the character entry
 VENICE_API_KEY=... venice-cpp --character SLUG # v0.14.0: detail + v0.15.0: reviews
 VENICE_API_KEY=... venice-cpp --usage [model]  # v0.12.0: usage + cost + envelope
+
+venice-cpp --traits [type]                     # v0.16.0: no key needed
+venice-cpp --compat [type]                     # v0.16.0: no key needed
+venice-cpp --modality [type]                   # v0.17.0: no key needed
 ```
+
+`--modality` walks **every** entry of every modality rather than picking one,
+so what it prints instead of runners-up is a coverage column — how many of a
+modality's models carried each modeled key. `promptCharacterLimit 37/37` beside
+`maxStyleReferences 4/37` is the per-family variation a single auto-picked
+model cannot show, which is the failure #29 and #28 were both filed for. It
+also differences the unmodeled keys at every nesting level, reconciles each
+typed field against `raw` in both directions, and reports the modeled keys the
+wire has never sent without failing on them.
 
 `--tools` runs two legs, and the second is the one that matters: leg one proves
 `tools` parsed, leg two answers the call and proves the assembled turn is a
