@@ -37,8 +37,9 @@ AGENTS.md (which holds standing conventions, not state).
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
 - OpenAPI coverage: 8/49 operations implemented. The other 41 are assigned to
   family issues and checked in `cmake/openapi_manifest.json` (VC-35). Characters
-  and Models are both 3/3 on operations; Models keeps its epic open for the
-  `Model` metadata half (VC-39, #60).
+  and Models are both 3/3 on operations, and since VC-39 the `Model` metadata
+  half is done too — #40 stays open only for the music and ASR shapes, which
+  that ticket scoped out deliberately.
 
 **Build system synced with cpp-template, tagged v0.1.0 — the first release.**
 The repo was scaffolded before upstream's fix rounds landed, so it was running a
@@ -79,6 +80,85 @@ a single-family run.
    speculatively.
 4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-39 (#60) is done** — see v0.17.0, and it is the ticket that pays for the
+"measure first" habit most visibly.
+
+`Model` now carries each modality's own shape as an optional view engaged by
+`type`: image and inpaint constraints, video constraints, text sampling
+defaults, TTS voices and cloning terms, embedding dimensions, plus
+cross-modality `deprecation` and `model_sets`. The catalogue was the one place
+that knew an image model's step bounds and could not state them.
+
+**The ground truth was captured before a line of design**, keyless, across all
+nine modalities on 2026-08-11 — and it disagreed with the specification in both
+directions:
+
+- **Seven keys sit on 100% of video models and appear nowhere in the freshest
+  swagger** (20260811.123440, fetched the same day): `audio_input`,
+  `video_input`, `per_reference_audio`, `reference_image_min_short_side_pixels`
+  and the two `reference_image_*_aspect_ratio` bounds — plus `model_sets`
+  across three modalities and `supportsOptimizePromptThinking` on every image
+  and inpaint entry. A design taken from the document would have shipped a gap
+  on all 111 video entries, and these are exactly what an image-to-video caller
+  needs first. They are modeled, with their provenance recorded per field.
+- **The document lists keys the wire has never sent**: `frequency_penalty` and
+  `presence_penalty` on text constraints, `regionRestrictions` and a `beta`
+  distinct from `betaModel`. Not modeled. `startsAt` and `replacementModelId`
+  are, because they sit inside a `Deprecation` that exists anyway and cost one
+  row each — the `--modality` leg reports them as never-observed on every run
+  and does not fail.
+
+Three measurements decided types a reader would otherwise get wrong:
+
+- **Wire spelling is per-modality in the same wire position.** Image and
+  inpaint send `aspectRatios` / `promptCharacterLimit`; video sends
+  `aspect_ratios` / `prompt_character_limit`. The tables carry literal keys and
+  each family is deaf to the other's spelling — pinned both ways.
+- **An empty list is an answer for video and not for image.** 40 of 111 video
+  models sent `aspect_ratios: []`, which the specification defines as "no
+  defined aspect ratio". Video's lists are `optional<vector>`; `Model::traits`
+  stays a plain vector, and both comments now cross-reference the other.
+- **`reference_image_min/max_aspect_ratio` are doubles** (0.4 live) while
+  `aspect_ratios` entries are strings (`"16:9"`). "Aspect ratio" implies no
+  single type in this API.
+
+Dispatch is on `type` and never on shape: image and inpaint constraints overlap
+on six keys and the specification's own `anyOf` has no discriminator.
+
+**Two things the break matrix corrected in this branch's own claims**, which is
+the `measure-your-own-claims-too` lesson arriving on schedule:
+
+- The first draft of the header said the else-if chain "is the whole guarantee
+  that at most one view is engaged". It is not. Rewriting it as independent
+  `if`s leaves the entire suite green, because at most one string comparison
+  can match either way. The guarantee is dispatching on one string against
+  distinct literals; the comment now says so, and names the break that *does*
+  go red (a structural dispatch, §1).
+- Fourteen of the fifteen breaks were seen red and reverted. The two that first
+  came back "BUILD FAILED" were defects in the break itself — `it->get<double>()`
+  needs the `template` disambiguator inside `read_table` — not evidence the
+  check was sound. A break that fails to apply is a meaningless green.
+
+`--modality [type]` is the third leg that runs with no key. It does not use
+`pick_by_capability`, and says why: it walks every entry rather than choosing
+one, and answers the rule's question better with a **coverage column** —
+`maxStyleReferences 4/37` beside `promptCharacterLimit 37/37` is precisely the
+per-family variation VC-18 and VC-17 were both filed for missing. It also
+differences unmodeled keys at every nesting level, and reconciles each typed
+field against `raw` in both directions, which is where VC-37's read-one-level-
+too-high bug would surface here.
+
+Live run 2026-08-11, keyless, all nine modalities: exit 0, no unmodeled key at
+any level, no reconciliation mismatch. The typed surface reproduces all 30
+counts from an independent raw-JSON tabulation, including video
+`aspect_ratios` engaged 111 / non-empty 71.
+
+Also worth its own ticket, found in passing and not fixed here: the live
+swagger has moved to `20260811.123440` / `ef08464b…`, past the manifest's
+pinned `20260806.142021` / `afb975c4…`, so `tools/openapi_audit.py` exits 1 on
+version and sha before comparing anything. No operation changed, so coverage
+stays 8/49.
 
 **VC-38 (#59) is done** — see v0.16.0. It is the first ticket here whose whole
 contract was measured before a line of it was written, because for once that was

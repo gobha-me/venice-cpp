@@ -1638,13 +1638,21 @@ inline void from_json(const nlohmann::json& j, EmbeddingModelSpec& s) {
 // constraints and could not state them. It now carries each modality's shape
 // as an optional view, and three rules govern them:
 //
-//  * **At most one view is ever engaged, chosen by `type`.** The parse is an
-//    else-if chain, not a sequence of independent attempts, so `m.video`
+//  * **At most one view is ever engaged, chosen by `type`.** `m.video`
 //    engaged means the server called this a video model — not merely that the
 //    entry happened to hold keys a video parse recognises. Image and inpaint
 //    constraints overlap on six keys and no set of present keys tells them
 //    apart, so shape-dispatch was never available; the specification's own
 //    anyOf has no discriminator either.
+//
+//    What makes that true is dispatching on ONE string against distinct
+//    literals, not the else-if chain in from_json: VC-39's break matrix
+//    rewrote the chain as independent ifs and the suite stayed green, because
+//    at most one comparison can match either way. Worth writing down rather
+//    than leaving as an inference — the chain is there so the exclusivity
+//    reads locally, and it is not the part a test can hold. The break that
+//    does go red is replacing the `type` test with a structural one, which is
+//    test/10modalities/ §1.
 //  * **An unmodeled modality degrades to every view disengaged**, with `raw`
 //    whole. A modality Venice adds tomorrow costs this header nothing and
 //    costs its callers a `raw` walk, which is where they are today for all of
@@ -1763,10 +1771,12 @@ struct Model {
       m.deprecation = dep->get<Deprecation>();
     m.model_sets = detail::string_array(*spec, "model_sets");
 
-    // One branch, chosen by `type`. An else-if chain rather than independent
-    // ifs is the whole guarantee that at most one view is engaged, and
-    // test/10modalities/ §2 is what holds it: a stray `if` here would engage
-    // `image` on an inpaint entry, since the two branches share six keys.
+    // One branch, chosen by `type`. The chain is else-if so the exclusivity
+    // reads locally, but the exclusivity comes from comparing one string
+    // against distinct literals — measured, not assumed: rewriting this as
+    // independent ifs leaves the whole suite green. What a stray *structural*
+    // test here would break is test/10modalities/ §1, since image and inpaint
+    // share six constraint keys.
     //
     // A type this client has never heard of falls off the end with every view
     // disengaged and `raw` intact, which is the correct answer and not a

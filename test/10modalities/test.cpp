@@ -221,6 +221,12 @@ TEST_CASE("a type this client does not model engages nothing and keeps raw",
 
 // ── §2 at most one view, always ────────────────────────────────────────────
 
+// What this section can and cannot see, stated because the difference is not
+// obvious: it holds "the dispatch selects one branch", and the break matrix
+// showed it does NOT go red when from_json's else-if chain is rewritten as
+// independent ifs — at most one string comparison matches either way, so the
+// chain is readability rather than the guarantee. The break it does see is the
+// dispatch keying on something other than `type`, which is §1.
 TEST_CASE("exactly one view engages, across every modeled modality",
           "[modalities][failure]") {
   for (const auto* entry : {kImageStyleRefs, kImageQualities, kInpaint, kInpaintQualities,

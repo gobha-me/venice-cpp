@@ -381,8 +381,8 @@ TEST_CASE("a captured image entry degrades only where it should", "[models]") {
 }
 
 TEST_CASE("a text entry engages no per-modality view", "[models]") {
-  // The complement of the case above, and the reason the dispatch is an
-  // else-if chain: every existing caller of this struct is a text caller, and
+  // The complement of the case above, and the reason the dispatch keys on
+  // `type` at all: every existing caller of this struct is a text caller, and
   // none of them should acquire an engaged image or video view.
   const auto m = one(kGrok);
   REQUIRE(m.type == "text");
