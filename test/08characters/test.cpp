@@ -774,6 +774,10 @@ TEST_CASE("a reviews body that is not a list throws", "[reviews][failure]") {
 }
 
 TEST_CASE("an empty reviews page is a page, not a failure", "[reviews]") {
+  // Captured shape, not a guess: `--character jessica-2` on 2026-08-11 returned
+  // exactly this for a character with no reviews — an empty `data`, `total` 0
+  // and `totalPages` 0, not a 404. A leg that treated "no reviews" as a failure
+  // would have been wrong about every unreviewed character.
   const auto page = venice::character_reviews_from_json_body(nlohmann::json::parse(
       R"({"data":[],"object":"list","pagination":{"page":9,"pageSize":20,"total":87,)"
       R"("totalPages":5},"summary":{"averageRating":4.7,"totalReviews":87}})"));
@@ -920,7 +924,10 @@ TEST_CASE("summary absent or unusable leaves the entries alone", "[reviews][fail
   }
   SECTION("a whole average is still a number") {
     // opt_double, not opt_i64: Venice writes 5 for a whole rating, and reading
-    // only floats here would drop every unanimously-rated character.
+    // only floats here would drop every unanimously-rated character. Both
+    // spellings were seen in one live listing on 2026-08-11 — alan-watts rated
+    // 5, nora-clark rated 2.33333 — so neither an integer nor a float reader
+    // alone would have been right.
     REQUIRE(with(R"({"averageRating":5,"totalReviews":2})").summary->average_rating == 5.0);
   }
 }

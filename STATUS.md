@@ -112,6 +112,14 @@ unmodeled key at any of the four levels, `pageSize` echoing the 5 requested,
 `userAvatarUrl` null, one `message` an empty string, `averageRating` an integer.
 The same run printed `typed slug: (absent)` for the character itself.
 
+A second character was run rather than trusting one — the VC-17 lesson.
+`--character jessica-2`, which has no reviews, returned an empty `data` with
+`total` and `totalPages` both 0 rather than a 404, so "no reviews" is not a
+failure and the leg does not treat it as one. The same listing quotes
+`2.33333` for nora-clark beside alan-watts's `5`, which is why the ratings are
+doubles: one live sample would have justified either reader, and both are on
+the wire.
+
 `Client::character(slug)` had been returning an all-absent `Character` since
 v0.14.0. The response is an envelope — `{"data": {...}, "object": "character"}`
 — and `character_from_json_body` parsed the envelope as the character. Two
