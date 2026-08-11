@@ -461,6 +461,17 @@ class TestServer {
   std::atomic<int> m_multipart_stall_hits{0};
 };
 
+// What the catalogue fixture echoed under `key`, or a marker naming what was
+// missing. find() returns nullptr for an absent key, so a REQUIRE that
+// dereferences it directly *crashes* the run instead of failing it — and the
+// key going absent is exactly the regression these cases exist to catch, so it
+// is the one failure mode that must stay readable.
+template <typename Result>
+auto echoed(const Result& res, std::string_view key) -> std::string {
+  const std::string* value = res.find(key);
+  return value != nullptr ? *value : "(absent: " + std::string{key} + ")";
+}
+
 auto minimal_chat() -> ChatRequest {
   ChatRequest r;
   r.model = "test-model";
@@ -811,21 +822,21 @@ TEST_CASE("the catalogue calls put the exact encoded target on the wire",
   // is what every caller that passes nothing depends on.
   const auto bare = client.model_traits();
   REQUIRE(bare.has_value());
-  REQUIRE(*bare->find("target") == "/api/v1/models/traits");
+  REQUIRE(echoed(*bare, "target") == "/api/v1/models/traits");
 
   const auto filtered = client.model_traits("image");
   REQUIRE(filtered.has_value());
-  REQUIRE(*filtered->find("target") == "/api/v1/models/traits?type=image");
+  REQUIRE(echoed(*filtered, "target") == "/api/v1/models/traits?type=image");
 
   // A value needing encoding. The pair separators must survive as data rather
   // than becoming structure — otherwise a filter could address a different query.
   const auto encoded = client.model_traits("a b&type=admin");
   REQUIRE(encoded.has_value());
-  REQUIRE(*encoded->find("target") == "/api/v1/models/traits?type=a%20b%26type%3Dadmin");
+  REQUIRE(echoed(*encoded, "target") == "/api/v1/models/traits?type=a%20b%26type%3Dadmin");
 
   const auto compat = client.model_compatibility_mapping("text");
   REQUIRE(compat.has_value());
-  REQUIRE(*compat->find("target") == "/api/v1/models/compatibility_mapping?type=text");
+  REQUIRE(echoed(*compat, "target") == "/api/v1/models/compatibility_mapping?type=text");
 
   // The paths do not collide with /models. Asserted through the hit counters
   // because a route mix-up is exactly the failure that still returns a valid
@@ -845,27 +856,27 @@ TEST_CASE("the catalogue calls send no credential when the client is public",
   // rather than empty-but-present.
   const auto traits = public_client.model_traits();
   REQUIRE(traits.has_value());
-  REQUIRE(traits->find("authorization")->empty());
+  REQUIRE(echoed(*traits, "authorization").empty());
 
   const auto compat = public_client.model_compatibility_mapping();
   REQUIRE(compat.has_value());
-  REQUIRE(compat->find("authorization")->empty());
+  REQUIRE(echoed(*compat, "authorization").empty());
 
   // Both directions of the per-call override, on both operations.
   const auto bearer_override =
       public_client.model_traits({}, {.authentication = Authentication::bearer("override-token")});
   REQUIRE(bearer_override.has_value());
-  REQUIRE(*bearer_override->find("authorization") == "Bearer override-token");
+  REQUIRE(echoed(*bearer_override, "authorization") == "Bearer override-token");
 
   const Client bearer_client{"default-token", server.base_url()};
   const auto keyed = bearer_client.model_compatibility_mapping();
   REQUIRE(keyed.has_value());
-  REQUIRE(*keyed->find("authorization") == "Bearer default-token");
+  REQUIRE(echoed(*keyed, "authorization") == "Bearer default-token");
 
   const auto public_override = bearer_client.model_compatibility_mapping(
       {}, {.authentication = Authentication::public_access()});
   REQUIRE(public_override.has_value());
-  REQUIRE(public_override->find("authorization")->empty());
+  REQUIRE(echoed(*public_override, "authorization").empty());
 }
 
 TEST_CASE("public and Bearer model calls honor per-call authentication overrides",
