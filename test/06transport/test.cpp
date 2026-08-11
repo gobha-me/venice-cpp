@@ -259,12 +259,19 @@ class TestServer {
                   res.set_content("[]", "application/json");
                   return;
                 }
-                res.set_content(nlohmann::json{{"slug", "fixture"},
-                                               {"target", req.target},
-                                               {"authorization", req.get_header_value(
-                                                                     "Authorization")}}
-                                    .dump(),
-                                "application/json");
+                // The envelope the real endpoint sends, measured 2026-08-11
+                // (VC-37, #57). It was a bare object here until then, which is
+                // why the deliberate-break matrix found this fixture blind to
+                // the unwrap: the shape it spoke was one the server does not.
+                res.set_content(
+                    nlohmann::json{
+                        {"data",
+                         {{"slug", "fixture"},
+                          {"target", req.target},
+                          {"authorization", req.get_header_value("Authorization")}}},
+                        {"object", "character"}}
+                        .dump(),
+                    "application/json");
               });
 
     m_svr.Post("/api/v1/chat/completions",
