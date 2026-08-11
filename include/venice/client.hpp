@@ -720,12 +720,14 @@ class Client {
   // ported from an OpenAI-shaped client can look up what "gpt-4o" resolves to
   // here without a table of its own going stale.
   //
-  // **These are the first genuinely public operations in this library.**
-  // Authentication::public_access() has existed since VC-23 (#38) but until now
-  // every endpoint that accepted it also had a Bearer path that callers actually
-  // used. Measured 2026-08-11: both of these answer 200 with no Authorization
-  // header at all, and traits answers 200 even for an *invalid* bearer. The CLI
-  // dispatches their legs above its VENICE_API_KEY guard for that reason.
+  // **Both are public, and so is models().** Measured 2026-08-11: all three
+  // Models operations answer 200 with no Authorization header at all, and traits
+  // answers 200 even for an *invalid* bearer; /characters answers 402 on the
+  // same run, which is the contrast. Authentication::public_access() has existed
+  // since VC-23 (#38), but no live leg had ever run without a key — every one of
+  // them sat behind main()'s VENICE_API_KEY guard, so the public path was proven
+  // only against the loopback fixture. --traits and --compat dispatch above that
+  // guard and are the first legs to exercise it against the real server.
   //
   // The parse halves are venice::model_traits_from_json_body and
   // venice::model_compatibility_mapping_from_json_body, outside this class for

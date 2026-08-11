@@ -41,8 +41,9 @@ right bridge.
 - **The catalogue's own answer to "which model"** (`/models/traits`,
   `/models/compatibility_mapping`) — the model currently holding a capability
   (`default`, `fastest`, `default_vision`), and what a foreign vendor's model id
-  such as `gpt-4o` resolves to here. Both are **public**: they answer with no
-  credential at all, and are the only operations in this library that do.
+  such as `gpt-4o` resolves to here. Both are **public** — they answer with no
+  credential at all, as `models()` does; the whole Models family is reachable
+  without a key.
 - **Characters** (`/characters`, `/characters/{slug}`, `/characters/{slug}/reviews`)
   — the discovery half of `venice_parameters.character_slug`: slug, name,
   description, tags, the model a character runs on, and its rating stats, plus
@@ -301,10 +302,12 @@ Both carry `returned` — how many entries the server sent, before any that coul
 not be read were skipped — so `returned != entries.size()` tells you something
 arrived unusable, and `raw` holds the whole envelope either way.
 
-**Both answer without a credential.** They are the only two operations in this
-library that do, and a `Client` built with `venice::Authentication::public_access()`
-reaches them; `venice-cpp --traits` and `--compat` run with no `VENICE_API_KEY`
-set at all.
+**Both answer without a credential**, and so does `models()` — measured
+2026-08-11, all three return 200 with no `Authorization` header, while
+`/characters` answers 402. A `Client` built with
+`venice::Authentication::public_access()` reaches the whole Models family, and
+`venice-cpp --traits` and `--compat` run with no `VENICE_API_KEY` set at all —
+the first legs here that do.
 
 One asymmetry worth knowing before you hit it: **these two do not accept the
 same `type` values**, despite identical parameter definitions in Venice's

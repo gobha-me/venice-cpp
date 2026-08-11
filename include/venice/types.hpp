@@ -1238,9 +1238,12 @@ struct Model {
 // model id to the Venice model that serves it, so a caller porting from an
 // OpenAI-shaped client can look up what "gpt-4o" resolves to here.
 //
-// Both are the first genuinely public operations in this library. Measured
-// 2026-08-11: both answer 200 with no Authorization header at all, and traits
-// answers 200 even for an *invalid* bearer.
+// Both are public. Measured 2026-08-11: both answer 200 with no Authorization
+// header at all, and traits answers 200 even for an *invalid* bearer. So does
+// /models, on the same measurement — the whole Models family is reachable
+// without a key, where /characters answers 402. What is new here is not the
+// capability but that a live leg finally exercises it: --traits and --compat
+// run with no VENICE_API_KEY in the environment.
 //
 // Both speak the same three-key envelope over a flat string->string object:
 //
@@ -1378,15 +1381,25 @@ struct ModelCompatibilityMapping {
 
 [[nodiscard]] inline auto model_traits_from_json_body(const nlohmann::json& j) -> ModelTraits {
   auto env = detail::string_map_envelope_from_json_body(j, "model traits");
-  return ModelTraits{std::move(env.entries), env.returned, std::move(env.object),
-                     std::move(env.type), std::move(env.raw)};
+  // Designated, not positional: `object` and `type` are adjacent
+  // optional<string> members, so a positional list would survive reordering them
+  // and silently swap the two — and no fixture could see it, because every
+  // capture sets both.
+  return ModelTraits{.entries = std::move(env.entries),
+                     .returned = env.returned,
+                     .object = std::move(env.object),
+                     .type = std::move(env.type),
+                     .raw = std::move(env.raw)};
 }
 
 [[nodiscard]] inline auto model_compatibility_mapping_from_json_body(const nlohmann::json& j)
     -> ModelCompatibilityMapping {
   auto env = detail::string_map_envelope_from_json_body(j, "model compatibility mapping");
-  return ModelCompatibilityMapping{std::move(env.entries), env.returned, std::move(env.object),
-                                   std::move(env.type), std::move(env.raw)};
+  return ModelCompatibilityMapping{.entries = std::move(env.entries),
+                                   .returned = env.returned,
+                                   .object = std::move(env.object),
+                                   .type = std::move(env.type),
+                                   .raw = std::move(env.raw)};
 }
 
 

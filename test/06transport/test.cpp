@@ -230,7 +230,14 @@ class TestServer {
                     nlohmann::json{
                         {"data",
                          {{"target", req.target},
-                          {"authorization", req.get_header_value("Authorization")}}},
+                          // "present:" prefix, because httplib's
+                          // get_header_value returns "" both for a missing
+                          // header and for one sent with an empty value — and
+                          // telling those apart is the entire point of the
+                          // public-auth case below.
+                          {"authorization", req.has_header("Authorization")
+                                                ? "present:" + req.get_header_value("Authorization")
+                                                : std::string{}}}},
                         {"object", "list"},
                         {"type", "text"}}
                         .dump(),
@@ -263,7 +270,14 @@ class TestServer {
                     nlohmann::json{
                         {"data",
                          {{"target", req.target},
-                          {"authorization", req.get_header_value("Authorization")}}},
+                          // "present:" prefix, because httplib's
+                          // get_header_value returns "" both for a missing
+                          // header and for one sent with an empty value — and
+                          // telling those apart is the entire point of the
+                          // public-auth case below.
+                          {"authorization", req.has_header("Authorization")
+                                                ? "present:" + req.get_header_value("Authorization")
+                                                : std::string{}}}},
                         {"object", "list"},
                         {"type", "text"}}
                         .dump(),
@@ -742,13 +756,27 @@ TEST_CASE("the catalogue calls reject impossible auth modes before the socket",
           "[transport][auth][catalogue][failure]") {
   const TestServer server;
 
+  // Both impossible modes against BOTH operations, rather than one each. The
+  // asymmetric version of this case passed while covering half of it: if
+  // model_compatibility_mapping's policy were copy-pasted to
+  // BearerOrSignInWithX, a SIWX client would have put a SIGN-IN-WITH-X header on
+  // the wire and nothing here would have noticed, because compat was only ever
+  // probed with x402.
   const Client siwx_client{Authentication::sign_in_with_x("signed-wallet"), server.base_url()};
   const auto siwx_traits = siwx_client.model_traits();
   REQUIRE_FALSE(siwx_traits.has_value());
   REQUIRE(siwx_traits.error().kind == ErrorKind::InvalidArg);
 
+  const auto siwx_compat = siwx_client.model_compatibility_mapping();
+  REQUIRE_FALSE(siwx_compat.has_value());
+  REQUIRE(siwx_compat.error().kind == ErrorKind::InvalidArg);
+
   const Client payment_client{Authentication::x402_payment("payment-payload"),
                               server.base_url()};
+  const auto payment_traits = payment_client.model_traits();
+  REQUIRE_FALSE(payment_traits.has_value());
+  REQUIRE(payment_traits.error().kind == ErrorKind::InvalidArg);
+
   const auto payment_compat = payment_client.model_compatibility_mapping();
   REQUIRE_FALSE(payment_compat.has_value());
   REQUIRE(payment_compat.error().kind == ErrorKind::InvalidArg);
@@ -764,7 +792,11 @@ TEST_CASE("the catalogue calls reject impossible auth modes before the socket",
   REQUIRE_FALSE(empty_traits.has_value());
   REQUIRE(empty_traits.error().kind == ErrorKind::InvalidArg);
 
-  // Nothing reached the peer in any of the four.
+  const auto empty_compat = empty_bearer.model_compatibility_mapping();
+  REQUIRE_FALSE(empty_compat.has_value());
+  REQUIRE(empty_compat.error().kind == ErrorKind::InvalidArg);
+
+  // Nothing reached the peer in any of the six.
   REQUIRE(server.traits_hits() == 0);
   REQUIRE(server.compat_hits() == 0);
 }
@@ -851,12 +883,19 @@ TEST_CASE("the catalogue calls send no credential when the client is public",
   const TestServer server;
   const Client public_client{Authentication::public_access(), server.base_url()};
 
-  // These are the first endpoints where public is the *expected* mode rather
-  // than a tolerated one, so this is the assertion that the header is absent
-  // rather than empty-but-present.
+  // These are the endpoints where public is the *expected* mode rather than a
+  // tolerated one, so the assertion has to be that the header is **absent**, not
+  // that its value is empty. Those are different failures and only one of them
+  // is correct: a client that sent `Authorization:` with nothing after it would
+  // still be answered 200 by the real server, so nothing downstream would ever
+  // reveal the bug.
+  //
+  // httplib's get_header_value returns "" for both, which is why the fixture
+  // echoes a "present:" prefix instead of the bare value — without it this case
+  // reads as if it distinguishes them while asserting only the weaker half.
   const auto traits = public_client.model_traits();
   REQUIRE(traits.has_value());
-  REQUIRE(echoed(*traits, "authorization").empty());
+  REQUIRE(echoed(*traits, "authorization").empty());  // absent, not "present:"
 
   const auto compat = public_client.model_compatibility_mapping();
   REQUIRE(compat.has_value());
@@ -866,12 +905,12 @@ TEST_CASE("the catalogue calls send no credential when the client is public",
   const auto bearer_override =
       public_client.model_traits({}, {.authentication = Authentication::bearer("override-token")});
   REQUIRE(bearer_override.has_value());
-  REQUIRE(echoed(*bearer_override, "authorization") == "Bearer override-token");
+  REQUIRE(echoed(*bearer_override, "authorization") == "present:Bearer override-token");
 
   const Client bearer_client{"default-token", server.base_url()};
   const auto keyed = bearer_client.model_compatibility_mapping();
   REQUIRE(keyed.has_value());
-  REQUIRE(echoed(*keyed, "authorization") == "Bearer default-token");
+  REQUIRE(echoed(*keyed, "authorization") == "present:Bearer default-token");
 
   const auto public_override = bearer_client.model_compatibility_mapping(
       {}, {.authentication = Authentication::public_access()});

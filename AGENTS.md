@@ -369,10 +369,19 @@ those responses' `data` is caller-unknown *by construction* — they are trait
 names and foreign vendor model ids, the server's data rather than this client's
 schema — so a set-difference one level down would print the whole payload on
 every run and mean nothing. What replaces it detects the same class of defect:
-`raw["data"]`'s member count against `returned` against the parsed entry count.
-A value this client could not read shows up as a gap between the last two, and
-the leg then names the offending keys. A level whose keys you do not model is
-not a level you stop checking; it is a level that needs a different check.
+`returned`, the count the server sent, against the number of entries that
+parsed. A value this client could not read shows up as a gap between the two,
+and the leg then names the offending keys. A level whose keys you do not model
+is not a level you stop checking; it is a level that needs a different check.
+
+The first version of that check compared three numbers, and the third was
+`raw["data"]`'s own member count — which is where `returned` is computed from,
+so it was the parser checked against itself and could not fail on any server
+response. Worth stating because the mistake is an easy one to repeat under the
+name of thoroughness: **a reconciliation is only a check if the two numbers have
+independent origins.** Re-deriving a value from the same field the parser read
+and comparing them tests nothing the offline suite does not already pin
+absolutely.
 
 **A fixture written from the spec cannot check the reading of the spec.** VC-37
 is the whole argument. `Client::character(slug)` shipped in v0.14.0 returning a

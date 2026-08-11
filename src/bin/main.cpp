@@ -232,36 +232,41 @@ auto report_catalogue(const Result& res, const venice::Client& client, std::stri
   std::cout << "typed type         : " << (res.type ? *res.type : "(absent -- not a string)")
             << '\n';
 
-  // The echo check. The response reports the filter the server actually applied,
-  // so a query string that never arrived shows up here as "text" where "image"
-  // was asked for. Nothing else in this leg can see a dropped parameter.
-  if (!requested.empty()) {
-    if (!res.type) {
-      std::cerr << "  NO `type` ECHO -- cannot confirm the filter arrived\n";
-      broken = true;
-    } else if (*res.type != requested) {
-      std::cerr << "  TYPE ECHO MISMATCH -- asked for '" << requested << "', server applied '"
-                << *res.type << "'\n";
-      broken = true;
-    }
+  // The echo check, written absolutely rather than relative to what was asked
+  // for. AGENTS.md's VC-37 rule is the reason: a check that only runs when the
+  // caller passed a filter cannot fire on `--traits` with no argument, which is
+  // the invocation README documents and the one most likely to be run. A 200
+  // that echoed no `type` at all has failed whatever the arguments were —
+  // measured 2026-08-11, an unfiltered call answers "text", so the field is
+  // always there to be missing.
+  if (!res.type) {
+    std::cerr << "  NO `type` ECHO -- the server did not say which catalogue this is\n";
+    broken = true;
+  } else if (!requested.empty() && *res.type != requested) {
+    std::cerr << "  TYPE ECHO MISMATCH -- asked for '" << requested << "', server applied '"
+              << *res.type << "'\n";
+    broken = true;
   }
 
-  // The count reconciliation described above.
+  // The count reconciliation. Two numbers, not three: `raw["data"]` is where
+  // `returned` came from, so re-deriving it here and comparing would be the
+  // parser checked against itself, and the case where `data` is absent entirely
+  // cannot reach this function at all — the parse throws on it and the leg has
+  // already returned EXIT_FAILURE above. What is left is the one comparison that
+  // carries live information, between what the server sent and what parsed.
   const auto* raw_data = venice::detail::opt_object(res.raw, "data");
-  if (raw_data == nullptr) {
-    std::cerr << "  NO `data` OBJECT IN THE ENVELOPE -- the wire shape moved\n";
-    broken = true;
-  } else if (raw_data->size() != res.returned) {
-    std::cerr << "  RETURNED (" << res.returned << ") != raw data size (" << raw_data->size()
-              << ") -- the count is wrong\n";
-    broken = true;
-  }
-
   std::cout << "typed returned     : " << res.returned
             << " (entries parsed: " << res.entries.size() << ")\n";
 
-  // A gap between the two counts means an entry arrived with a value this parser
-  // could not use. The numbers alone do not say which, so name them.
+  // A gap means an entry arrived with a value this parser could not use. The
+  // numbers alone do not say which, so name them.
+  //
+  // This one flips `broken` where the catalogue cross-check below deliberately
+  // does not, and the difference is whether a change here could fix it. A
+  // retired compat target is Venice's data moving and no edit to this repo makes
+  // it green; a value that is not a string is the wire carrying a shape these
+  // types do not model, which is actionable — VC-39 would be where it is
+  // actioned.
   if (res.returned != res.entries.size() && raw_data != nullptr) {
     std::cerr << "  SKIPPED (value was not a string): ";
     bool first = true;
@@ -274,7 +279,10 @@ auto report_catalogue(const Result& res, const venice::Client& client, std::stri
     broken = true;
   }
 
-  if (res.entries.empty())
+  // `returned == 0` and not merely `entries.empty()`: a page whose every value
+  // was skipped is also empty, and calling that "a normal answer" on stdout
+  // would contradict the SKIPPED line just written to stderr.
+  if (res.entries.empty() && res.returned == 0)
     std::cout << "  (empty -- measured 2026-08-11, this is a 200 and a normal answer)\n";
   for (const auto& [key, value] : res.entries) std::cout << "  " << key << " -> " << value << '\n';
 
@@ -1197,10 +1205,14 @@ auto main(int argc, char** argv) -> int {
   if (leg == "--models") return list_models(client, arg);
   if (leg == "--characters") return list_characters(client, arg);
   if (leg == "--character") return show_character(client, arg);
+  // argc, not arg.empty(): every other leg treats "" as "no argument", but this
+  // one has a default prompt, so conflating the two would make `--stream ""`
+  // silently send 17*23 instead of the empty prompt it used to send. That is a
+  // real case to be able to smoke — the server's 400 for it — and the
+  // pre-VC-38 dispatch could reach it.
   if (leg == "--stream")
-    return stream_report(
-        client, arg.empty() ? std::string{"Think step by step: what is 17 * 23?"}
-                            : std::string{arg});
+    return stream_report(client, argc > 2 ? std::string{arg}
+                                          : std::string{"Think step by step: what is 17 * 23?"});
   if (leg == "--tools") return tools_report(client, arg);
   if (leg == "--usage") return usage_report(client, arg);
 

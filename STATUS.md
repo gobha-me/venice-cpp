@@ -92,13 +92,25 @@ the other way, from a foreign vendor's model id to what serves it here — which
 is what lets an OpenAI-shaped codebase port without a translation table of its
 own going stale.
 
-**These are the first genuinely public operations.** `Authentication::public_access()`
-has existed since VC-23 but every endpoint that accepted it also had a Bearer
-path callers actually used, so the public mode had never been proven against
-anything but the loopback fixture. `src/bin/main.cpp` early-returned from
-`main()` when `VENICE_API_KEY` was unset, which would have made these two legs
-unrunnable in exactly the configuration they exist to prove; they now dispatch
-above that guard and use `public_access()` even when a key is set.
+**These are the first legs that run without a key** — which is not the same as
+the first public operations, and the review of this branch is what caught the
+difference. `models()` is `PublicOrBearer` too, and on the same 2026-08-11 run
+`/models` answered 200 with no `Authorization` header, exactly as the two new
+ones did; `/characters` answered 402. So the whole Models family has been
+reachable without a credential since VC-13, and nothing here had ever
+demonstrated it: `Authentication::public_access()` has existed since VC-23 but
+every live leg sat behind `main()`'s `VENICE_API_KEY` early-return, so the
+public path was proven only against the loopback fixture. `--traits` and
+`--compat` dispatch above that guard and use `public_access()` even when a key
+is set.
+
+The first draft of this entry, and of the README and both headers, claimed these
+were "the only operations in this library" that answer without a credential.
+That was written from the shape of the tickets rather than from a measurement,
+and this branch's own catalogue cross-check disproves it in passing — it calls
+`models()` from a keyless public client on every run. `server-claims-need-measuring`
+applies to the claims a PR makes about its own work, not only to the ones it
+inherits.
 
 What the live runs settled, all on 2026-08-11 and all with no key in the
 environment:
