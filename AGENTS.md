@@ -191,11 +191,32 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   `prompt_tokens` on a streamed usage frame half-ingests and reports nothing,
   where the non-streamed path fails loudly on the same body. A streamed/
   non-streamed asymmetry in `Usage`, and its own ticket.)
+- **The `data` envelope fallback is only safe when the inner container's JSON
+  type differs from the envelope's.** Three parsers in `types.hpp` open with
+  `const auto* data = opt_array(j, "data"); const json& arr = data ? *data : j;`
+  — tolerating a body that is a bare list rather than a wrapped one. That works
+  there for a reason easy to mistake for a style: they demand an **array** while
+  the envelope is an **object**, so the fallback is type-disjoint and can only
+  ever fire on a body that really is a bare list. VC-38's two operations wrap a
+  string→string **object** in an object, where the same idiom becomes
+  type-*indistinguishable*: `{"object":"list","type":"text"}` would parse into a
+  two-entry map with keys `object` and `type` and **report success**. So
+  `string_map_envelope_from_json_body` requires `data` and requires it to be an
+  object, and `test/09catalogue/` pins that exact body as a throw with a comment
+  saying it is the only case in the suite that a reintroduced fallback would
+  turn red. Before copying the idiom to a fourth parser, check the two types.
 - **Endpoint filters are caller-supplied strings, and an unset one sends no
   query key.** `models(type)` takes Venice's modality as a string rather than an
   enum, on the same reasoning as `response_format`: the value set is the
   server's, and a list hardcoded here would refuse a valid value the day a
-  modality is added. `venice::detail::with_query` in `client.hpp` **skips any
+  modality is added. VC-38 turned that from a principle into a measurement: on
+  2026-08-11 `/models/traits?type=all` answered 200 and
+  `/models/compatibility_mapping?type=all` answered 400, **despite byte-identical
+  `parameters` blocks in Venice's own OpenAPI document** — whose request enum
+  omits `all` and `code` for both, wrongly for the first and rightly for the
+  second. A validated set in this header would have had to encode a divergence
+  the specification itself gets wrong. The server's 400 also names the values it
+  accepts, verbatim, in `Error::body`; no local `InvalidArg` could. `venice::detail::with_query` in `client.hpp` **skips any
   pair whose value is empty**, so `models()` with no argument produces the bare
   `/models` it always did — that skip is the non-breaking guarantee, pinned by
   `test/05query/`, not a formatting nicety. Both it and `percent_encode` are
@@ -340,6 +361,18 @@ releases with no leg positioned to see it. The rule is mechanical now:
 set-difference per level. Its first live run named `service_tier` on four
 families and four more keys on `llama-3.3-70b`. A leg that reports a sub-object
 reports the object it came out of too.
+
+**Where the per-level rule stops, it says so and puts something in its place.**
+VC-38's `--traits` and `--compat` are the one exception, and the exception has
+to be visible or the next reader takes it for an oversight. Every key inside
+those responses' `data` is caller-unknown *by construction* — they are trait
+names and foreign vendor model ids, the server's data rather than this client's
+schema — so a set-difference one level down would print the whole payload on
+every run and mean nothing. What replaces it detects the same class of defect:
+`raw["data"]`'s member count against `returned` against the parsed entry count.
+A value this client could not read shows up as a gap between the last two, and
+the leg then names the offending keys. A level whose keys you do not model is
+not a level you stop checking; it is a level that needs a different check.
 
 **A fixture written from the spec cannot check the reading of the spec.** VC-37
 is the whole argument. `Client::character(slug)` shipped in v0.14.0 returning a

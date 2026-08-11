@@ -205,6 +205,19 @@ TEST_CASE("with_query builds the /models endpoints", "[query]") {
   REQUIRE(with_query("/models", {{"type", ""}}) == "/models");
   REQUIRE(with_query("/models", {{"type", "all"}}) == "/models?type=all");
   REQUIRE(with_query("/models", {{"type", "image"}}) == "/models?type=image");
+
+  // The two sub-paths (VC-38, #59). Spelled out here rather than left to
+  // test/06transport/ alone so a typo in either path is a fast offline failure
+  // instead of a route that quietly reaches /models and parses into an empty
+  // map — which is what a stray "/models/trait" would do against the real API's
+  // 404, and what it would NOT do against a loopback fixture that was given the
+  // same typo.
+  REQUIRE(with_query("/models/traits", {{"type", ""}}) == "/models/traits");
+  REQUIRE(with_query("/models/traits", {{"type", "all"}}) == "/models/traits?type=all");
+  REQUIRE(with_query("/models/compatibility_mapping", {{"type", ""}}) ==
+          "/models/compatibility_mapping");
+  REQUIRE(with_query("/models/compatibility_mapping", {{"type", "text"}}) ==
+          "/models/compatibility_mapping?type=text");
 }
 
 // ── §6 the owning overload (VC-04, #5) ────────────────────────────────────

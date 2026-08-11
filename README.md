@@ -38,6 +38,11 @@ right bridge.
   …), and a full rate card with cache buckets and extended-context tiers, plus
   the verbatim entry as `raw`. Filterable by modality — `models("image")`,
   `models("all")` — since the endpoint's own default is text-only.
+- **The catalogue's own answer to "which model"** (`/models/traits`,
+  `/models/compatibility_mapping`) — the model currently holding a capability
+  (`default`, `fastest`, `default_vision`), and what a foreign vendor's model id
+  such as `gpt-4o` resolves to here. Both are **public**: they answer with no
+  credential at all, and are the only operations in this library that do.
 - **Characters** (`/characters`, `/characters/{slug}`, `/characters/{slug}/reviews`)
   — the discovery half of `venice_parameters.character_slug`: slug, name,
   description, tags, the model a character runs on, and its rating stats, plus
@@ -62,7 +67,7 @@ retries/backoff, async.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 6/49 operations implemented.
+OpenAPI coverage: 8/49 operations implemented.
 
 The checked inventory is [`cmake/openapi_manifest.json`](cmake/openapi_manifest.json),
 keyed by HTTP method + path rather than `operationId` (the published
@@ -258,6 +263,56 @@ The type is a plain string, not an enum, for the same reason `response_format`
 is raw JSON: the value set is Venice's, and a list hardcoded in this header
 would start refusing valid values the day a modality is added. An unrecognised
 type comes back as the server's `ErrorKind::Http` 400.
+
+### Letting the catalogue pick
+
+Scanning a hundred entries is the right answer when your criteria are your own.
+When they are Venice's — "the default", "the fastest", "the one for vision" —
+the catalogue already knows, and `model_traits()` asks it directly:
+
+```cpp
+const auto traits = client.model_traits("image");   // named, not a temporary
+if (!traits) return;                                // inspect traits.error()
+
+if (const std::string* fastest = traits->find("fastest"))
+  std::cout << "fastest image model: " << *fastest << '\n';
+```
+
+`find()` returns a pointer, `nullptr` when the trait is not in this catalogue —
+no exception, and no need to compare an iterator against `end()`. The trait
+names are the server's and they differ by modality: `image` answers `default`,
+`fastest`, `highest_quality`, `most_uncensored` and `eliza-default`, while
+`text` answers `most_intelligent`, `default_reasoning`, `default_vision` and
+`default_code`. Nothing is hardcoded here, so a trait added next month is
+readable without a release.
+
+`model_compatibility_mapping()` is the same shape pointed the other way — from a
+foreign vendor's model id to the Venice model that serves it, which is what
+makes an OpenAI-shaped codebase portable without a translation table of its own:
+
+```cpp
+const auto compat = client.model_compatibility_mapping();
+if (compat)
+  if (const std::string* venice_id = compat->find("gpt-4o"))
+    std::cout << "gpt-4o here is " << *venice_id << '\n';   // llama-3.3-70b
+```
+
+Both carry `returned` — how many entries the server sent, before any that could
+not be read were skipped — so `returned != entries.size()` tells you something
+arrived unusable, and `raw` holds the whole envelope either way.
+
+**Both answer without a credential.** They are the only two operations in this
+library that do, and a `Client` built with `venice::Authentication::public_access()`
+reaches them; `venice-cpp --traits` and `--compat` run with no `VENICE_API_KEY`
+set at all.
+
+One asymmetry worth knowing before you hit it: **these two do not accept the
+same `type` values**, despite identical parameter definitions in Venice's
+OpenAPI document. `model_traits("all")` is fine and `model_compatibility_mapping("all")`
+is a 400. That divergence is the server's, measured rather than inferred, and it
+is why `type` is passed through untouched rather than validated here — a set
+hardcoded in this header would have to encode a mistake the specification itself
+makes. The 400's body names the values it would have accepted.
 
 ### What a call cost
 
@@ -721,7 +776,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.15.0)
+  GIT_TAG        v0.16.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <expected>
 #include <limits>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -1225,6 +1226,167 @@ struct Model {
     out.push_back(e.get<Model>());
   }
   return out;
+}
+
+
+// ── the catalogue's own answers: traits and compatibility mapping ─────────
+//
+// Two operations (VC-38, #59) that answer the question `models()` leaves to the
+// caller: of the hundred-odd entries, which one. /models/traits maps a Venice
+// capability name to the model that currently holds it — "default", "fastest",
+// "most_uncensored" — and /models/compatibility_mapping maps a *foreign* vendor's
+// model id to the Venice model that serves it, so a caller porting from an
+// OpenAI-shaped client can look up what "gpt-4o" resolves to here.
+//
+// Both are the first genuinely public operations in this library. Measured
+// 2026-08-11: both answer 200 with no Authorization header at all, and traits
+// answers 200 even for an *invalid* bearer.
+//
+// Both speak the same three-key envelope over a flat string->string object:
+//
+//   {"data": {"default": "zai-org-glm-4.7", ...}, "object": "list", "type": "text"}
+//
+// Note "object":"list" over something that is not a list. Recorded as measured,
+// not corrected.
+
+// The map itself. std::less<> so a lookup from a string_view costs no allocation.
+//
+// A map rather than a vector of pairs, and the reason is a claim this type would
+// otherwise make falsely: nlohmann's json object IS a std::map on the pinned
+// 3.11.3, so the server's insertion order is destroyed before any parser here
+// sees the body. A vector would preserve nlohmann's lexicographic sort while
+// looking like it preserved the wire's — an ordering guarantee invented by the
+// container choice. A map claims nothing, and iterates in the same order as
+// raw["data"].items(), which is what lets a caller print the typed and verbatim
+// views side by side without sorting either.
+using StringMap = std::map<std::string, std::string, std::less<>>;
+
+namespace detail {
+
+// The shared shape behind both operations. Not a public type: the two public
+// ones are distinct on purpose (see below) and this is only how they avoid
+// spelling the same parse twice.
+struct StringMapEnvelope {
+  StringMap entries;
+  // How many members the server put in `data`, before any skipping — the same
+  // contract CharacterPage::returned carries, so a reader who knows one knows
+  // the other. `returned != entries.size()` is how a caller detects that
+  // something arrived unusable, which a bare map cannot express.
+  std::size_t returned{0};
+  std::optional<std::string> object;
+  std::optional<std::string> type;
+  nlohmann::json raw;  // the whole envelope, verbatim superset
+};
+
+// `what` names the operation in the throw text, so the ErrorKind::Parse message
+// Client builds says which of the two calls failed.
+[[nodiscard]] inline auto string_map_envelope_from_json_body(const nlohmann::json& j,
+                                                             const char* what)
+    -> StringMapEnvelope {
+  // This is where this parser diverges from models_from_json_body above, and the
+  // divergence is load-bearing rather than stylistic.
+  //
+  // Every list parser in this file opens with `opt_array(j,"data")` and falls
+  // back to the whole body when it is absent. That fallback is safe there only
+  // because it demands an ARRAY while the envelope is an OBJECT: the two are
+  // type-disjoint, so the fallback can only ever fire on a body that really is a
+  // bare list. Here both levels are objects. The same idiom would be
+  // type-INDISTINGUISHABLE — `{"object":"list","type":"text"}` would parse into a
+  // two-entry map with keys `object` and `type` and report success, which is the
+  // "garbage factory that reports success" the is_array() check upstream exists
+  // to prevent, reintroduced one level over. So `data` is required, and required
+  // to be an object.
+  //
+  // Generalised: the envelope-fallback idiom is only safe when the inner
+  // container's JSON type differs from the envelope's. Three parsers in this file
+  // use it and all three pass that test. This one does not.
+  const auto* data = detail::opt_object(j, "data");
+  if (data == nullptr)
+    throw std::runtime_error{std::string{what} + ": response has no data object"};
+
+  StringMapEnvelope out;
+  out.raw = j;
+  out.object = detail::opt_string(j, "object");
+  out.type = detail::opt_string(j, "type");
+  out.returned = data->size();
+
+  for (const auto& [key, value] : data->items()) {
+    // A value that is not a string is skipped and left in `raw`, on the listing
+    // rule: a `default_image` that arrives as null must not cost the caller the
+    // other nine traits. The skip is detectable two ways — find() gives nullptr,
+    // a state callers already branch on, and `returned` still counts it.
+    //
+    // An empty KEY, by contrast, is kept. Unlike Model::id nothing downstream is
+    // ever handed this key, so an empty one is inert rather than a value whose
+    // only future is to come back as a 400 far from here.
+    if (!value.is_string()) continue;
+    out.entries.emplace(key, value.get<std::string>());
+  }
+  return out;
+}
+
+}  // namespace detail
+
+// The two results are structurally identical and deliberately distinct types.
+//
+// The keys are different vocabularies. A traits key is a Venice-owned capability
+// name; a compatibility key is a foreign vendor's model id. `find("gpt-4o")`
+// against a traits result is a bug, and one shared type would make it a silent
+// nullptr instead of a compile error.
+//
+// The operations also already disagree about their own input, which is the
+// empirical half of the argument. Measured 2026-08-11: `traits?type=all` returns
+// 200, `compatibility_mapping?type=all` returns 400 — despite byte-identical
+// `parameters` blocks in the OpenAPI document. One shared doc comment about the
+// accepted `type` set would be wrong for one of the two.
+
+// /models/traits — capability name -> the model that currently holds it.
+struct ModelTraits {
+  StringMap entries;
+  std::size_t returned{0};
+  // Both optional rather than plain strings, because `type` echoes the effective
+  // filter and is therefore something callers compare against what they asked
+  // for. A plain string would map "the server did not say" and "the server sent a
+  // number" both onto "", firing that comparison on a field that was merely
+  // malformed. Neither field is a handle handed back to the API, so neither has
+  // Model::id's reason to be plain.
+  std::optional<std::string> object;
+  std::optional<std::string> type;
+  nlohmann::json raw;
+
+  // Pointer-returning, mirroring detail::opt_string_at: no it != end() dance at
+  // every call site, and no .at() that throws across the public API.
+  [[nodiscard]] auto find(std::string_view key) const -> const std::string* {
+    const auto it = entries.find(key);
+    return it != entries.end() ? &it->second : nullptr;
+  }
+};
+
+// /models/compatibility_mapping — foreign vendor model id -> the Venice model.
+struct ModelCompatibilityMapping {
+  StringMap entries;
+  std::size_t returned{0};
+  std::optional<std::string> object;
+  std::optional<std::string> type;
+  nlohmann::json raw;
+
+  [[nodiscard]] auto find(std::string_view key) const -> const std::string* {
+    const auto it = entries.find(key);
+    return it != entries.end() ? &it->second : nullptr;
+  }
+};
+
+[[nodiscard]] inline auto model_traits_from_json_body(const nlohmann::json& j) -> ModelTraits {
+  auto env = detail::string_map_envelope_from_json_body(j, "model traits");
+  return ModelTraits{std::move(env.entries), env.returned, std::move(env.object),
+                     std::move(env.type), std::move(env.raw)};
+}
+
+[[nodiscard]] inline auto model_compatibility_mapping_from_json_body(const nlohmann::json& j)
+    -> ModelCompatibilityMapping {
+  auto env = detail::string_map_envelope_from_json_body(j, "model compatibility mapping");
+  return ModelCompatibilityMapping{std::move(env.entries), env.returned, std::move(env.object),
+                                   std::move(env.type), std::move(env.raw)};
 }
 
 
