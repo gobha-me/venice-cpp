@@ -1343,12 +1343,31 @@ struct Character {
 // Parse a /characters/{slug} response. Unlike the listing, there is no sibling
 // entry to protect, so the top-level object shape is loud; fields inside it keep
 // Character's tolerant preview-API reads. In particular, this does not invent a
-// missing response slug from the requested path — raw remains what the server
-// actually returned and an absent modeled field remains absent.
+// missing response slug from the requested path — an absent modeled field
+// remains absent.
+//
+// **The response is an envelope**, `{"data": {...}, "object": "character"}`, and
+// the `data` member is unwrapped here exactly as the listing unwraps its
+// array-valued one. VC-16 shipped without that (VC-37, #57): it read the
+// OpenAPI document's `properties.data.properties` as the body rather than as
+// the body's `data` member, so every typed field came back absent and only
+// `raw` was usable. The document was not ambiguous; the reading was. What made
+// it survive a test suite was that the fixtures were written from the same
+// misreading, so parser and fixture agreed — measured against the live API on
+// 2026-08-11, which is the only thing that could have disagreed.
+//
+// A bare object still parses, and that is deliberate rather than
+// bug-compatibility: the same tolerant read is what lets an entry taken from a
+// listing be re-parsed here.
+//
+// `raw` is the entry, not the envelope — `Character::raw` means "this
+// character, verbatim" everywhere else in this library, and the envelope's only
+// other key is the `object` discriminator.
 [[nodiscard]] inline auto character_from_json_body(const nlohmann::json& j) -> Character {
   if (!j.is_object())
     throw std::runtime_error{"character: response is not an object"};
-  return j.get<Character>();
+  const auto* data = detail::opt_object(j, "data");
+  return data != nullptr ? data->get<Character>() : j.get<Character>();
 }
 
 // One page of /characters.
@@ -1505,6 +1524,206 @@ struct CharacterQuery {
   add_each("tags", q.tags);
   add_each("categories", q.categories);
   add_each("modelId", q.model_id);
+
+  for (const auto& [key, value] : q.extra) {
+    if (key.empty() || value.empty()) continue;
+    const bool taken = std::any_of(out.begin(), out.end(),
+                                   [&key](const auto& p) { return p.first == key; });
+    if (taken) continue;
+    out.emplace_back(key, value);
+  }
+  return out;
+}
+
+// ── character reviews (VC-36, #56) ────────────────────────────────────────
+//
+// The half of a character's rating this library could not reach. CharacterStats
+// has carried averageRating, ratingCount and ratingSum since VC-04, so a caller
+// could see that a persona is rated 4.7 and not one word of why.
+//
+// Preview API, like the rest of the family, so `raw` at both levels matters for
+// the same reason it does on Character.
+//
+// **One rule decides int versus double here, and it is worth stating once.**
+// A number a caller *computes* with is an int, read through detail::opt_int,
+// which range-checks rather than truncating (see the header note above it). A
+// number a caller *displays* is a double. So pagination is int — it drives the
+// paging loop, and a value this platform cannot represent has to read unknown
+// rather than wrong — while the ratings are doubles, which is the call
+// CharacterStats already made for exactly these numbers.
+
+// One review of one character.
+//
+// Every field is optional, and that is the difference from Character, not an
+// oversight. Character::slug is plain because it is the one value this client
+// can hand back to the API; nothing on a review is such a handle — `id` and
+// `characterId` are UUIDs no call here accepts — so there is no field whose
+// absence makes this not a review. See character_reviews_from_json_body for
+// what that costs the skip rule.
+//
+// `created_at` stays a string, on Character's reasoning: an ISO-8601 timestamp
+// is not worth a date parser in a header-only client that hands you `raw`.
+//
+// `locale`, `message` and `user_avatar_url` are documented nullable. A JSON null
+// reads as nullopt, which is the same answer as absent — no caller branches on
+// the difference between "wrote no message" and "sent no message key".
+struct CharacterReview {
+  std::optional<std::string> id;
+  std::optional<std::string> character_id;
+  std::optional<std::string> created_at;
+  std::optional<std::string> locale;
+  std::optional<std::string> message;
+  std::optional<std::string> user_avatar_url;
+  std::optional<std::string> username;
+
+  std::optional<bool> is_owner;  // whether the authenticated caller wrote it
+
+  // Documented as an integer 1-5 and modeled as a double anyway: it is a
+  // display value, it sits beside CharacterStats::average_rating, and a preview
+  // API that starts sending 4.5 should not silently read as absent.
+  std::optional<double> rating;
+
+  nlohmann::json raw;
+
+  friend void from_json(const nlohmann::json& j, CharacterReview& r) {
+    r.raw = j;
+    r.id = detail::opt_string(j, "id");
+    r.character_id = detail::opt_string(j, "characterId");
+    r.created_at = detail::opt_string(j, "createdAt");
+    r.locale = detail::opt_string(j, "locale");
+    r.message = detail::opt_string(j, "message");
+    r.user_avatar_url = detail::opt_string(j, "userAvatarUrl");
+    r.username = detail::opt_string(j, "username");
+    r.is_owner = detail::opt_bool(j, "isOwner");
+    r.rating = detail::opt_double(j, "rating");
+  }
+};
+
+// Where the caller is in the reviews of one character.
+//
+// Ints, per the rule above: these are the four numbers a paging loop does
+// arithmetic on. detail::opt_int reads only an integral JSON number in int
+// range, so a float or an out-of-range value reads absent — a loop that stops
+// early is recoverable, a loop driven by a truncated page number is not.
+struct CharacterReviewPagination {
+  std::optional<int> page;
+  std::optional<int> page_size;
+  std::optional<int> total;
+  std::optional<int> total_pages;
+
+  friend void from_json(const nlohmann::json& j, CharacterReviewPagination& p) {
+    p.page = detail::opt_int(j, "page");
+    p.page_size = detail::opt_int(j, "pageSize");
+    p.total = detail::opt_int(j, "total");
+    p.total_pages = detail::opt_int(j, "totalPages");
+  }
+};
+
+// The character's rating, as the reviews endpoint reports it. Doubles on both,
+// matching CharacterStats: `total_reviews` is a count, and taking it as an int
+// here while ratingCount is a double there would be two answers to one
+// question.
+struct CharacterReviewSummary {
+  std::optional<double> average_rating;
+  std::optional<double> total_reviews;
+
+  friend void from_json(const nlohmann::json& j, CharacterReviewSummary& s) {
+    s.average_rating = detail::opt_double(j, "averageRating");
+    s.total_reviews = detail::opt_double(j, "totalReviews");
+  }
+};
+
+// One page of /characters/{slug}/reviews.
+//
+// `pagination` is what makes this different from CharacterPage in practice: the
+// listing has no total and no cursor, so `returned` versus the requested limit
+// is the only way to know whether to ask for more. Here the server says
+// outright how many pages there are. `returned` is kept anyway, on the same
+// contract CharacterPage gives it — the count of elements the server put in
+// `data`, before any skipping — because a preview API may send a page whose
+// pagination object is absent or malformed, and then it is all a caller has.
+struct CharacterReviewPage {
+  std::vector<CharacterReview> entries;
+  std::size_t returned{0};
+
+  std::optional<CharacterReviewPagination> pagination;
+  std::optional<CharacterReviewSummary> summary;
+
+  nlohmann::json raw;
+};
+
+// Parse a /characters/{slug}/reviews response body into a page.
+//
+// Same container contract as characters_from_json_body, and the same single
+// fatal case: a body that is not a list has nothing to degrade to.
+//
+// The skip rule deliberately differs from the listing's. There, an entry
+// without a usable slug is dropped, because a slug is what a caller feeds back
+// to the API and an entry lacking one is not a character. No field here is such
+// a handle, so nothing is dropped for a missing field — an entry with only a
+// message is still that reviewer's message. Only a non-object element is
+// skipped, and it stays counted in `returned`, so the two numbers still differ
+// exactly when something was unusable.
+[[nodiscard]] inline auto character_reviews_from_json_body(const nlohmann::json& j)
+    -> CharacterReviewPage {
+  const auto* data = detail::opt_array(j, "data");
+  const nlohmann::json& arr = data != nullptr ? *data : j;
+  if (!arr.is_array())
+    throw std::runtime_error{"character reviews: response is not a list"};
+
+  CharacterReviewPage page;
+  page.raw = j;
+  page.returned = arr.size();
+  for (const auto& e : arr) {
+    if (!e.is_object()) continue;
+    page.entries.push_back(e.get<CharacterReview>());
+  }
+
+  if (j.is_object()) {
+    if (const auto* p = detail::opt_object(j, "pagination"))
+      page.pagination = p->get<CharacterReviewPagination>();
+    if (const auto* s = detail::opt_object(j, "summary"))
+      page.summary = s->get<CharacterReviewSummary>();
+  }
+  return page;
+}
+
+// The two filters /characters/{slug}/reviews accepts.
+//
+// A separate type from CharacterQuery, and the epic (#42) says why: reviews page
+// by page/pageSize and the listing pages by offset/limit. One pagination type
+// covering both would have fields that silently mean different things —
+// `page = 2` skipping one page and `offset = 2` skipping two entries is the
+// kind of difference nobody reads twice.
+//
+// `extra` carries the same contract CharacterQuery::extra does: additive, sent,
+// and a pair whose key a modeled field already emitted is dropped rather than
+// sent twice.
+// Every member carries an explicit default, which CharacterQuery's do not, and
+// that is for the caller rather than for this file: two fields is few enough
+// that `client.character_reviews(slug, {.page = 2})` is the natural spelling,
+// and designated initialization of an aggregate whose remaining members have no
+// initializer is a -Wmissing-field-initializers warning in the *caller's*
+// build. RequestOptions spells its defaults out for the same reason.
+struct CharacterReviewQuery {
+  // Ints, and unchecked, per AGENTS.md's "range checking: none" — the server
+  // owns `page > 0` and `0 < pageSize <= 100` and gives the 400 that says so.
+  std::optional<int> page = std::nullopt;
+  std::optional<int> page_size = std::nullopt;
+
+  std::vector<std::pair<std::string, std::string>> extra = {};
+};
+
+// Flatten a CharacterReviewQuery into ordered key/value pairs. Free, and for
+// the reasons character_query_params is: this is the half worth testing and
+// none of it needs a socket. A default-constructed query emits nothing, which
+// is what keeps the bare /characters/{slug}/reviews free of a trailing '?'.
+[[nodiscard]] inline auto character_review_query_params(const CharacterReviewQuery& q)
+    -> std::vector<std::pair<std::string, std::string>> {
+  std::vector<std::pair<std::string, std::string>> out;
+
+  if (q.page) out.emplace_back("page", std::to_string(*q.page));
+  if (q.page_size) out.emplace_back("pageSize", std::to_string(*q.page_size));
 
   for (const auto& [key, value] : q.extra) {
     if (key.empty() || value.empty()) continue;

@@ -108,6 +108,8 @@ class Gate {
 //   GET  /api/v1/models               — answers immediately. The control.
 //   GET  /api/v1/characters/{slug}    — echoes the exact encoded target or
 //                                        returns detail-specific failures.
+//   GET  /api/v1/characters/{slug}/reviews — the same, one route deeper, and
+//        registered ahead of the catch-all above it.
 //
 // Request counts are exposed so a test can assert a call did not happen, which
 // no clock reading can establish.
@@ -205,6 +207,44 @@ class TestServer {
       res.set_content(nlohmann::json{{"data", nlohmann::json::array({model})}}.dump(),
                       "application/json");
     });
+
+    // Registered *before* the catch-all below, and that ordering is the whole
+    // reason this route works: httplib matches handlers in registration order,
+    // and `/api/v1/characters/(.*)` matches "alan-watts/reviews" perfectly
+    // happily. Swap the two and every case here reaches the detail handler.
+    //
+    // The pattern is `(.*)` rather than `([^/]*)` for a subtler reason worth
+    // recording: httplib percent-*decodes* the target into req.path before
+    // matching, so a slug this client encoded as `a%2Fb` arrives here already
+    // decoded to `a/b` and a segment-shaped pattern would miss it. What went on
+    // the wire is req.target, which is what the assertions read.
+    m_svr.Get(R"(/api/v1/characters/(.*)/reviews)",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                ++m_review_hits;
+                if (req.target.starts_with("/api/v1/characters/missing/reviews")) {
+                  res.status = 404;
+                  res.set_header("X-Protocol-Trace", "reviews-not-found");
+                  res.set_content(R"({"error":"character not found"})", "application/json");
+                  return;
+                }
+                if (req.target.starts_with("/api/v1/characters/wrong-shape/reviews")) {
+                  res.set_content(R"({"object":"list"})", "application/json");
+                  return;
+                }
+                res.set_content(
+                    nlohmann::json{
+                        {"data", nlohmann::json::array({{{"id", "r1"},
+                                                         {"target", req.target},
+                                                         {"username", "product_user_42"},
+                                                         {"rating", 5}}})},
+                        {"object", "list"},
+                        {"pagination",
+                         {{"page", 1}, {"pageSize", 20}, {"total", 87}, {"totalPages", 5}}},
+                        {"summary", {{"averageRating", 4.7}, {"totalReviews", 87}}},
+                        {"authorization", req.get_header_value("Authorization")}}
+                        .dump(),
+                    "application/json");
+              });
 
     m_svr.Get(R"(/api/v1/characters/(.*))",
               [this](const httplib::Request& req, httplib::Response& res) {
@@ -316,6 +356,7 @@ class TestServer {
   [[nodiscard]] auto models_hits() const -> int { return m_models_hits.load(); }
   [[nodiscard]] auto chat_hits() const -> int { return m_chat_hits.load(); }
   [[nodiscard]] auto character_hits() const -> int { return m_character_hits.load(); }
+  [[nodiscard]] auto review_hits() const -> int { return m_review_hits.load(); }
   [[nodiscard]] auto multipart_stall_hits() const -> int { return m_multipart_stall_hits.load(); }
 
   static constexpr int kFrames = 2;
@@ -332,6 +373,7 @@ class TestServer {
   std::atomic<int> m_models_hits{0};
   std::atomic<int> m_chat_hits{0};
   std::atomic<int> m_character_hits{0};
+  std::atomic<int> m_review_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
 };
 
@@ -485,6 +527,114 @@ TEST_CASE("character detail preserves 404 and rejects a malformed success body",
   REQUIRE(malformed.error().message.starts_with("character parse: character:"));
   REQUIRE(malformed.error().body == "[]");
   REQUIRE(server.character_hits() == 2);
+}
+
+// ── character reviews (VC-36, #56) ────────────────────────────────────────
+//
+// The parse is offline in test/08characters/. What only a socket can show is
+// the target that actually went on the wire, and this endpoint has a hazard the
+// detail fetch does not: the path continues after the slug.
+
+TEST_CASE("character reviews reject an empty slug before auth or transport",
+          "[transport][reviews][auth][failure]") {
+  const TestServer server;
+  const Client public_client{Authentication::public_access(), server.base_url()};
+
+  const auto empty = public_client.character_reviews("");
+  REQUIRE_FALSE(empty.has_value());
+  REQUIRE(empty.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(empty.error().status == 0);
+  REQUIRE(empty.error().message == "character slug must not be empty");
+  REQUIRE(empty.error().body.empty());
+  REQUIRE(server.review_hits() == 0);
+
+  // Bearer-only, like the listing and the detail fetch. Public, SIWX and a
+  // pre-built payment are all refused before a socket.
+  for (const auto& authentication :
+       {Authentication::public_access(), Authentication::sign_in_with_x("siwx-token"),
+        Authentication::x402_payment("payment-payload")}) {
+    const auto wrong_auth =
+        public_client.character_reviews("alan-watts", {}, {.authentication = authentication});
+    REQUIRE_FALSE(wrong_auth.has_value());
+    REQUIRE(wrong_auth.error().kind == ErrorKind::InvalidArg);
+  }
+  REQUIRE(server.review_hits() == 0);
+}
+
+TEST_CASE("character reviews keep the slug in one path segment", "[transport][reviews]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  // The reason this matters more here than on the detail fetch: an unencoded
+  // slash would not select another character, it would address
+  // /characters/a/b/reviews — a route this operation does not own.
+  const auto response = client.character_reviews(
+      "a/b?c#d% e", {}, {.authentication = Authentication::bearer("override-token")});
+  REQUIRE(response.has_value());
+  REQUIRE(response->entries.size() == 1);
+  REQUIRE(response->entries.front().raw["target"] ==
+          "/api/v1/characters/a%2Fb%3Fc%23d%25%20e/reviews");
+  REQUIRE(response->raw["authorization"] == "Bearer override-token");
+  REQUIRE(server.review_hits() == 1);
+  REQUIRE(server.character_hits() == 0);  // and never the detail route
+}
+
+TEST_CASE("a default reviews query puts no query string on the wire",
+          "[transport][reviews]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  const auto bare = client.character_reviews("alan-watts");
+  REQUIRE(bare.has_value());
+  REQUIRE(bare->entries.front().raw["target"] == "/api/v1/characters/alan-watts/reviews");
+
+  const auto paged =
+      client.character_reviews("alan-watts", {.page = 2, .page_size = 100});
+  REQUIRE(paged.has_value());
+  REQUIRE(paged->entries.front().raw["target"] ==
+          "/api/v1/characters/alan-watts/reviews?page=2&pageSize=100");
+
+  REQUIRE(server.review_hits() == 2);
+}
+
+TEST_CASE("character reviews preserve 404 and reject a malformed success body",
+          "[transport][reviews][failure]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  const auto missing = client.character_reviews("missing");
+  REQUIRE_FALSE(missing.has_value());
+  REQUIRE(missing.error().kind == ErrorKind::Http);
+  REQUIRE(missing.error().status == 404);
+  REQUIRE(missing.error().body == R"({"error":"character not found"})");
+  REQUIRE(missing.error().metadata.header("x-protocol-trace") == "reviews-not-found");
+
+  // An envelope with no `data` list at all: 200, well-formed JSON, and nothing
+  // to degrade to.
+  const auto malformed = client.character_reviews("wrong-shape");
+  REQUIRE_FALSE(malformed.has_value());
+  REQUIRE(malformed.error().kind == ErrorKind::Parse);
+  REQUIRE(malformed.error().status == 200);
+  REQUIRE(malformed.error().message.starts_with(
+      "character reviews parse: character reviews:"));
+  REQUIRE(malformed.error().body == R"({"object":"list"})");
+  REQUIRE(server.review_hits() == 2);
+}
+
+TEST_CASE("a reviews page arrives with its pagination and summary", "[transport][reviews]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  const auto page = client.character_reviews("alan-watts", {.page = 1});
+  REQUIRE(page.has_value());
+  REQUIRE(page->returned == 1);
+  REQUIRE(page->entries.front().id == "r1");
+  REQUIRE(page->entries.front().username == "product_user_42");
+  REQUIRE(page->entries.front().rating == 5.0);
+  REQUIRE(page->pagination.has_value());
+  REQUIRE(page->pagination->total_pages == 5);
+  REQUIRE(page->summary.has_value());
+  REQUIRE(page->summary->average_rating == 4.7);
 }
 
 TEST_CASE("public and Bearer model calls honor per-call authentication overrides",
