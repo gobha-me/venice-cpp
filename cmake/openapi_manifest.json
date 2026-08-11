@@ -1346,8 +1346,11 @@
       "method": "GET",
       "path": "/models/compatibility_mapping",
       "family": "models",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 40,
+      "public_api": [
+        "Client::model_compatibility_mapping"
+      ],
       "security": [
         [],
         [
@@ -1371,8 +1374,11 @@
       "method": "GET",
       "path": "/models/traits",
       "family": "models",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 40,
+      "public_api": [
+        "Client::model_traits"
+      ],
       "security": [
         [],
         [

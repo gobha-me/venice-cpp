@@ -152,6 +152,205 @@ auto list_models(const venice::Client& client, std::string_view type) -> int {
   return EXIT_SUCCESS;
 }
 
+// Name the keys an object carries that nothing here models.
+//
+// One implementation, and that is the point rather than the tidiness. This was
+// written twice — once for `usage`, once for the envelope beside it — and
+// VC-36's reviews leg would have been the third copy. AGENTS.md's rule is that
+// a leg reporting a sub-object reports the object it came out of; a rule with a
+// copy per leg is a rule the next leg is exempt from, which is exactly how
+// `cost` rode untyped for three releases.
+//
+// It lives up here, above its first caller, rather than beside the chat report
+// sets it was extracted from — the alternative is a forward declaration whose
+// only purpose is to keep the definition somewhere prettier.
+//
+// The is_object guard is not defensive: nlohmann's items() on a scalar yields
+// one pair with an empty key, so a body that is not an object would otherwise
+// be reported as carrying an unmodeled key named "".
+void report_unmodeled(std::string_view label, const nlohmann::json& obj,
+                      std::span<const std::string_view> modeled,
+                      std::string_view reachable_via) {
+  if (!obj.is_object()) return;
+  std::vector<std::string> unmodeled;
+  for (const auto& [k, v] : obj.items())
+    if (std::find(modeled.begin(), modeled.end(), k) == modeled.end()) unmodeled.push_back(k);
+  if (unmodeled.empty()) return;
+
+  std::cerr << label;
+  for (std::size_t i = 0; i < unmodeled.size(); ++i)
+    std::cerr << (i != 0U ? ", " : "") << unmodeled[i];
+  std::cerr << "   (reachable via " << reachable_via << ")\n";
+}
+
+
+// ── `--traits` and `--compat` (VC-38, #59) ────────────────────────────────
+//
+// The two legs that run with no key at all. Everything above this point needs a
+// credential; these two exist partly to prove that the library does not, and
+// they are dispatched in main() above the VENICE_API_KEY guard for that reason.
+//
+// Both operations answer the same three-key envelope, so both legs share one
+// reporter. What each of them checks:
+//
+//   * the verbatim envelope, printed before anything is said about the parse;
+//   * the unmodeled-key difference at the envelope level;
+//   * a COUNT RECONCILIATION in place of that difference one level down;
+//   * the `type` echo against the filter the leg asked for;
+//   * every value resolved against the live catalogue.
+//
+// The second of those needs explaining, because its absence would otherwise read
+// as an oversight. AGENTS.md requires a leg to difference the modeled keys
+// against the actual ones *per nesting level*, and this is the one place where
+// that rule stops a level short. Every key inside `data` is caller-unknown by
+// construction — they are trait names and foreign vendor model ids, the server's
+// data rather than this client's schema — so a set-difference there would print
+// the entire payload on every run and mean nothing. What replaces it detects the
+// same class of defect: raw["data"]'s member count against `returned` against
+// the parsed entry count. A key this parser could not use shows up as a gap
+// between the second and third, and the leg then names it.
+constexpr std::array<std::string_view, 3> kModeledCatalogueKeys{"data", "object", "type"};
+
+// The picker convention (pick_by_capability / report_pick) does not bind here,
+// and AGENTS.md asks a leg that skips it to say why rather than stay silent:
+// there is no per-model pick to make. These legs call one endpoint that returns
+// every entry it has. If anything, the relationship runs the other way — the
+// traits map is where a "default" or "fastest" for a modality comes from, so
+// this is the endpoint a future picker would consult instead of scanning.
+template <typename Result>
+auto report_catalogue(const Result& res, const venice::Client& client, std::string_view what,
+                      std::string_view requested) -> int {
+  std::cout << what << ", verbatim: " << res.raw.dump() << '\n';
+
+  bool broken = false;
+
+  report_unmodeled("unmodeled envelope keys: ", res.raw, kModeledCatalogueKeys,
+                   "the result's raw");
+
+  std::cout << "typed object       : " << (res.object ? *res.object : "(absent -- not a string)")
+            << '\n';
+  std::cout << "typed type         : " << (res.type ? *res.type : "(absent -- not a string)")
+            << '\n';
+
+  // The echo check, written absolutely rather than relative to what was asked
+  // for. AGENTS.md's VC-37 rule is the reason: a check that only runs when the
+  // caller passed a filter cannot fire on `--traits` with no argument, which is
+  // the invocation README documents and the one most likely to be run. A 200
+  // that echoed no `type` at all has failed whatever the arguments were —
+  // measured 2026-08-11, an unfiltered call answers "text", so the field is
+  // always there to be missing.
+  if (!res.type) {
+    std::cerr << "  NO `type` ECHO -- the server did not say which catalogue this is\n";
+    broken = true;
+  } else if (!requested.empty() && *res.type != requested) {
+    std::cerr << "  TYPE ECHO MISMATCH -- asked for '" << requested << "', server applied '"
+              << *res.type << "'\n";
+    broken = true;
+  }
+
+  // The count reconciliation. Two numbers, not three: `raw["data"]` is where
+  // `returned` came from, so re-deriving it here and comparing would be the
+  // parser checked against itself, and the case where `data` is absent entirely
+  // cannot reach this function at all — the parse throws on it and the leg has
+  // already returned EXIT_FAILURE above. What is left is the one comparison that
+  // carries live information, between what the server sent and what parsed.
+  const auto* raw_data = venice::detail::opt_object(res.raw, "data");
+  std::cout << "typed returned     : " << res.returned
+            << " (entries parsed: " << res.entries.size() << ")\n";
+
+  // A gap means an entry arrived with a value this parser could not use. The
+  // numbers alone do not say which, so name them.
+  //
+  // This one flips `broken` where the catalogue cross-check below deliberately
+  // does not, and the difference is whether a change here could fix it. A
+  // retired compat target is Venice's data moving and no edit to this repo makes
+  // it green; a value that is not a string is the wire carrying a shape these
+  // types do not model, which is actionable — VC-39 would be where it is
+  // actioned.
+  if (res.returned != res.entries.size() && raw_data != nullptr) {
+    std::cerr << "  SKIPPED (value was not a string): ";
+    bool first = true;
+    for (const auto& [k, v] : raw_data->items())
+      if (!v.is_string()) {
+        std::cerr << (first ? "" : ", ") << k << '=' << v.dump();
+        first = false;
+      }
+    std::cerr << '\n';
+    broken = true;
+  }
+
+  // `returned == 0` and not merely `entries.empty()`: a page whose every value
+  // was skipped is also empty, and calling that "a normal answer" on stdout
+  // would contradict the SKIPPED line just written to stderr.
+  if (res.entries.empty() && res.returned == 0)
+    std::cout << "  (empty -- measured 2026-08-11, this is a 200 and a normal answer)\n";
+  for (const auto& [key, value] : res.entries) std::cout << "  " << key << " -> " << value << '\n';
+
+  // Cross-check every target against the catalogue itself. Two endpoints make a
+  // claim about the same model ids and nothing had ever compared them; on
+  // 2026-08-11 every one of the 30 targets across both operations resolved.
+  //
+  // This is reported but does NOT fail the leg, and the line matters: a retired
+  // target is Venice's data drifting, not a defect in this library, and no code
+  // change here could turn it green. The checks above are the ones a library bug
+  // can cause, and those do fail.
+  if (!res.entries.empty()) {
+    const auto catalogue = client.models(res.type ? *res.type : std::string_view{});
+    if (!catalogue) {
+      std::cerr << "  (catalogue cross-check skipped: models() failed -- "
+                << catalogue.error().message << ")\n";
+    } else {
+      std::vector<std::string> unknown;
+      for (const auto& [key, value] : res.entries) {
+        const auto hit = std::find_if(catalogue->begin(), catalogue->end(),
+                                      [&value](const venice::Model& m) { return m.id == value; });
+        if (hit == catalogue->end()) unknown.push_back(key + " -> " + value);
+      }
+      if (unknown.empty()) {
+        std::cout << "cross-check        : all " << res.entries.size() << " targets are in the "
+                  << catalogue->size() << "-model catalogue\n";
+      } else {
+        std::cerr << "  TARGETS NOT IN THE CATALOGUE (server-side drift, not a library bug): ";
+        for (std::size_t i = 0; i < unknown.size(); ++i)
+          std::cerr << (i != 0U ? ", " : "") << unknown[i];
+        std::cerr << '\n';
+      }
+    }
+  }
+
+  return broken ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
+// `--traits [type]`: which model currently holds which capability.
+auto show_model_traits(const venice::Client& client, std::string_view type) -> int {
+  const auto res = client.model_traits(type);
+  if (!res) {
+    std::cerr << "model traits failed [" << venice::to_string(res.error().kind) << "] "
+              << res.error().message << '\n';
+    // "HTTP 400" alone names nothing; the body is where the server says which
+    // values it would have accepted.
+    if (!res.error().body.empty()) std::cerr << res.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+  return report_catalogue(*res, client, "traits", type);
+}
+
+// `--compat [type]`: what a foreign vendor's model id resolves to here.
+//
+// Worth running with no argument and then with `all` to see the divergence this
+// ticket documents: traits accepts `all`, this does not, and the 400 it answers
+// with is the evidence for passing `type` through untouched.
+auto show_compatibility_mapping(const venice::Client& client, std::string_view type) -> int {
+  const auto res = client.model_compatibility_mapping(type);
+  if (!res) {
+    std::cerr << "compatibility mapping failed [" << venice::to_string(res.error().kind) << "] "
+              << res.error().message << '\n';
+    if (!res.error().body.empty()) std::cerr << res.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+  return report_catalogue(*res, client, "compatibility", type);
+}
+
 // `--characters [search]`: the live check VC-04 could not run offline, and the
 // reason its PR says "documented, not captured".
 //
@@ -229,37 +428,6 @@ auto list_characters(const venice::Client& client, std::string_view search) -> i
     std::cout << '\n';
   }
   return EXIT_SUCCESS;
-}
-
-// Name the keys an object carries that nothing here models.
-//
-// One implementation, and that is the point rather than the tidiness. This was
-// written twice — once for `usage`, once for the envelope beside it — and
-// VC-36's reviews leg would have been the third copy. AGENTS.md's rule is that
-// a leg reporting a sub-object reports the object it came out of; a rule with a
-// copy per leg is a rule the next leg is exempt from, which is exactly how
-// `cost` rode untyped for three releases.
-//
-// It lives up here, above its first caller, rather than beside the chat report
-// sets it was extracted from — the alternative is a forward declaration whose
-// only purpose is to keep the definition somewhere prettier.
-//
-// The is_object guard is not defensive: nlohmann's items() on a scalar yields
-// one pair with an empty key, so a body that is not an object would otherwise
-// be reported as carrying an unmodeled key named "".
-void report_unmodeled(std::string_view label, const nlohmann::json& obj,
-                      std::span<const std::string_view> modeled,
-                      std::string_view reachable_via) {
-  if (!obj.is_object()) return;
-  std::vector<std::string> unmodeled;
-  for (const auto& [k, v] : obj.items())
-    if (std::find(modeled.begin(), modeled.end(), k) == modeled.end()) unmodeled.push_back(k);
-  if (unmodeled.empty()) return;
-
-  std::cerr << label;
-  for (std::size_t i = 0; i < unmodeled.size(); ++i)
-    std::cerr << (i != 0U ? ", " : "") << unmodeled[i];
-  std::cerr << "   (reachable via " << reachable_via << ")\n";
 }
 
 // ── the reviews half of `--character` (VC-36, #56) ────────────────────────
@@ -1007,26 +1175,46 @@ auto usage_report(const venice::Client& client, std::string_view model) -> int {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  const std::string_view leg = argc > 1 ? std::string_view{argv[1]} : std::string_view{};
+  const std::string_view arg = argc > 2 ? std::string_view{argv[2]} : std::string_view{};
+
+  // The two legs that need no credential (VC-38, #59), dispatched above the key
+  // lookup deliberately. Measured 2026-08-11: /models/traits and
+  // /models/compatibility_mapping both answer 200 with no Authorization header
+  // at all. Leaving them below the guard would have made them unrunnable in
+  // exactly the configuration they exist to prove, and would have left the
+  // guard's message — "nothing to call" — saying something about this library
+  // that is no longer true.
+  //
+  // They use public_access() even when a key IS set, so the leg tests the public
+  // path rather than whatever the environment happens to hold.
+  if (leg == "--traits")
+    return show_model_traits(venice::Client{venice::Authentication::public_access()}, arg);
+  if (leg == "--compat")
+    return show_compatibility_mapping(venice::Client{venice::Authentication::public_access()},
+                                      arg);
+
   const char* key = std::getenv("VENICE_API_KEY");
   if (key == nullptr || *key == '\0') {
-    std::cerr << "VENICE_API_KEY not set; nothing to call (library links fine).\n";
+    std::cerr << "VENICE_API_KEY not set; nothing to call with a credential.\n"
+                 "(--traits and --compat need no key and run without one.)\n";
     return EXIT_SUCCESS;
   }
 
   const venice::Client client{key};
-  if (argc > 1 && std::string_view{argv[1]} == "--models")
-    return list_models(client, argc > 2 ? argv[2] : "");
-  if (argc > 1 && std::string_view{argv[1]} == "--characters")
-    return list_characters(client, argc > 2 ? argv[2] : "");
-  if (argc > 1 && std::string_view{argv[1]} == "--character")
-    return show_character(client, argc > 2 ? argv[2] : "");
-  if (argc > 1 && std::string_view{argv[1]} == "--stream")
-    return stream_report(client, argc > 2 ? argv[2]
-                                          : "Think step by step: what is 17 * 23?");
-  if (argc > 1 && std::string_view{argv[1]} == "--tools")
-    return tools_report(client, argc > 2 ? argv[2] : "");
-  if (argc > 1 && std::string_view{argv[1]} == "--usage")
-    return usage_report(client, argc > 2 ? argv[2] : "");
+  if (leg == "--models") return list_models(client, arg);
+  if (leg == "--characters") return list_characters(client, arg);
+  if (leg == "--character") return show_character(client, arg);
+  // argc, not arg.empty(): every other leg treats "" as "no argument", but this
+  // one has a default prompt, so conflating the two would make `--stream ""`
+  // silently send 17*23 instead of the empty prompt it used to send. That is a
+  // real case to be able to smoke — the server's 400 for it — and the
+  // pre-VC-38 dispatch could reach it.
+  if (leg == "--stream")
+    return stream_report(client, argc > 2 ? std::string{arg}
+                                          : std::string{"Think step by step: what is 17 * 23?"});
+  if (leg == "--tools") return tools_report(client, arg);
+  if (leg == "--usage") return usage_report(client, arg);
 
   const std::string prompt = argc > 1 ? argv[1] : "Say hello in one short sentence.";
 

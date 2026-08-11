@@ -15,7 +15,11 @@ AGENTS.md (which holds standing conventions, not state).
 - Per-request timeouts, a `CancelToken`, and an authentication override on every
   entry point (VC-06/VC-23).
 - `models()` list with typed per-model metadata, filterable by modality
-  (105 text / 299 all, fetched live), `balance()` rate-limit endpoint.
+  (106 text / 314 all / 48 code, fetched live 2026-08-11), `balance()`
+  rate-limit endpoint.
+- `model_traits(type)` and `model_compatibility_mapping(type)` (VC-38) — the
+  catalogue's own answer to "which model", and the first two operations in this
+  library that need no credential at all. Verified live keyless on 2026-08-11.
 - `characters()` list with typed per-character metadata and a `CharacterQuery`
   carrying the endpoint's filters and its pagination (VC-04). Verified live on
   2026-08-09: every modeled key present, no unmodeled key, default page 50.
@@ -31,9 +35,10 @@ AGENTS.md (which holds standing conventions, not state).
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 6/49 operations implemented. The other 43 are assigned to
+- OpenAPI coverage: 8/49 operations implemented. The other 41 are assigned to
   family issues and checked in `cmake/openapi_manifest.json` (VC-35). Characters
-  is the first family to reach 3/3.
+  and Models are both 3/3 on operations; Models keeps its epic open for the
+  `Model` metadata half (VC-39, #60).
 
 **Build system synced with cpp-template, tagged v0.1.0 — the first release.**
 The repo was scaffolded before upstream's fix rounds landed, so it was running a
@@ -74,6 +79,87 @@ a single-family run.
    speculatively.
 4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-38 (#59) is done** — see v0.16.0. It is the first ticket here whose whole
+contract was measured before a line of it was written, because for once that was
+possible: both operations answer without a key.
+
+`Client::model_traits(type)` and `Client::model_compatibility_mapping(type)`
+take the Models family to 3/3 on operations. `models()` hands back a hundred-odd
+entries and leaves "which one" to the caller; these two answer it. Traits maps a
+Venice capability name to the model currently holding it, and the mapping goes
+the other way, from a foreign vendor's model id to what serves it here — which
+is what lets an OpenAI-shaped codebase port without a translation table of its
+own going stale.
+
+**These are the first legs that run without a key** — which is not the same as
+the first public operations, and the review of this branch is what caught the
+difference. `models()` is `PublicOrBearer` too, and on the same 2026-08-11 run
+`/models` answered 200 with no `Authorization` header, exactly as the two new
+ones did; `/characters` answered 402. So the whole Models family has been
+reachable without a credential since VC-13, and nothing here had ever
+demonstrated it: `Authentication::public_access()` has existed since VC-23 but
+every live leg sat behind `main()`'s `VENICE_API_KEY` early-return, so the
+public path was proven only against the loopback fixture. `--traits` and
+`--compat` dispatch above that guard and use `public_access()` even when a key
+is set.
+
+The first draft of this entry, and of the README and both headers, claimed these
+were "the only operations in this library" that answer without a credential.
+That was written from the shape of the tickets rather than from a measurement,
+and this branch's own catalogue cross-check disproves it in passing — it calls
+`models()` from a keyless public client on every run. `server-claims-need-measuring`
+applies to the claims a PR makes about its own work, not only to the ones it
+inherits.
+
+What the live runs settled, all on 2026-08-11 and all with no key in the
+environment:
+
+- Both answer 200 with no `Authorization` header. `/models/traits` answers 200
+  even for an *invalid* bearer — it serves publicly regardless of the header.
+- **The two operations do not accept the same `type` values, despite
+  byte-identical `parameters` blocks in Venice's OpenAPI document.**
+  `traits?type=all` is a 200 with ten entries and `traits?type=code` a 200 with
+  one; `compatibility_mapping?type=all` is a **400** naming the nine modalities
+  it will take. The document's request enum omits `all` and `code` for both,
+  which is wrong for the first and right for the second, while its *response*
+  enum adds them back for both. This is the sharpest case yet for the standing
+  rule that filters are caller-supplied strings: a validated set in the header
+  would have had to encode a mistake the specification itself makes.
+- An empty result is a success, not a 404 — `traits?type=tts`, `?type=video`,
+  `?type=embedding` and `compatibility_mapping?type=image` all return `"data":{}`
+  with 200. The jessica-2 lesson from VC-36 arriving a second time.
+- The response `type` echoes the filter the server actually applied, so a caller
+  that sends nothing is told it got `text` rather than left to assume. The leg
+  turns that into a check: a query string that never arrived shows up as an echo
+  mismatch, and nothing else in the leg can see one.
+- `"object":"list"` over a `data` that is an object, not a list. Recorded as
+  measured, not corrected.
+- Trait key spelling is not uniform — `most_intelligent` beside `eliza-default`
+  — and every mapping key is a foreign vendor id. No enum was ever possible.
+- Every one of the 30 targets across both operations resolves to a real id in
+  `models()`, and no mapping key collides with a real catalogue id, so an alias
+  can never shadow a model a caller could have named directly. The leg re-checks
+  this on every run but does **not** fail on it: a retired target is Venice's
+  data drifting, not a defect here, and no change to this code could turn it
+  green.
+
+The design decision worth carrying forward is the one about the `data` envelope.
+Three parsers in `types.hpp` fall back to the whole body when `data` is absent,
+and copying that here would have been the obvious move and wrong: those demand
+an *array* while the envelope is an *object*, so the fallback is type-disjoint,
+whereas both levels here are objects and `{"object":"list","type":"text"}` would
+have parsed into a two-entry map and reported success. `test/09catalogue/` pins
+that exact body as the one case a reintroduced fallback would turn red — nothing
+else in the suite can see it, since the map would be populated and `raw` intact.
+The generalisation is now in AGENTS.md.
+
+Also filed: **VC-39 (#60)**, the other half of #40 — extending `Model` with
+modality constraints, output options, voice-cloning capability and deprecation
+metadata for the media epics. Split out because it touches a type every existing
+caller already uses, needs live captures across non-text modalities that
+`test/04models/` does not cover, and flips no manifest state. #40 stays open for
+it.
 
 **VC-36 (#56) and VC-37 (#57) are done** — see v0.15.0, and the second of them
 is the first ticket in this repo that a live leg filed on itself.

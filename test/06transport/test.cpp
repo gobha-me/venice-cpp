@@ -110,6 +110,11 @@ class Gate {
 //                                        returns detail-specific failures.
 //   GET  /api/v1/characters/{slug}/reviews — the same, one route deeper, and
 //        registered ahead of the catch-all above it.
+//   GET  /api/v1/models/traits  and  /api/v1/models/compatibility_mapping —
+//        echo the encoded target and the Authorization header *inside* `data`,
+//        where the typed map surface makes them assertable. The mapping route
+//        refuses type=all with the real 400 body; the traits route answers
+//        type=no-data with a 200 that has no `data` at all.
 //
 // Request counts are exposed so a test can assert a call did not happen, which
 // no clock reading can establish.
@@ -195,6 +200,88 @@ class TestServer {
                 ++m_stall_hits;
                 m_gate.wait(kStallCap);
                 res.set_content("{}", "application/json");
+              });
+
+    // The two catalogue sub-paths (VC-38, #59), registered ahead of
+    // /api/v1/models below. Unlike the characters pair further down there is no
+    // shadowing hazard to defuse here — "/api/v1/models" carries no regex
+    // metacharacter, so httplib registers it as an exact string match and it
+    // cannot swallow "/api/v1/models/traits". The ordering is insurance against
+    // the day someone turns that route into a pattern, and the reason is written
+    // here so a future reader does not conclude the two cases were reasoned
+    // about differently.
+    //
+    // Both handlers echo into `data` itself rather than beside it. That is not
+    // laziness: `data` values are strings and therefore land in `entries`, where
+    // a test can assert the exact encoded wire target and the Authorization
+    // header the client sent through the public typed surface, with no special
+    // access to the response.
+    m_svr.Get("/api/v1/models/traits",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                ++m_traits_hits;
+                if (req.target.find("type=no-data") != std::string::npos) {
+                  // A 200 whose body is the envelope minus its data. The parser
+                  // must call this Parse rather than reporting a two-entry map;
+                  // see the headline case in test/09catalogue/.
+                  res.set_content(R"({"object":"list","type":"text"})", "application/json");
+                  return;
+                }
+                res.set_content(
+                    nlohmann::json{
+                        {"data",
+                         {{"target", req.target},
+                          // "present:" prefix, because httplib's
+                          // get_header_value returns "" both for a missing
+                          // header and for one sent with an empty value — and
+                          // telling those apart is the entire point of the
+                          // public-auth case below.
+                          {"authorization", req.has_header("Authorization")
+                                                ? "present:" + req.get_header_value("Authorization")
+                                                : std::string{}}}},
+                        {"object", "list"},
+                        {"type", "text"}}
+                        .dump(),
+                    "application/json");
+              });
+
+    m_svr.Get("/api/v1/models/compatibility_mapping",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                ++m_compat_hits;
+                if (req.target.find("type=all") != std::string::npos) {
+                  // The real refusal, captured 2026-08-11. /models/traits accepts
+                  // type=all and this operation does not, despite identical
+                  // `parameters` blocks in the OpenAPI document — so this branch
+                  // is the fixture half of the decision to pass `type` through
+                  // rather than validate it in the client. What the caller must
+                  // get back is the server's own message naming the accepted set;
+                  // a local InvalidArg could not have produced it.
+                  res.status = 400;
+                  res.set_header("X-Protocol-Trace", "compat-enum-refused");
+                  res.set_content(
+                      R"({"error":"Invalid request parameters","details":{"_errors":[],)"
+                      R"("type":{"_errors":["Invalid enum value. Expected 'asr' | 'embedding' )"
+                      R"(| 'image' | 'music' | 'text' | 'tts' | 'upscale' | 'inpaint' | )"
+                      R"('video', received 'all'"]}},"issues":[{"received":"all",)"
+                      R"("code":"invalid_enum_value","path":["type"]}]})",
+                      "application/json");
+                  return;
+                }
+                res.set_content(
+                    nlohmann::json{
+                        {"data",
+                         {{"target", req.target},
+                          // "present:" prefix, because httplib's
+                          // get_header_value returns "" both for a missing
+                          // header and for one sent with an empty value — and
+                          // telling those apart is the entire point of the
+                          // public-auth case below.
+                          {"authorization", req.has_header("Authorization")
+                                                ? "present:" + req.get_header_value("Authorization")
+                                                : std::string{}}}},
+                        {"object", "list"},
+                        {"type", "text"}}
+                        .dump(),
+                    "application/json");
               });
 
     m_svr.Get("/api/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
@@ -364,6 +451,8 @@ class TestServer {
   [[nodiscard]] auto chat_hits() const -> int { return m_chat_hits.load(); }
   [[nodiscard]] auto character_hits() const -> int { return m_character_hits.load(); }
   [[nodiscard]] auto review_hits() const -> int { return m_review_hits.load(); }
+  [[nodiscard]] auto traits_hits() const -> int { return m_traits_hits.load(); }
+  [[nodiscard]] auto compat_hits() const -> int { return m_compat_hits.load(); }
   [[nodiscard]] auto multipart_stall_hits() const -> int { return m_multipart_stall_hits.load(); }
 
   static constexpr int kFrames = 2;
@@ -381,8 +470,21 @@ class TestServer {
   std::atomic<int> m_chat_hits{0};
   std::atomic<int> m_character_hits{0};
   std::atomic<int> m_review_hits{0};
+  std::atomic<int> m_traits_hits{0};
+  std::atomic<int> m_compat_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
 };
+
+// What the catalogue fixture echoed under `key`, or a marker naming what was
+// missing. find() returns nullptr for an absent key, so a REQUIRE that
+// dereferences it directly *crashes* the run instead of failing it — and the
+// key going absent is exactly the regression these cases exist to catch, so it
+// is the one failure mode that must stay readable.
+template <typename Result>
+auto echoed(const Result& res, std::string_view key) -> std::string {
+  const std::string* value = res.find(key);
+  return value != nullptr ? *value : "(absent: " + std::string{key} + ")";
+}
 
 auto minimal_chat() -> ChatRequest {
   ChatRequest r;
@@ -642,6 +744,178 @@ TEST_CASE("a reviews page arrives with its pagination and summary", "[transport]
   REQUIRE(page->pagination->total_pages == 5);
   REQUIRE(page->summary.has_value());
   REQUIRE(page->summary->average_rating == 4.7);
+}
+
+// ── the catalogue sub-paths (VC-38, #59) ──────────────────────────────────
+//
+// Failure matrix first, as everywhere. What is only visible from here — and not
+// from test/09catalogue/ — is the target that actually went on the wire, the
+// header the client chose to send, and how a non-2xx status is classified.
+
+TEST_CASE("the catalogue calls reject impossible auth modes before the socket",
+          "[transport][auth][catalogue][failure]") {
+  const TestServer server;
+
+  // Both impossible modes against BOTH operations, rather than one each. The
+  // asymmetric version of this case passed while covering half of it: if
+  // model_compatibility_mapping's policy were copy-pasted to
+  // BearerOrSignInWithX, a SIWX client would have put a SIGN-IN-WITH-X header on
+  // the wire and nothing here would have noticed, because compat was only ever
+  // probed with x402.
+  const Client siwx_client{Authentication::sign_in_with_x("signed-wallet"), server.base_url()};
+  const auto siwx_traits = siwx_client.model_traits();
+  REQUIRE_FALSE(siwx_traits.has_value());
+  REQUIRE(siwx_traits.error().kind == ErrorKind::InvalidArg);
+
+  const auto siwx_compat = siwx_client.model_compatibility_mapping();
+  REQUIRE_FALSE(siwx_compat.has_value());
+  REQUIRE(siwx_compat.error().kind == ErrorKind::InvalidArg);
+
+  const Client payment_client{Authentication::x402_payment("payment-payload"),
+                              server.base_url()};
+  const auto payment_traits = payment_client.model_traits();
+  REQUIRE_FALSE(payment_traits.has_value());
+  REQUIRE(payment_traits.error().kind == ErrorKind::InvalidArg);
+
+  const auto payment_compat = payment_client.model_compatibility_mapping();
+  REQUIRE_FALSE(payment_compat.has_value());
+  REQUIRE(payment_compat.error().kind == ErrorKind::InvalidArg);
+  // The credential must not leak into the diagnostic of a call that never left.
+  REQUIRE(payment_compat.error().message.find("payment-payload") == std::string::npos);
+
+  // An empty Bearer is not the same thing as public access, and the distinction
+  // matters more on these two endpoints than anywhere else: they would have
+  // answered 200 to a request carrying no credential at all, so a client that
+  // silently degraded an empty token to public would look like it worked.
+  const Client empty_bearer{"", server.base_url()};
+  const auto empty_traits = empty_bearer.model_traits();
+  REQUIRE_FALSE(empty_traits.has_value());
+  REQUIRE(empty_traits.error().kind == ErrorKind::InvalidArg);
+
+  const auto empty_compat = empty_bearer.model_compatibility_mapping();
+  REQUIRE_FALSE(empty_compat.has_value());
+  REQUIRE(empty_compat.error().kind == ErrorKind::InvalidArg);
+
+  // Nothing reached the peer in any of the six.
+  REQUIRE(server.traits_hits() == 0);
+  REQUIRE(server.compat_hits() == 0);
+}
+
+TEST_CASE("a refused type filter reaches the caller with its status and body intact",
+          "[transport][catalogue][failure]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  // The decision this pins: `type` is passed through, not validated here. The
+  // client sends "all", the server refuses it, and the refusal arrives whole.
+  const auto res = client.model_compatibility_mapping("all");
+  REQUIRE_FALSE(res.has_value());
+  REQUIRE(res.error().kind == ErrorKind::Http);
+  REQUIRE(res.error().status == 400);
+  REQUIRE(server.compat_hits() == 1);
+
+  // The part a local guard could never have produced: the server names the set
+  // it will accept. That string is the whole reason not to guess it here.
+  REQUIRE(res.error().body.find("Invalid enum value") != std::string::npos);
+  REQUIRE(res.error().body.find("received 'all'") != std::string::npos);
+  REQUIRE(res.error().metadata.header("x-protocol-trace") == "compat-enum-refused");
+
+  // And the asymmetry itself: the same value on the sibling operation is fine.
+  // Byte-identical `parameters` blocks in the OpenAPI document, two different
+  // answers on the wire — measured 2026-08-11.
+  const auto traits = client.model_traits("all");
+  REQUIRE(traits.has_value());
+  REQUIRE(server.traits_hits() == 1);
+}
+
+TEST_CASE("a 200 with no data object is a parse failure, not an empty map",
+          "[transport][catalogue][failure]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  // The transport twin of test/09catalogue/'s headline case. A client that
+  // copied the list-endpoint `data ? *data : j` fallback would return a
+  // successful two-entry map here and this is where that would surface as a
+  // caller acting on {object -> "list", type -> "text"}.
+  const auto res = client.model_traits("no-data");
+  REQUIRE_FALSE(res.has_value());
+  REQUIRE(res.error().kind == ErrorKind::Parse);
+  REQUIRE(res.error().status == 200);  // the transport was fine; the body was not
+  REQUIRE(res.error().message.starts_with("model traits parse: model traits:"));
+  REQUIRE(res.error().body == R"({"object":"list","type":"text"})");
+}
+
+TEST_CASE("the catalogue calls put the exact encoded target on the wire",
+          "[transport][catalogue]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  // No filter: no query string at all. This is the empty-skip contract, and it
+  // is what every caller that passes nothing depends on.
+  const auto bare = client.model_traits();
+  REQUIRE(bare.has_value());
+  REQUIRE(echoed(*bare, "target") == "/api/v1/models/traits");
+
+  const auto filtered = client.model_traits("image");
+  REQUIRE(filtered.has_value());
+  REQUIRE(echoed(*filtered, "target") == "/api/v1/models/traits?type=image");
+
+  // A value needing encoding. The pair separators must survive as data rather
+  // than becoming structure — otherwise a filter could address a different query.
+  const auto encoded = client.model_traits("a b&type=admin");
+  REQUIRE(encoded.has_value());
+  REQUIRE(echoed(*encoded, "target") == "/api/v1/models/traits?type=a%20b%26type%3Dadmin");
+
+  const auto compat = client.model_compatibility_mapping("text");
+  REQUIRE(compat.has_value());
+  REQUIRE(echoed(*compat, "target") == "/api/v1/models/compatibility_mapping?type=text");
+
+  // The paths do not collide with /models. Asserted through the hit counters
+  // because a route mix-up is exactly the failure that still returns a valid
+  // body — /models would parse into an empty map rather than an error.
+  REQUIRE(server.models_hits() == 0);
+  REQUIRE(server.traits_hits() == 3);
+  REQUIRE(server.compat_hits() == 1);
+}
+
+TEST_CASE("the catalogue calls send no credential when the client is public",
+          "[transport][auth][catalogue]") {
+  const TestServer server;
+  const Client public_client{Authentication::public_access(), server.base_url()};
+
+  // These are the endpoints where public is the *expected* mode rather than a
+  // tolerated one, so the assertion has to be that the header is **absent**, not
+  // that its value is empty. Those are different failures and only one of them
+  // is correct: a client that sent `Authorization:` with nothing after it would
+  // still be answered 200 by the real server, so nothing downstream would ever
+  // reveal the bug.
+  //
+  // httplib's get_header_value returns "" for both, which is why the fixture
+  // echoes a "present:" prefix instead of the bare value — without it this case
+  // reads as if it distinguishes them while asserting only the weaker half.
+  const auto traits = public_client.model_traits();
+  REQUIRE(traits.has_value());
+  REQUIRE(echoed(*traits, "authorization").empty());  // absent, not "present:"
+
+  const auto compat = public_client.model_compatibility_mapping();
+  REQUIRE(compat.has_value());
+  REQUIRE(echoed(*compat, "authorization").empty());
+
+  // Both directions of the per-call override, on both operations.
+  const auto bearer_override =
+      public_client.model_traits({}, {.authentication = Authentication::bearer("override-token")});
+  REQUIRE(bearer_override.has_value());
+  REQUIRE(echoed(*bearer_override, "authorization") == "present:Bearer override-token");
+
+  const Client bearer_client{"default-token", server.base_url()};
+  const auto keyed = bearer_client.model_compatibility_mapping();
+  REQUIRE(keyed.has_value());
+  REQUIRE(echoed(*keyed, "authorization") == "present:Bearer default-token");
+
+  const auto public_override = bearer_client.model_compatibility_mapping(
+      {}, {.authentication = Authentication::public_access()});
+  REQUIRE(public_override.has_value());
+  REQUIRE(echoed(*public_override, "authorization").empty());
 }
 
 TEST_CASE("public and Bearer model calls honor per-call authentication overrides",

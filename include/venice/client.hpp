@@ -11,6 +11,9 @@
 //   * chat_stream(req, on_token)    -> expected<ChatResponse>   (content text)
 //   * chat_stream(req, acc[, on_delta])                         (structured)
 //   * models()                      -> expected<vector<Model>>
+//   * model_traits(type)            -> expected<ModelTraits>
+//   * model_compatibility_mapping(type)
+//                                   -> expected<ModelCompatibilityMapping>
 //   * characters(query)             -> expected<CharacterPage>
 //   * character(slug)               -> expected<Character>
 //   * character_reviews(slug, query)-> expected<CharacterReviewPage>
@@ -704,6 +707,84 @@ class Client {
       return std::unexpected{Error{ErrorKind::Parse, res->status,
                                    std::string{"models parse: "} + e.what(), res->raw_body,
                                    std::move(res->metadata)}};
+    }
+  }
+
+  // ── the catalogue's own answers ───────────────────────────────────────
+  //
+  // models() hands back a hundred-odd entries and leaves "which one" to the
+  // caller. These two answer it (VC-38, #59). /models/traits maps a Venice
+  // capability name to the model currently holding it — "default",
+  // "most_intelligent", "default_vision" — and /models/compatibility_mapping
+  // maps a foreign vendor's model id to the Venice model serving it, so code
+  // ported from an OpenAI-shaped client can look up what "gpt-4o" resolves to
+  // here without a table of its own going stale.
+  //
+  // **Both are public, and so is models().** Measured 2026-08-11: all three
+  // Models operations answer 200 with no Authorization header at all, and traits
+  // answers 200 even for an *invalid* bearer; /characters answers 402 on the
+  // same run, which is the contrast. Authentication::public_access() has existed
+  // since VC-23 (#38), but no live leg had ever run without a key — every one of
+  // them sat behind main()'s VENICE_API_KEY guard, so the public path was proven
+  // only against the loopback fixture. --traits and --compat dispatch above that
+  // guard and are the first legs to exercise it against the real server.
+  //
+  // The parse halves are venice::model_traits_from_json_body and
+  // venice::model_compatibility_mapping_from_json_body, outside this class for
+  // the same reason models_from_json_body is: the whole failure matrix is then
+  // reachable offline, in test/09catalogue/.
+  //
+  // `type` is a caller-supplied string, not an enum, on the same reasoning as
+  // models(type) — and with a sharper case for it. Measured 2026-08-11, these
+  // two operations do NOT accept the same values despite byte-identical
+  // `parameters` blocks in Venice's own OpenAPI document:
+  //
+  //     GET /models/traits?type=all                 -> 200, ten entries
+  //     GET /models/compatibility_mapping?type=all  -> 400
+  //
+  // The document's request enum lists only the nine modalities for both, which
+  // is wrong for traits (it takes "all" and "code" too) and right for
+  // compatibility_mapping. A validated set hardcoded here would have to encode a
+  // divergence the spec itself gets wrong, and would be wrong a second time the
+  // day Venice adds "all" to the mapping — which its own *response* enum already
+  // anticipates. The server's 400 also names the accepted set verbatim and lands
+  // intact in Error::body, which no local InvalidArg could manage.
+  //
+  // An empty type — the default — sends no query string and Venice reads that as
+  // type=text. The response echoes the filter it actually applied, so the result
+  // says which catalogue arrived rather than leaving the caller to assume.
+  //
+  // An empty result is a success, not a failure: measured the same day,
+  // traits?type=tts and compatibility_mapping?type=image both return 200 with an
+  // empty map rather than a 404.
+  [[nodiscard]] auto model_traits(std::string_view type = {},
+                                  const RequestOptions& opts = {}) const
+      -> std::expected<ModelTraits, Error> {
+    auto res = get_json_response(detail::with_query("/models/traits", {{"type", type}}),
+                                 detail::AuthPolicy::PublicOrBearer, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      return model_traits_from_json_body(res->body);
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"model traits parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto model_compatibility_mapping(std::string_view type = {},
+                                                 const RequestOptions& opts = {}) const
+      -> std::expected<ModelCompatibilityMapping, Error> {
+    auto res =
+        get_json_response(detail::with_query("/models/compatibility_mapping", {{"type", type}}),
+                          detail::AuthPolicy::PublicOrBearer, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      return model_compatibility_mapping_from_json_body(res->body);
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"model compatibility mapping parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
     }
   }
 
