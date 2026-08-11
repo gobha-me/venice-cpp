@@ -13,6 +13,7 @@
 //   * models()                      -> expected<vector<Model>>
 //   * characters(query)             -> expected<CharacterPage>
 //   * character(slug)               -> expected<Character>
+//   * character_reviews(slug, query)-> expected<CharacterReviewPage>
 //   * balance()                     -> expected<json>           (rate-limit/balance)
 //
 // A ChatResponse carries the whole assistant turn as a Message, so a reply can
@@ -786,6 +787,60 @@ class Client {
       return std::unexpected{Error{ErrorKind::Parse, res->status,
                                    std::string{"character parse: "} + e.what(), res->raw_body,
                                    std::move(res->metadata)}};
+    }
+  }
+
+  // The reviews behind a character's rating (VC-36, #56), and the operation
+  // that completes the family. CharacterStats has reported averageRating since
+  // VC-04 with no way to read a single review it averaged.
+  //
+  // Slug handling is character()'s exactly — one encoded path segment, empty
+  // rejected before auth or transport — and it has to be, because this path has
+  // something *after* the segment. An unencoded slash here would not merely
+  // reach a different character; `a/b` would address
+  // /characters/a/b/reviews, which is not this operation at all.
+  //
+  // The query is a separate type from CharacterQuery on purpose: this endpoint
+  // pages by page/pageSize and the listing by offset/limit (see
+  // CharacterReviewQuery). A default-constructed query sends the bare path with
+  // no query string.
+  //
+  // Paging is honest here in a way characters() cannot be, because the response
+  // carries pagination:
+  //
+  //   venice::CharacterReviewQuery q;
+  //   q.page = 1;
+  //   for (;;) {
+  //     const auto page = client.character_reviews("alan-watts", q);
+  //     if (!page) break;                                  // inspect the error
+  //     for (const auto& r : page->entries) use(r);
+  //     if (!page->pagination || !page->pagination->total_pages) break;
+  //     if (*q.page >= *page->pagination->total_pages) break;
+  //     ++*q.page;
+  //   }
+  //
+  // Bearer-only, like the rest of the family, and the same preview-API caveat:
+  // CharacterReview::raw and CharacterReviewPage::raw are where anything this
+  // client does not model survives.
+  [[nodiscard]] auto character_reviews(std::string_view slug,
+                                       const CharacterReviewQuery& query = {},
+                                       const RequestOptions& opts = {}) const
+      -> std::expected<CharacterReviewPage, Error> {
+    if (slug.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "character slug must not be empty", {}}};
+
+    const auto params = character_review_query_params(query);
+    const auto path = detail::with_path_segment("/characters", slug) + "/reviews";
+    auto res = get_json_response(detail::with_query(path, params),
+                                 detail::AuthPolicy::BearerOnly, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      return character_reviews_from_json_body(res->body);
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"character reviews parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
     }
   }
 

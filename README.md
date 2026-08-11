@@ -38,10 +38,12 @@ right bridge.
   …), and a full rate card with cache buckets and extended-context tiers, plus
   the verbatim entry as `raw`. Filterable by modality — `models("image")`,
   `models("all")` — since the endpoint's own default is text-only.
-- **Characters** (`/characters`, `/characters/{slug}`) — the discovery half of
-  `venice_parameters.character_slug`: slug, name, description, tags, the model
-  a character runs on, and its rating stats, plus the verbatim entry as `raw`.
-  The listing is filterable and pageable; a known slug can be fetched directly.
+- **Characters** (`/characters`, `/characters/{slug}`, `/characters/{slug}/reviews`)
+  — the discovery half of `venice_parameters.character_slug`: slug, name,
+  description, tags, the model a character runs on, and its rating stats, plus
+  the verbatim entry as `raw`. The listing is filterable and pageable, a known
+  slug can be fetched directly, and the reviews behind a rating are pageable
+  with the server's own page count.
 - **Explicit authentication** — Public, Bearer, pre-signed SIWX and pre-built
   x402 payment payloads are distinct modes, selectable per client or per call.
   The client never owns wallet private keys or constructs signatures.
@@ -60,7 +62,7 @@ retries/backoff, async.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 5/49 operations implemented.
+OpenAPI coverage: 6/49 operations implemented.
 
 The checked inventory is [`cmake/openapi_manifest.json`](cmake/openapi_manifest.json),
 keyed by HTTP method + path rather than `operationId` (the published
@@ -433,6 +435,55 @@ Unlike `/models`, this endpoint is Bearer-only. Selecting Public, SIWX or an
 x402 payment for it returns `InvalidArg` before transport; server responses use
 `Auth` for 401/403 and `PaymentRequired` for 402.
 
+### Reading the reviews behind a rating
+
+`stats->average_rating` says a character is rated 4.7 and nothing about why.
+`character_reviews()` is the other half, and it pages by `page`/`pageSize`
+rather than the listing's `offset`/`limit`:
+
+```cpp
+venice::CharacterReviewQuery q;
+q.page = 1;
+q.page_size = 100;
+
+for (;;) {
+  const auto reviews = client.character_reviews("alan-watts", q);
+  if (!reviews) break;                    // inspect reviews.error()
+
+  for (const auto& r : reviews->entries) {
+    if (r.rating) std::cout << *r.rating << "  ";
+    std::cout << r.username.value_or("(anonymous)");
+    if (r.message) std::cout << " — " << *r.message;
+    std::cout << '\n';
+  }
+
+  const auto& p = reviews->pagination;
+  if (!p || !p->total_pages || *q.page >= *p->total_pages) break;
+  ++*q.page;
+}
+```
+
+That loop can be written honestly, which the listing's cannot: this response
+carries `pagination` with the server's own `page`, `page_size`, `total` and
+`total_pages`, so nothing has to be inferred from how many entries parsed.
+Those four are `int` and read strictly — a fractional or out-of-range value
+reads as absent rather than as a truncated page number, and the loop above then
+stops instead of re-reading page one forever. `summary` carries
+`average_rating` and `total_reviews` as doubles, matching `CharacterStats`.
+
+Reviews are separate types (`CharacterReviewQuery`, `CharacterReviewPage`) and
+not a mode of the listing's, because `page = 2` skips a page and `offset = 2`
+skips two entries; one struct meaning both is the kind of difference nobody
+reads twice.
+
+Nothing is dropped from a review for a missing field. A character entry with no
+slug is skipped because a slug is what you hand back to the API; no field on a
+review is such a handle, so an entry carrying only a message is still that
+reviewer's message, and only a non-object element is skipped — while still
+counted in `returned`. The slug is encoded as one path segment here too, and it
+matters more than on the direct fetch: the path continues after the slug, so an
+unencoded `/` would address a route this operation does not own.
+
 **`ChatRequest::extra` is a top-level passthrough**, same idea as
 `VeniceParameters::extra`: Venice accepts sampling keys this struct doesn't
 model (`top_k`, `min_p`, `repetition_penalty`), and `extra` reaches them without
@@ -670,7 +721,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.14.1)
+  GIT_TAG        v0.15.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -803,13 +854,24 @@ spelled on the way out, and now what a `/characters` entry contains — none of 
 came from a capture. `/models` answers for any bearer token; chat and
 `/characters` do not, and the implementing environment had no key.
 (`/characters` was measured far enough to know that: 402 with no credentials,
-401 with a junk bearer.) Three commands settle the rest against the live API:
+401 with a junk bearer.)
+
+**What that costs is no longer hypothetical.** `--character` went unrun for the
+whole of v0.14.0 and v0.14.1, and the first time it did run — during v0.15.0,
+against a key that had become available — it reported `typed slug: (absent)`.
+`/characters/{slug}` answers with an envelope, `{"data": {...}, "object":
+"character"}`, and the parse had been reading the envelope as the character
+since the operation shipped. The offline fixtures could not catch it because
+they were written from the same misreading of the OpenAPI document. Nothing but
+the live leg was ever going to disagree.
+
+These commands settle the rest against the live API:
 
 ```bash
 VENICE_API_KEY=... venice-cpp --stream "..."   # v0.8.0: the reply shapes
 VENICE_API_KEY=... venice-cpp --tools          # v0.9.0: the request shape
 VENICE_API_KEY=... venice-cpp --characters     # v0.10.0: the character entry
-VENICE_API_KEY=... venice-cpp --character SLUG # v0.14.0: direct character fetch
+VENICE_API_KEY=... venice-cpp --character SLUG # v0.14.0: detail + v0.15.0: reviews
 VENICE_API_KEY=... venice-cpp --usage [model]  # v0.12.0: usage + cost + envelope
 ```
 

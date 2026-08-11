@@ -840,8 +840,10 @@
       "method": "GET",
       "path": "/characters/{slug}/reviews",
       "family": "characters",
-      "state": "planned",
-      "tracking_issue": 42,
+      "state": "implemented",
+      "public_api": [
+        "Client::character_reviews"
+      ],
       "security": [
         [
           "BearerAuth"

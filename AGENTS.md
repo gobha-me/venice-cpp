@@ -341,6 +341,31 @@ set-difference per level. Its first live run named `service_tier` on four
 families and four more keys on `llama-3.3-70b`. A leg that reports a sub-object
 reports the object it came out of too.
 
+**A fixture written from the spec cannot check the reading of the spec.** VC-37
+is the whole argument. `Client::character(slug)` shipped in v0.14.0 returning a
+`Character` with every field absent, because `/characters/{slug}` answers with
+an envelope — `{"data": {...}, "object": "character"}` — and the parse read the
+envelope as the character. The offline suite was green throughout, and could
+not have been anything else: the fixtures were built from the same OpenAPI
+document by the same reader, who took `properties.data.properties` for the body
+rather than for the body's `data` member. Parser and fixture shared one wrong
+premise and agreed perfectly with each other.
+
+No amount of offline coverage fixes that, because every case in the file is
+downstream of the premise. Only the wire disagrees. So a spec-derived fixture
+is a *hypothesis about the wire*, and the file that holds it says so out loud
+(`test/08characters/` opens with exactly that caveat) until a capture replaces
+it. When the capture arrives, pin it beside the derived cases rather than
+instead of them — the derived ones still cover shapes the capture does not
+happen to contain.
+
+The corollary for the live legs: **write the check absolutely, not relative to
+what the response happens to contain.** `--character`'s guard asked whether
+raw's `slug` *disagreed* with the typed one. The envelope has no top-level
+`slug`, so the comparison was skipped and the leg passed while every field on
+screen was blank. It could only fire when the parse was nearly right. "A 200
+that parsed no slug at all has failed" is the version that catches both.
+
 **A convergence assertion cannot see a symmetric loss.** `test/07stream/`'s §10
 compares the streamed and non-streamed turns and is the file's payoff — and
 measured while running VC-18's break matrix, deleting the `thought_signature`

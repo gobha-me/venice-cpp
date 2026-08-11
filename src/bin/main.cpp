@@ -10,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -230,10 +231,186 @@ auto list_characters(const venice::Client& client, std::string_view search) -> i
   return EXIT_SUCCESS;
 }
 
+// Name the keys an object carries that nothing here models.
+//
+// One implementation, and that is the point rather than the tidiness. This was
+// written twice — once for `usage`, once for the envelope beside it — and
+// VC-36's reviews leg would have been the third copy. AGENTS.md's rule is that
+// a leg reporting a sub-object reports the object it came out of; a rule with a
+// copy per leg is a rule the next leg is exempt from, which is exactly how
+// `cost` rode untyped for three releases.
+//
+// It lives up here, above its first caller, rather than beside the chat report
+// sets it was extracted from — the alternative is a forward declaration whose
+// only purpose is to keep the definition somewhere prettier.
+//
+// The is_object guard is not defensive: nlohmann's items() on a scalar yields
+// one pair with an empty key, so a body that is not an object would otherwise
+// be reported as carrying an unmodeled key named "".
+void report_unmodeled(std::string_view label, const nlohmann::json& obj,
+                      std::span<const std::string_view> modeled,
+                      std::string_view reachable_via) {
+  if (!obj.is_object()) return;
+  std::vector<std::string> unmodeled;
+  for (const auto& [k, v] : obj.items())
+    if (std::find(modeled.begin(), modeled.end(), k) == modeled.end()) unmodeled.push_back(k);
+  if (unmodeled.empty()) return;
+
+  std::cerr << label;
+  for (std::size_t i = 0; i < unmodeled.size(); ++i)
+    std::cerr << (i != 0U ? ", " : "") << unmodeled[i];
+  std::cerr << "   (reachable via " << reachable_via << ")\n";
+}
+
+// ── the reviews half of `--character` (VC-36, #56) ────────────────────────
+//
+// Every key the reviews parse reads, one set per level. Four sets rather than
+// one because the set-difference is per object, and the two-level version of
+// this report is what VC-20 had to add after `cost` rode untyped for three
+// releases beside a sub-object that was fully reported.
+constexpr std::array<std::string_view, 4> kModeledReviewPageKeys{"data", "object", "pagination",
+                                                                 "summary"};
+constexpr std::array<std::string_view, 9> kModeledReviewKeys{
+    "id",     "characterId",   "createdAt", "isOwner", "locale",
+    "message", "userAvatarUrl", "username",  "rating"};
+constexpr std::array<std::string_view, 4> kModeledPaginationKeys{"page", "pageSize", "total",
+                                                                 "totalPages"};
+constexpr std::array<std::string_view, 2> kModeledSummaryKeys{"averageRating", "totalReviews"};
+
+// One page of reviews, printed verbatim beside the parse.
+//
+// A deliberately small pageSize, and it is a check rather than a courtesy: the
+// response echoes the page size it used, so a query that never reached the
+// server shows up as 20 where 5 was asked for. Nothing else in this leg can see
+// a dropped query string.
+//
+// `stats` is what /characters/{slug} reported for the same character. Two
+// endpoints quote the same average, and until this ran nothing had ever
+// compared them.
+auto show_character_reviews(const venice::Client& client, std::string_view slug,
+                            const std::optional<venice::CharacterStats>& stats) -> int {
+  constexpr int kPageSize = 5;
+
+  std::cout << "\n-- reviews (page 1 of " << kPageSize << ") --\n";
+  const auto res = client.character_reviews(slug, {.page = 1, .page_size = kPageSize});
+  if (!res) {
+    std::cerr << "character reviews failed [" << venice::to_string(res.error().kind) << "] "
+              << res.error().message << '\n';
+    if (!res.error().body.empty()) std::cerr << res.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+
+  std::cout << "reviews, verbatim  : " << res->raw.dump() << '\n';
+
+  bool broken = false;
+
+  // The envelope, then each level inside it.
+  report_unmodeled("unmodeled page keys: ", res->raw, kModeledReviewPageKeys,
+                   "CharacterReviewPage::raw");
+
+  const auto* raw_data = venice::detail::opt_array(res->raw, "data");
+  if (raw_data == nullptr) {
+    std::cerr << "  NO `data` ARRAY IN THE ENVELOPE -- the wire shape moved\n";
+    broken = true;
+  } else if (raw_data->size() != res->returned) {
+    std::cerr << "  RETURNED (" << res->returned << ") != raw data length (" << raw_data->size()
+              << ") -- the page count is wrong\n";
+    broken = true;
+  }
+
+  std::cout << "typed returned     : " << res->returned << " (entries parsed: "
+            << res->entries.size() << ")\n";
+
+  if (res->pagination) {
+    const auto show = [](const char* label, const std::optional<int>& v) {
+      std::cout << label;
+      if (v) std::cout << *v;
+      else std::cout << "(absent -- not an integer this platform can hold)";
+      std::cout << '\n';
+    };
+    show("typed page         : ", res->pagination->page);
+    show("typed pageSize     : ", res->pagination->page_size);
+    show("typed total        : ", res->pagination->total);
+    show("typed totalPages   : ", res->pagination->total_pages);
+
+    if (res->pagination->page_size && *res->pagination->page_size != kPageSize)
+      std::cerr << "   <-- ASKED FOR " << kPageSize
+                << ": either the query never arrived or the server capped it\n";
+    if (const auto* raw_pagination = venice::detail::opt_object(res->raw, "pagination"))
+      report_unmodeled("unmodeled pagination keys: ", *raw_pagination, kModeledPaginationKeys,
+                       "CharacterReviewPage::raw");
+  } else {
+    std::cout << "typed pagination   : (absent)\n";
+    if (venice::detail::opt_object(res->raw, "pagination") != nullptr) {
+      std::cerr << "  TYPED PAGINATION ABSENT while a pagination object arrived -- parse bug\n";
+      broken = true;
+    }
+  }
+
+  if (res->summary) {
+    std::cout << "typed avg rating   : ";
+    if (res->summary->average_rating) std::cout << *res->summary->average_rating;
+    else std::cout << "(absent)";
+    std::cout << "\ntyped totalReviews : ";
+    if (res->summary->total_reviews) std::cout << *res->summary->total_reviews;
+    else std::cout << "(absent)";
+    std::cout << '\n';
+
+    // The cross-endpoint check. /characters/{slug} and this endpoint both quote
+    // an average for the same character; a disagreement is reported and not
+    // failed, because rounding and caching are the server's business and this
+    // leg has no evidence about which one is authoritative.
+    if (stats && stats->average_rating && res->summary->average_rating &&
+        *stats->average_rating != *res->summary->average_rating)
+      std::cout << "   <-- the character object said " << *stats->average_rating
+                << ": the two endpoints round or cache differently\n";
+
+    if (const auto* raw_summary = venice::detail::opt_object(res->raw, "summary"))
+      report_unmodeled("unmodeled summary keys: ", *raw_summary, kModeledSummaryKeys,
+                       "CharacterReviewPage::raw");
+  } else {
+    std::cout << "typed summary      : (absent)\n";
+    if (venice::detail::opt_object(res->raw, "summary") != nullptr) {
+      std::cerr << "  TYPED SUMMARY ABSENT while a summary object arrived -- parse bug\n";
+      broken = true;
+    }
+  }
+
+  if (res->entries.empty()) {
+    std::cout << "   <-- ZERO usable reviews on this page\n";
+    return broken ? EXIT_FAILURE : EXIT_SUCCESS;
+  }
+
+  for (const auto& r : res->entries) {
+    std::cout << "  ";
+    if (r.rating) std::cout << *r.rating;
+    else std::cout << "?";
+    std::cout << "  " << r.username.value_or("(no username)") << "  "
+              << r.created_at.value_or("(no date)");
+    if (r.message) std::cout << "\n      " << *r.message;
+    std::cout << '\n';
+
+    report_unmodeled("  unmodeled review keys: ", r.raw, kModeledReviewKeys,
+                     "CharacterReview::raw");
+
+    // Raw against typed, per entry: an absent typed rating beside a numeric raw
+    // one is a parse bug, which is the only one of the three explanations for a
+    // blank field that this leg can settle.
+    const auto raw_rating = r.raw.find("rating");
+    if (raw_rating != r.raw.end() && raw_rating->is_number() && !r.rating) {
+      std::cerr << "  RAW HAS A NUMERIC rating AND THE PARSE DOES NOT -- parse bug\n";
+      broken = true;
+    }
+  }
+
+  return broken ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
 // `--character <slug>`: the direct-fetch counterpart to --characters (VC-16,
 // #26). Print the whole object because this is a preview API and a typed blank
 // cannot distinguish server absence from a parser looking in the wrong place.
 // The typed-vs-raw slug comparison makes the leg a check rather than a viewer.
+// Since VC-36 it continues into one page of that character's reviews.
 auto show_character(const venice::Client& client, std::string_view slug) -> int {
   if (slug.empty()) {
     std::cerr << "--character requires a slug\n";
@@ -254,6 +431,17 @@ auto show_character(const venice::Client& client, std::string_view slug) -> int 
             << (res->model_id ? *res->model_id : "(absent)") << '\n';
   std::cout << "typed name         : " << (res->name ? *res->name : "(absent)") << '\n';
 
+  // Absolute, not relative, and VC-37 (#57) is what it cost to learn that here.
+  // The comparison below can only fire when the parse is nearly right: it asks
+  // whether raw's slug *disagrees*, and when the whole response turned out to
+  // be an envelope there was no top-level slug key to disagree with, so it was
+  // skipped and the leg passed while every typed field was blank. A fetch that
+  // parses no slug at all has failed, whatever raw does or does not contain.
+  if (res->slug.empty()) {
+    std::cerr << "TYPED SLUG ABSENT -- the parse found no slug in a 200 response\n";
+    return EXIT_FAILURE;
+  }
+
   const auto raw_slug = res->raw.find("slug");
   if (raw_slug != res->raw.end() && !raw_slug->is_string()) {
     std::cerr << "RAW SLUG IS NOT A STRING -- the wire shape moved\n";
@@ -263,7 +451,8 @@ auto show_character(const venice::Client& client, std::string_view slug) -> int 
     std::cerr << "RAW AND TYPED SLUG DISAGREE -- Character::from_json moved\n";
     return EXIT_FAILURE;
   }
-  return EXIT_SUCCESS;
+
+  return show_character_reviews(client, slug, res->stats);
 }
 
 // The live check VC-05 could not run offline, and the reason the PR says
@@ -573,17 +762,7 @@ auto report_usage(const nlohmann::json& raw, const std::optional<venice::Usage>&
   // Name what we do not model. cache_read_input_tokens turned up this way — a
   // flat sibling mirroring the nested cached_tokens, redundant in all 21
   // captures of the VC-17 sweep, which is why it stays untyped.
-  std::vector<std::string> unmodeled;
-  for (const auto& [k, v] : raw.items())
-    if (std::find(kModeledUsageKeys.begin(), kModeledUsageKeys.end(), k) ==
-        kModeledUsageKeys.end())
-      unmodeled.push_back(k);
-  if (!unmodeled.empty()) {
-    std::cerr << "unmodeled usage keys: ";
-    for (std::size_t i = 0; i < unmodeled.size(); ++i)
-      std::cerr << (i != 0U ? ", " : "") << unmodeled[i];
-    std::cerr << "   (reachable via ChatResponse::raw)\n";
-  }
+  report_unmodeled("unmodeled usage keys: ", raw, kModeledUsageKeys, "ChatResponse::raw");
 
   return raw_cached != typed->cached_tokens || raw_reasoning != typed->reasoning_tokens;
 }
@@ -617,16 +796,7 @@ constexpr std::array<std::string_view, 9> kModeledBodyKeys{
 // because the discovery check must not be gated on the thing being discovered:
 // if Venice renames `cost`, this still runs and still names the new key.
 void report_envelope_keys(const nlohmann::json& envelope) {
-  if (!envelope.is_object()) return;
-  std::vector<std::string> unmodeled;
-  for (const auto& [k, v] : envelope.items())
-    if (std::find(kModeledBodyKeys.begin(), kModeledBodyKeys.end(), k) == kModeledBodyKeys.end())
-      unmodeled.push_back(k);
-  if (unmodeled.empty()) return;
-  std::cerr << "unmodeled body keys: ";
-  for (std::size_t i = 0; i < unmodeled.size(); ++i)
-    std::cerr << (i != 0U ? ", " : "") << unmodeled[i];
-  std::cerr << "   (reachable via ChatResponse::raw)\n";
+  report_unmodeled("unmodeled body keys: ", envelope, kModeledBodyKeys, "ChatResponse::raw");
 }
 
 // True when the typed parse disagrees with the envelope it came from.

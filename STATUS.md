@@ -19,15 +19,21 @@ AGENTS.md (which holds standing conventions, not state).
 - `characters()` list with typed per-character metadata and a `CharacterQuery`
   carrying the endpoint's filters and its pagination (VC-04). Verified live on
   2026-08-09: every modeled key present, no unmodeled key, default page 50.
-- `character(slug)` direct fetch with segment-safe path encoding (VC-16).
+- `character(slug)` direct fetch with segment-safe path encoding (VC-16), and
+  since VC-37 it actually parses: the response is an envelope and v0.14.0
+  returned an all-absent `Character`.
+- `character_reviews(slug, query)` — the reviews behind a rating, paged by the
+  server's own `pagination` (VC-36). Verified live on 2026-08-11: every modeled
+  key present, no unmodeled key at any of the four levels.
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   payment_required/rate_limited/invalid_arg/cancelled, each carrying status +
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 5/49 operations implemented. The other 44 are assigned to
-  family issues and checked in `cmake/openapi_manifest.json` (VC-35).
+- OpenAPI coverage: 6/49 operations implemented. The other 43 are assigned to
+  family issues and checked in `cmake/openapi_manifest.json` (VC-35). Characters
+  is the first family to reach 3/3.
 
 **Build system synced with cpp-template, tagged v0.1.0 — the first release.**
 The repo was scaffolded before upstream's fix rounds landed, so it was running a
@@ -69,6 +75,72 @@ a single-family run.
 4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
 
+**VC-36 (#56) and VC-37 (#57) are done** — see v0.15.0, and the second of them
+is the first ticket in this repo that a live leg filed on itself.
+
+`Client::character_reviews(slug, query)` completes the Characters family: it is
+the third of its three operations, and the first family to reach full coverage.
+The reviews behind a rating were unreachable — `CharacterStats` has quoted an
+average since VC-04 with no way to read a word of what it averaged.
+
+The page is honest in a way the listing's cannot be. `/characters` carries no
+total, so a walk has to compare `returned` against the limit; this response
+carries `pagination` with the server's own page, pageSize, total and totalPages,
+so a caller advances without inferring anything. Those four are `int` and read
+strictly: a fractional or out-of-range value reads absent, and a loop that stops
+early is recoverable where one driven by a truncated page number is not. The
+ratings are doubles, which is the call `CharacterStats` already made for the same
+numbers. Reviews and the listing do not share a pagination type — `page = 2`
+skips a page and `offset = 2` skips two entries.
+
+Nothing is dropped from a review for a missing field, and that is a deliberate
+divergence from the listing: an entry there without a slug is skipped because a
+slug is what a caller hands back to the API, and no field on a review is such a
+handle. Only a non-object element is skipped, still counted in `returned`.
+
+The slug is one encoded path segment, and it matters more here than on the
+direct fetch because the path continues after it: an unencoded slash would
+address a route this operation does not own, not merely another character. The
+loopback fixture pins the exact target, including that the reviews route is
+registered ahead of the detail catch-all — httplib matches in registration order
+and `characters/(.*)` swallows `alan-watts/reviews` otherwise.
+
+**The live leg ran, and it found VC-37.** `venice-cpp --character alan-watts`
+against api.venice.ai on 2026-08-11 returned the reviews envelope exactly as
+modeled — `{data, object, pagination, summary}`, the same nine entry keys, no
+unmodeled key at any of the four levels, `pageSize` echoing the 5 requested,
+`userAvatarUrl` null, one `message` an empty string, `averageRating` an integer.
+The same run printed `typed slug: (absent)` for the character itself.
+
+A second character was run rather than trusting one — the VC-17 lesson.
+`--character jessica-2`, which has no reviews, returned an empty `data` with
+`total` and `totalPages` both 0 rather than a 404, so "no reviews" is not a
+failure and the leg does not treat it as one. The same listing quotes
+`2.33333` for nora-clark beside alan-watts's `5`, which is why the ratings are
+doubles: one live sample would have justified either reader, and both are on
+the wire.
+
+`Client::character(slug)` had been returning an all-absent `Character` since
+v0.14.0. The response is an envelope — `{"data": {...}, "object": "character"}`
+— and `character_from_json_body` parsed the envelope as the character. Two
+checks failed to see it, and both failures are the same shape:
+
+- the offline fixtures were the *inner* object, because VC-16 read the OpenAPI
+  document's `properties.data.properties` as the body rather than as the body's
+  `data` member. Parser and fixture shared one wrong premise and agreed
+  perfectly. The document was not ambiguous; the reading was.
+- `--character`'s raw-versus-typed check asked whether raw's slug *disagreed*
+  with the typed one. The envelope has no top-level slug, so the comparison was
+  skipped rather than failed — a check that can only fire when the parse is
+  nearly right.
+
+The fix unwraps an object-valued `data` exactly as the listing already unwraps
+an array-valued one; a bare object still parses, which is what lets a listing
+entry be re-parsed through the same function. `Character::raw` is the character
+and not the envelope. The captured envelope is now pinned in
+`test/08characters/`, and the leg's slug check is absolute — an empty typed slug
+on a 200 fails outright — rather than relative to what raw happens to contain.
+
 **VC-12 (#17) is done** — see v0.14.1. Artifact rule B6 parses README's
 `FetchContent_Declare(venice-cpp ...)` block and rejects a missing, ambiguous,
 malformed, or stale `GIT_TAG`. A release PR may name a tag newer than the latest
@@ -93,6 +165,11 @@ also proves Bearer/per-call auth, 404 body and metadata retention, and malformed
 success-body classification. `--character <slug>` is the live check and prints
 the verbatim object beside the typed fields; it was not run for this release
 because the implementing environment had no `VENICE_API_KEY`.
+
+**It was run one release later, and the fetch was broken the whole time** — see
+VC-37 above. Everything in the two paragraphs above is still true except the
+claim that the response reuses `Character` directly: its top level is an
+envelope. The unrun live check is exactly what let that ship.
 
 **VC-23 (#38) and VC-15 (#25) are done** — see v0.13.0. Authentication is now
 transport state with four explicit modes: Public, Bearer, pre-signed SIWX and a
