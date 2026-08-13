@@ -55,6 +55,9 @@ right bridge.
   the verbatim entry as `raw`. The listing is filterable and pageable, a known
   slug can be fetched directly, and the reviews behind a rating are pageable
   with the server's own page count.
+- **Embeddings** (`/embeddings`) — single text, text batches, token arrays and
+  token-array batches; float vectors and opaque base64 results remain distinct,
+  with strict index and usage accounting plus the verbatim response as `raw`.
 - **Explicit authentication** — Public, Bearer, pre-signed SIWX and pre-built
   x402 payment payloads are distinct modes, selectable per client or per call.
   The client never owns wallet private keys or constructs signatures.
@@ -68,12 +71,12 @@ right bridge.
   auth / payment-required / rate-limit / invalid-arg / cancelled. Response
   failures carry status, raw body and response metadata, including x402 headers.
 
-Later phases (fed by real use): image/audio/video, TTS, embeddings,
+Later phases (fed by real use): image/audio/video, TTS,
 retries/backoff, async.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 8/49 operations implemented.
+OpenAPI coverage: 9/49 operations implemented.
 
 The checked inventory is [`cmake/openapi_manifest.json`](cmake/openapi_manifest.json),
 keyed by HTTP method + path rather than `operationId` (the published
@@ -112,7 +115,9 @@ transitively:
 
 ```cpp
 #include <cstdlib>
+#include <iostream>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include <venice/venice.hpp>
@@ -182,8 +187,8 @@ Venice's current canonical wallet header is `SIGN-IN-WITH-X`; the library does
 not emit its migration alias `X-Sign-In-With-X`. Likewise,
 `Authentication::x402_payment(payload)` emits the canonical
 `PAYMENT-SIGNATURE`, not the legacy `X-402-Payment` spelling. That mode is the
-transport foundation for the x402 top-up endpoint; none of the four endpoints
-currently exposed accepts a payment signature.
+transport foundation for the x402 top-up endpoint; no endpoint currently
+exposed accepts a payment signature.
 
 Successful SIWX inference exposes the balance string exactly as Venice sent it.
 A 402 is distinct from bad credentials and retains both the JSON body and the
@@ -212,6 +217,38 @@ socket is opened. Credentials are never copied into an `Error`.
 Whether a request streams is decided by the method you call, not by a field on
 `ChatRequest`. If you build the wire body yourself, say so explicitly:
 `req.to_json_body(/*stream=*/false)`.
+
+### Embeddings
+
+Embedding input is raw JSON with builders for the four documented forms, so a
+new server-owned form remains reachable without waiting for a library release:
+
+```cpp
+venice::EmbeddingRequest embedding_request;
+embedding_request.model = "text-embedding-qwen3-8b";
+embedding_request.input = venice::embedding_input::texts(
+    {"first document", "second document"});
+embedding_request.encoding_format = "float";
+
+// Name the expected result. Dereferencing a temporary expected in a range-for
+// is unsafe on the oldest supported compilers; the same rule models() follows.
+const auto embedding_result = client.embeddings(embedding_request);
+if (!embedding_result) return;  // inspect embedding_result.error()
+
+for (const auto& entry : embedding_result->data) {
+  if (const auto* values = std::get_if<std::vector<double>>(&entry.value))
+    std::cout << entry.index << ": " << values->size() << " dimensions\n";
+  else if (const auto* encoded = std::get_if<std::string>(&entry.value))
+    std::cout << entry.index << ": " << encoded->size() << " base64 bytes\n";
+}
+```
+
+Assign `embedding_request.input` directly for an input shape the builders do not
+cover. `model`, `dimensions` and `encoding_format` are server-owned values: the
+client rejects missing/empty required structure, but transmits range and value
+policy verbatim. Base64 is not decoded because Venice does not specify the
+decoded element width or byte order. Successful SIWX calls expose the exact
+`X-Balance-Remaining` string through `EmbeddingResponse::metadata`.
 
 **`response_format` is raw JSON, not an enum.** The API accepts both
 `{"type":"json_object"}` and a full `{"type":"json_schema", …}` block, and no
@@ -841,7 +878,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.17.0)
+  GIT_TAG        v0.18.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -942,9 +979,9 @@ Phase 0 verified against the live API: chat (non-streaming + streaming),
 models list (105 text models, 299 across all modalities), token usage — the
 counts move as Venice's catalogue does.
 
-**All four smoke legs have now been run against the live API** (2026-08-09), so
-the "documented, not measured" caveat that covered v0.8.0 through v0.10.0 is
-retired. `--characters` confirmed every modeled key, its types and the 50-entry
+**The original four smoke legs have all run against the live API** (2026-08-09),
+so the "documented, not measured" caveat that covered v0.8.0 through v0.10.0
+is retired. `--characters` confirmed every modeled key, its types and the 50-entry
 default page; `--stream` confirmed where `reasoning_content` sits and that the
 turn replays; `--tools` confirmed a tool call round-trips and is accepted back —
 **on the family it happened to pick.** Run against another it was rejected, which
@@ -993,6 +1030,7 @@ VENICE_API_KEY=... venice-cpp --tools          # v0.9.0: the request shape
 VENICE_API_KEY=... venice-cpp --characters     # v0.10.0: the character entry
 VENICE_API_KEY=... venice-cpp --character SLUG # v0.14.0: detail + v0.15.0: reviews
 VENICE_API_KEY=... venice-cpp --usage [model]  # v0.12.0: usage + cost + envelope
+VENICE_API_KEY=... venice-cpp --embeddings [model] # v0.18.0: float + base64
 
 venice-cpp --traits [type]                     # v0.16.0: no key needed
 venice-cpp --compat [type]                     # v0.16.0: no key needed
