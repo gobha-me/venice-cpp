@@ -130,6 +130,15 @@ to 12/49. Editing and upscaling remain on the image epic because their input
 and output contracts are different again; no attempt was made to flatten them
 into the generation surface.
 
+The VC-40 deliberate-break matrix went red in all ten cases: either endpoint
+path misspelled; routing changed from actual media type to `return_binary`;
+media validation moved ahead of non-2xx classification; the required native
+model stopped serializing; a wrong-typed native image was skipped; the style
+count was taken after skipping; literal `2x` pricing was renamed; public styles
+were forced through authenticated policy; and the non-finite `cfg_scale` guard
+was removed. Each break failed the assertion intended to own it and was
+reverted before the compiler matrix.
+
 **VC-39 (#60) is done** — see v0.17.0, and it is the ticket that pays for the
 "measure first" habit most visibly.
 
