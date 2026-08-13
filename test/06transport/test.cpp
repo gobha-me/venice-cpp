@@ -376,7 +376,7 @@ class TestServer {
                    res.status = status;
                    res.set_header("X-Protocol-Trace", "image-error");
                    res.set_content(nlohmann::json{{"error", message}}.dump(),
-                                   "application/json");
+                                   "text/plain");
                  };
                  if (prompt == "bad-request") return endpoint_error(400, "bad image request");
                  if (prompt == "unauthorized") return endpoint_error(401, "unauthorized");
@@ -399,10 +399,16 @@ class TestServer {
                  res.set_header("PAYMENT-RESPONSE", "image-payment-receipt");
                  res.set_header("X-Protocol-Trace", "native-image-success");
                  res.set_header("x-venice-is-blurred", "false");
-                 if (body.value("return_binary", false)) {
+                 if ((body.value("return_binary", false) &&
+                      prompt != "json-despite-media") ||
+                     prompt == "media-despite-json") {
                    const std::array bytes{char{'P'}, char{'N'}, char{0},
                                           static_cast<char>(0xFF), char{'G'}};
-                   res.set_content(bytes.data(), bytes.size(), "Image/PNG; fixture=true");
+                   const auto format = body.value("format", std::string{"png"});
+                   const char* media_type = format == "jpeg" ? "Image/JPEG; fixture=true"
+                                            : format == "webp" ? "Image/WebP; fixture=true"
+                                                               : "Image/PNG; fixture=true";
+                   res.set_content(bytes.data(), bytes.size(), media_type);
                    return;
                  }
 
@@ -944,6 +950,37 @@ TEST_CASE("native image generation routes actual image media and preserves NUL b
   REQUIRE(media->metadata.x_balance_remaining == "7.500000");
   REQUIRE(media->metadata.payment_response == "image-payment-receipt");
   REQUIRE(media->metadata.header("x-protocol-trace") == "native-image-success");
+}
+
+TEST_CASE("native image generation trusts actual media over the request hint",
+          "[transport][images][binary]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  auto request = minimal_native_image();
+  request.return_binary = true;
+  for (const auto& [format, expected_type] :
+       std::array{std::pair{"jpeg", "image/jpeg"},
+                  std::pair{"webp", "image/webp"}}) {
+    request.format = format;
+    const auto result = client.generate_image(request);
+    REQUIRE(result.has_value());
+    const auto* media = std::get_if<venice::GeneratedImageMedia>(&*result);
+    REQUIRE(media != nullptr);
+    REQUIRE(media->media_type == expected_type);
+  }
+
+  request.prompt = "media-despite-json";
+  request.return_binary = false;
+  const auto media_result = client.generate_image(request);
+  REQUIRE(media_result.has_value());
+  REQUIRE(std::holds_alternative<venice::GeneratedImageMedia>(*media_result));
+
+  request.prompt = "json-despite-media";
+  request.return_binary = true;
+  const auto json_result = client.generate_image(request);
+  REQUIRE(json_result.has_value());
+  REQUIRE(std::holds_alternative<venice::NativeImageGenerationResponse>(*json_result));
 }
 
 TEST_CASE("native image generation classifies statuses before success media",
