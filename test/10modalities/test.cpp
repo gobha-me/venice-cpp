@@ -196,6 +196,32 @@ TEST_CASE("an image entry does not engage the inpaint view", "[modalities][failu
   REQUIRE(!m.inpaint.has_value());
 }
 
+TEST_CASE("image-family pricing retains generation and both upscale factors",
+          "[modalities][pricing]") {
+  // Verbatim catalogue captures, not a pricing object assembled from the
+  // schema. This is the response-side proof that the new buckets are read at
+  // the level Venice actually sends them.
+  const auto image = one(kImageStyleRefs);
+  REQUIRE(image.pricing.has_value());
+  REQUIRE(image.pricing->generation.has_value());
+  REQUIRE(image.pricing->generation->usd == 0.07);
+  REQUIRE(image.pricing->upscale.has_value());
+  REQUIRE(image.pricing->upscale->x2.has_value());
+  REQUIRE(image.pricing->upscale->x2->usd == 0.02);
+  REQUIRE(image.pricing->upscale->x4.has_value());
+  REQUIRE(image.pricing->upscale->x4->usd == 0.08);
+
+  const auto upscale = one(kUpscale);
+  REQUIRE(upscale.pricing.has_value());
+  REQUIRE(upscale.pricing->generation.has_value());
+  REQUIRE(upscale.pricing->generation->usd == 0.01);
+  REQUIRE(upscale.pricing->upscale.has_value());
+  REQUIRE(upscale.pricing->upscale->x2.has_value());
+  REQUIRE(upscale.pricing->upscale->x4.has_value());
+  REQUIRE(upscale.pricing->upscale->x2->usd == 0.02);
+  REQUIRE(upscale.pricing->upscale->x4->usd == 0.08);
+}
+
 TEST_CASE("a type this client does not model engages nothing and keeps raw",
           "[modalities][failure]") {
   // music and asr are out of VC-39's scope by decision, and a modality Venice

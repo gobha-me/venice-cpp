@@ -154,6 +154,21 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   elements and usage counts parse loudly: a tolerant zero there would silently
   corrupt ordering, search data or accounting. Base64 is never decoded because
   Venice specifies neither element width nor byte order.
+- **Image generation has two request contracts and a response union.**
+  `/image/generate` and `/images/generations` remain distinct public request
+  types: compatibility fields that one endpoint accepts must not look usable on
+  the other. Native generation selects typed JSON versus owned JPEG/PNG/WebP
+  bytes from the successful response's actual normalized `Content-Type`, never
+  from `return_binary` or the requested format. Non-2xx classification still
+  happens before media validation. The client preserves bytes and metadata but
+  never decodes, saves, displays or silently base64-expands an image.
+- **Image request policy comes from the catalogue, not duplicated guards.**
+  Formats, qualities, resolutions, aspect ratios, steps, dimensions and style
+  limits remain caller-supplied values. The client rejects only empty required
+  structure and non-finite modeled doubles; `Model::image` carries the live
+  constraints a caller can consult. `style_references` is optional so omitted
+  and explicitly empty remain distinguishable, and its elements use the same
+  modeled-wins `extra` merge as the containing request.
 - **Braces build arrays, parentheses build scalars.** `nlohmann::json{"auto"}` is
   `["auto"]`; `nlohmann::json("auto")` is `"auto"`. Both compile, so only an
   `is_string()`-style assertion catches the wrong one. The *object* builders

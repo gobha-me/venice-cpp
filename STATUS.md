@@ -32,13 +32,17 @@ AGENTS.md (which holds standing conventions, not state).
 - `embeddings(request)` — all four documented input shapes, float/base64 output
   kept distinct, strict ordering/accounting fields, and the exact envelope in
   `raw` (VC-26). Verified live in both formats on 2026-08-13.
+- `generate_image(request)` — Venice-native typed JSON or byte-exact
+  JPEG/PNG/WebP selected by actual response media type;
+  `generate_image_openai(request)` for the distinct compatibility contract;
+  and public `image_styles()` discovery (VC-40).
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   payment_required/rate_limited/invalid_arg/cancelled, each carrying status +
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 9/49 operations implemented. The other 40 are assigned to
+- OpenAPI coverage: 12/49 operations implemented. The other 37 are assigned to
   family issues and checked in `cmake/openapi_manifest.json` (VC-35). Characters
   and Models are both 3/3 on operations, and since VC-39 the `Model` metadata
   half is done too. Music and ASR remain deliberately raw rather than keeping
@@ -78,7 +82,7 @@ a single-family run.
    case in `test/07stream/` whose deliberate inversion is the ticket's
    acceptance criterion. The hard half is streaming: a merge rule for arbitrary
    unmodeled keys across fragments has no wire evidence to choose it yet.
-3. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
+3. Thicken endpoints as AIForge/KDE need them (image edit/upscale, audio/video, TTS,
    retries/backoff, async). Driven by real use, not
    speculatively.
 4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
@@ -102,6 +106,38 @@ The OpenAPI snapshot moved to `20260811.214155` / `784fe23e…`, repository comm
 version and digest changes: no operation, authentication, request-media or
 response-media contract changed. The manifest now records that source and
 marks `/embeddings` implemented, taking coverage to 9/49.
+
+**VC-40 (#64) is implemented for v0.19.0.** Venice's native
+`POST /image/generate` and OpenAI-compatible `POST /images/generations` are
+separate request contracts rather than a union of mostly inapplicable fields.
+The native response is itself a union: JSON/base64 is parsed into
+`NativeImageGenerationResponse`, while JPEG, PNG and WebP remain byte-exact in
+`GeneratedImageMedia`. Dispatch follows the normalized response
+`Content-Type`, never the requested `return_binary` bit. Public
+`GET /image/styles` is exposed through `image_styles()` and image generation /
+upscale pricing now parses from the model catalogue.
+
+The live leg ran on 2026-08-13. Style discovery worked without a credential and
+returned 76 usable strings of 76 entries, with no unmodeled envelope key. The
+paid leg selected `venice-sd35`, named `grok-imagine-image-2-0`,
+`grok-imagine-image-quality`, `krea-2-turbo` and `flux-2-pro` as alternatives,
+then completed native JSON, native binary and OpenAI-compatible JSON calls.
+The leg retained the JSON envelopes and reported byte counts/media type for the
+binary result; it deliberately decoded and wrote no image data.
+
+The manifest now marks the three image operations implemented, taking coverage
+to 12/49. Editing and upscaling remain on the image epic because their input
+and output contracts are different again; no attempt was made to flatten them
+into the generation surface.
+
+The VC-40 deliberate-break matrix went red in all ten cases: either endpoint
+path misspelled; routing changed from actual media type to `return_binary`;
+media validation moved ahead of non-2xx classification; the required native
+model stopped serializing; a wrong-typed native image was skipped; the style
+count was taken after skipping; literal `2x` pricing was renamed; public styles
+were forced through authenticated policy; and the non-finite `cfg_scale` guard
+was removed. Each break failed the assertion intended to own it and was
+reverted before the compiler matrix.
 
 **VC-39 (#60) is done** — see v0.17.0, and it is the ticket that pays for the
 "measure first" habit most visibly.

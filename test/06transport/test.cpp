@@ -65,7 +65,9 @@ using venice::ChatRequest;
 using venice::Client;
 using venice::EmbeddingRequest;
 using venice::ErrorKind;
+using venice::ImageGenerationRequest;
 using venice::Message;
+using venice::OpenAIImageGenerationRequest;
 using venice::Authentication;
 
 using namespace std::chrono_literals;
@@ -345,6 +347,140 @@ class TestServer {
                  res.set_content(response.dump(), "application/json; charset=utf-8");
                });
 
+    m_svr.Post("/api/v1/image/generate",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_native_image_hits;
+                 const auto bearer = req.get_header_value("Authorization");
+                 const auto siwx = req.get_header_value("SIGN-IN-WITH-X");
+                 if (bearer.empty() && siwx.empty()) {
+                   res.status = 401;
+                   res.set_content(R"({"error":"missing image authentication"})",
+                                   "application/json");
+                   return;
+                 }
+                 if (siwx == "image-needs-payment") {
+                   res.status = 402;
+                   res.set_header("PAYMENT-REQUIRED", "image-payment-requirements");
+                   res.set_content(R"({"code":"PAYMENT_REQUIRED"})", "application/json");
+                   return;
+                 }
+                 const auto body = nlohmann::json::parse(req.body);
+                 const auto prompt = body.at("prompt").get<std::string>();
+                 if (prompt == "stall") {
+                   ++m_image_stall_hits;
+                   m_gate.wait(kStallCap);
+                   res.set_content("{}", "application/json");
+                   return;
+                 }
+                 const auto endpoint_error = [&](int status, const char* message) {
+                   res.status = status;
+                   res.set_header("X-Protocol-Trace", "image-error");
+                   res.set_content(nlohmann::json{{"error", message}}.dump(),
+                                   "text/plain");
+                 };
+                 if (prompt == "bad-request") return endpoint_error(400, "bad image request");
+                 if (prompt == "unauthorized") return endpoint_error(401, "unauthorized");
+                 if (prompt == "unsupported-media") return endpoint_error(415, "unsupported media");
+                 if (prompt == "rate-limit") return endpoint_error(429, "slow down");
+                 if (prompt == "capacity") return endpoint_error(503, "at capacity");
+                 if (prompt == "wrong-media") {
+                   res.set_header("X-Balance-Remaining", "7.500000");
+                   res.set_content("not image data", "text/plain");
+                   return;
+                 }
+                 if (prompt == "malformed") {
+                   res.set_header("X-Balance-Remaining", "7.500000");
+                   res.set_content(R"({"id":"img_bad","images":[],"timing":{}})",
+                                   "application/json");
+                   return;
+                 }
+
+                 res.set_header("X-Balance-Remaining", "7.500000");
+                 res.set_header("PAYMENT-RESPONSE", "image-payment-receipt");
+                 res.set_header("X-Protocol-Trace", "native-image-success");
+                 res.set_header("x-venice-is-blurred", "false");
+                 if ((body.value("return_binary", false) &&
+                      prompt != "json-despite-media") ||
+                     prompt == "media-despite-json") {
+                   const std::array bytes{char{'P'}, char{'N'}, char{0},
+                                          static_cast<char>(0xFF), char{'G'}};
+                   const auto format = body.value("format", std::string{"png"});
+                   const char* media_type = format == "jpeg" ? "Image/JPEG; fixture=true"
+                                            : format == "webp" ? "Image/WebP; fixture=true"
+                                                               : "Image/PNG; fixture=true";
+                   res.set_content(bytes.data(), bytes.size(), media_type);
+                   return;
+                 }
+
+                 const nlohmann::json response{
+                     {"id", "img_fixture"},
+                     {"images", nlohmann::json::array({"AAEC"})},
+                     {"request", body},
+                     {"timing",
+                      {{"inferenceDuration", 10.5},
+                       {"inferencePreprocessingTime", 2},
+                       {"inferenceQueueTime", 1.25},
+                       {"total", 13.75}}},
+                     {"seen_authorization", bearer},
+                     {"seen_siwx", siwx},
+                     {"seen_content_type", req.get_header_value("Content-Type")}};
+                 res.set_content(response.dump(), "application/json; charset=utf-8");
+               });
+
+    m_svr.Post("/api/v1/images/generations",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_openai_image_hits;
+                 const auto bearer = req.get_header_value("Authorization");
+                 const auto siwx = req.get_header_value("SIGN-IN-WITH-X");
+                 if (bearer.empty() && siwx.empty()) {
+                   res.status = 401;
+                   res.set_content(R"({"error":"missing image authentication"})",
+                                   "application/json");
+                   return;
+                 }
+                 const auto body = nlohmann::json::parse(req.body);
+                 const auto prompt = body.at("prompt").get<std::string>();
+                 if (prompt == "malformed") {
+                   res.set_content(R"({"created":"now","data":[]})", "application/json");
+                   return;
+                 }
+                 res.set_header("X-Balance-Remaining", "6.250000");
+                 res.set_header("X-Protocol-Trace", "openai-image-success");
+                 res.set_content(
+                     nlohmann::json{
+                         {"created", 1786644000},
+                         {"data",
+                          nlohmann::json::array({{{"b64_json", "AAEC"}},
+                                                 {{"url", "data:image/png;base64,AwQF"}}})},
+                         {"seen_body", body},
+                         {"seen_authorization", bearer},
+                         {"seen_siwx", siwx},
+                         {"seen_content_type", req.get_header_value("Content-Type")}}
+                         .dump(),
+                     "application/json; charset=utf-8");
+               });
+
+    m_svr.Get("/api/v1/image/styles",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                ++m_image_styles_hits;
+                const bool malformed =
+                    req.get_header_value("Authorization") == "Bearer malformed-styles";
+                if (malformed) {
+                  res.set_content(R"({"object":"list"})", "application/json");
+                  return;
+                }
+                const std::string authorization = req.has_header("Authorization")
+                                                      ? "present:" + req.get_header_value("Authorization")
+                                                      : std::string{};
+                res.set_header("X-Protocol-Trace", "image-styles-success");
+                res.set_content(
+                    nlohmann::json{{"data", nlohmann::json::array(
+                                                {"Anime", 7, "authorization:" + authorization})},
+                                   {"object", "list"}}
+                        .dump(),
+                    "application/json; charset=utf-8");
+              });
+
     // Registered *before* the catch-all below, and that ordering is the whole
     // reason this route works: httplib matches handlers in registration order,
     // and `/api/v1/characters/(.*)` matches "alan-watts/reviews" perfectly
@@ -504,6 +640,10 @@ class TestServer {
   [[nodiscard]] auto traits_hits() const -> int { return m_traits_hits.load(); }
   [[nodiscard]] auto compat_hits() const -> int { return m_compat_hits.load(); }
   [[nodiscard]] auto embeddings_hits() const -> int { return m_embeddings_hits.load(); }
+  [[nodiscard]] auto native_image_hits() const -> int { return m_native_image_hits.load(); }
+  [[nodiscard]] auto openai_image_hits() const -> int { return m_openai_image_hits.load(); }
+  [[nodiscard]] auto image_styles_hits() const -> int { return m_image_styles_hits.load(); }
+  [[nodiscard]] auto image_stall_hits() const -> int { return m_image_stall_hits.load(); }
   [[nodiscard]] auto multipart_stall_hits() const -> int { return m_multipart_stall_hits.load(); }
 
   static constexpr int kFrames = 2;
@@ -524,6 +664,10 @@ class TestServer {
   std::atomic<int> m_traits_hits{0};
   std::atomic<int> m_compat_hits{0};
   std::atomic<int> m_embeddings_hits{0};
+  std::atomic<int> m_native_image_hits{0};
+  std::atomic<int> m_openai_image_hits{0};
+  std::atomic<int> m_image_styles_hits{0};
+  std::atomic<int> m_image_stall_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
 };
 
@@ -549,6 +693,19 @@ auto minimal_embedding() -> EmbeddingRequest {
   EmbeddingRequest request;
   request.model = "text-embedding-test";
   request.input = venice::embedding_input::text("hello");
+  return request;
+}
+
+auto minimal_native_image() -> ImageGenerationRequest {
+  ImageGenerationRequest request;
+  request.model = "image-test";
+  request.prompt = "paint it";
+  return request;
+}
+
+auto minimal_openai_image() -> OpenAIImageGenerationRequest {
+  OpenAIImageGenerationRequest request;
+  request.prompt = "paint it";
   return request;
 }
 
@@ -581,6 +738,17 @@ TEST_CASE("endpoint authentication policies reject impossible modes before the s
   REQUIRE_FALSE(public_embeddings.has_value());
   REQUIRE(public_embeddings.error().kind == ErrorKind::InvalidArg);
   REQUIRE(server.embeddings_hits() == 0);
+
+  const auto public_native_image = public_client.generate_image(minimal_native_image());
+  REQUIRE_FALSE(public_native_image.has_value());
+  REQUIRE(public_native_image.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(server.native_image_hits() == 0);
+
+  const auto public_openai_image =
+      public_client.generate_image_openai(minimal_openai_image());
+  REQUIRE_FALSE(public_openai_image.has_value());
+  REQUIRE(public_openai_image.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(server.openai_image_hits() == 0);
 
   const auto public_characters = public_client.characters();
   REQUIRE_FALSE(public_characters.has_value());
@@ -725,6 +893,235 @@ TEST_CASE("embeddings preserves endpoint errors and rejects malformed success da
   REQUIRE(payment.error().status == 402);
   REQUIRE(payment.error().metadata.payment_required == "embedding-payment-requirements");
   REQUIRE(server.embeddings_hits() == 4);
+}
+
+TEST_CASE("native image generation posts exact JSON and keeps a typed JSON response",
+          "[transport][images]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+  auto request = minimal_native_image();
+  request.cfg_scale = 6.5;
+  request.format = "webp";
+  request.style_references = std::vector<venice::ImageStyleReference>{
+      {.image = "data:image/png;base64,AAEC", .strength = 0.75}};
+  const nlohmann::json expected_body{
+      {"model", "image-test"},
+      {"prompt", "paint it"},
+      {"cfg_scale", 6.5},
+      {"format", "webp"},
+      {"style_references",
+       nlohmann::json::array({{{"image", "data:image/png;base64,AAEC"},
+                               {"strength", 0.75}}})}};
+
+  const auto result = client.generate_image(request);
+  REQUIRE(result.has_value());
+  REQUIRE(server.native_image_hits() == 1);
+  const auto* response =
+      std::get_if<venice::NativeImageGenerationResponse>(&*result);
+  REQUIRE(response != nullptr);
+  REQUIRE(response->id == "img_fixture");
+  REQUIRE(response->images == std::vector<std::string>{"AAEC"});
+  REQUIRE(response->request == expected_body);
+  REQUIRE(response->raw["seen_authorization"] == "Bearer default-token");
+  REQUIRE(response->raw["seen_siwx"] == "");
+  REQUIRE(response->raw["seen_content_type"] == "application/json");
+  REQUIRE(response->metadata.x_balance_remaining == "7.500000");
+  REQUIRE(response->metadata.payment_response == "image-payment-receipt");
+  REQUIRE(response->metadata.header("x-protocol-trace") == "native-image-success");
+  REQUIRE(response->metadata.header("x-venice-is-blurred") == "false");
+}
+
+TEST_CASE("native image generation routes actual image media and preserves NUL bytes",
+          "[transport][images][binary][auth]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+  auto request = minimal_native_image();
+  request.return_binary = true;
+  request.format = "png";
+
+  const auto result = client.generate_image(
+      request, {.authentication = Authentication::sign_in_with_x("signed-wallet")});
+  REQUIRE(result.has_value());
+  const auto* media = std::get_if<venice::GeneratedImageMedia>(&*result);
+  REQUIRE(media != nullptr);
+  REQUIRE(media->media_type == "image/png");
+  REQUIRE(media->bytes ==
+          std::string{{'P', 'N', char{0}, static_cast<char>(0xFF), 'G'}});
+  REQUIRE(media->metadata.x_balance_remaining == "7.500000");
+  REQUIRE(media->metadata.payment_response == "image-payment-receipt");
+  REQUIRE(media->metadata.header("x-protocol-trace") == "native-image-success");
+}
+
+TEST_CASE("native image generation trusts actual media over the request hint",
+          "[transport][images][binary]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  auto request = minimal_native_image();
+  request.return_binary = true;
+  for (const auto& [format, expected_type] :
+       std::array{std::pair{"jpeg", "image/jpeg"},
+                  std::pair{"webp", "image/webp"}}) {
+    request.format = format;
+    const auto result = client.generate_image(request);
+    REQUIRE(result.has_value());
+    const auto* media = std::get_if<venice::GeneratedImageMedia>(&*result);
+    REQUIRE(media != nullptr);
+    REQUIRE(media->media_type == expected_type);
+  }
+
+  request.prompt = "media-despite-json";
+  request.return_binary = false;
+  const auto media_result = client.generate_image(request);
+  REQUIRE(media_result.has_value());
+  REQUIRE(std::holds_alternative<venice::GeneratedImageMedia>(*media_result));
+
+  request.prompt = "json-despite-media";
+  request.return_binary = true;
+  const auto json_result = client.generate_image(request);
+  REQUIRE(json_result.has_value());
+  REQUIRE(std::holds_alternative<venice::NativeImageGenerationResponse>(*json_result));
+}
+
+TEST_CASE("native image generation classifies statuses before success media",
+          "[transport][images][failure]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  struct Case {
+    const char* prompt;
+    ErrorKind kind;
+    int status;
+  };
+  const std::array cases{
+      Case{"bad-request", ErrorKind::Http, 400},
+      Case{"unauthorized", ErrorKind::Auth, 401},
+      Case{"unsupported-media", ErrorKind::Http, 415},
+      Case{"rate-limit", ErrorKind::RateLimited, 429},
+      Case{"capacity", ErrorKind::Http, 503},
+  };
+  for (const auto& test : cases) {
+    auto request = minimal_native_image();
+    request.prompt = test.prompt;
+    const auto result = client.generate_image(request);
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().kind == test.kind);
+    REQUIRE(result.error().status == test.status);
+    REQUIRE(result.error().metadata.header("x-protocol-trace") == "image-error");
+  }
+
+  auto request = minimal_native_image();
+  request.prompt = "wrong-media";
+  const auto wrong_media = client.generate_image(request);
+  REQUIRE_FALSE(wrong_media.has_value());
+  REQUIRE(wrong_media.error().kind == ErrorKind::Parse);
+  REQUIRE(wrong_media.error().status == 200);
+  REQUIRE(wrong_media.error().body == "not image data");
+  REQUIRE(wrong_media.error().metadata.x_balance_remaining == "7.500000");
+
+  request.prompt = "malformed";
+  const auto malformed = client.generate_image(request);
+  REQUIRE_FALSE(malformed.has_value());
+  REQUIRE(malformed.error().kind == ErrorKind::Parse);
+  REQUIRE(malformed.error().status == 200);
+  REQUIRE(malformed.error().message.starts_with(
+      "image generation parse: image generation timing:"));
+
+  const Client wallet{Authentication::sign_in_with_x("image-needs-payment"),
+                      server.base_url()};
+  request.prompt = "paint it";
+  const auto payment = wallet.generate_image(request);
+  REQUIRE_FALSE(payment.has_value());
+  REQUIRE(payment.error().kind == ErrorKind::PaymentRequired);
+  REQUIRE(payment.error().status == 402);
+  REQUIRE(payment.error().metadata.payment_required == "image-payment-requirements");
+}
+
+TEST_CASE("OpenAI image generation uses its own path body and response shape",
+          "[transport][images][openai]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+  auto request = minimal_openai_image();
+  request.model = "image-test";
+  request.output_format = "png";
+  request.response_format = "b64_json";
+  const nlohmann::json expected_body{{"prompt", "paint it"},
+                                     {"model", "image-test"},
+                                     {"output_format", "png"},
+                                     {"response_format", "b64_json"}};
+
+  const auto response = client.generate_image_openai(
+      request, {.authentication = Authentication::sign_in_with_x("signed-wallet")});
+  REQUIRE(response.has_value());
+  REQUIRE(server.openai_image_hits() == 1);
+  REQUIRE(response->data.size() == 2);
+  REQUIRE(response->data[0].b64_json == "AAEC");
+  REQUIRE(response->data[1].url == "data:image/png;base64,AwQF");
+  REQUIRE(response->raw["seen_body"] == expected_body);
+  REQUIRE(response->raw["seen_authorization"] == "");
+  REQUIRE(response->raw["seen_siwx"] == "signed-wallet");
+  REQUIRE(response->raw["seen_content_type"] == "application/json");
+  REQUIRE(response->metadata.x_balance_remaining == "6.250000");
+  REQUIRE(response->metadata.header("x-protocol-trace") == "openai-image-success");
+
+  request.prompt = "malformed";
+  const auto malformed = client.generate_image_openai(request);
+  REQUIRE_FALSE(malformed.has_value());
+  REQUIRE(malformed.error().kind == ErrorKind::Parse);
+  REQUIRE(malformed.error().status == 200);
+}
+
+TEST_CASE("image styles are public without an empty Authorization header",
+          "[transport][images][styles]") {
+  const TestServer server;
+  const Client public_client{Authentication::public_access(), server.base_url()};
+  const auto public_styles = public_client.image_styles();
+  REQUIRE(public_styles.has_value());
+  REQUIRE(public_styles->returned == 3);
+  REQUIRE(public_styles->entries ==
+          std::vector<std::string>{"Anime", "authorization:"});
+  REQUIRE(public_styles->metadata.header("x-protocol-trace") ==
+          "image-styles-success");
+
+  const Client bearer_client{"default-token", server.base_url()};
+  const auto bearer_styles = bearer_client.image_styles(
+      {.authentication = Authentication::bearer("override-token")});
+  REQUIRE(bearer_styles.has_value());
+  REQUIRE(bearer_styles->entries ==
+          std::vector<std::string>{"Anime", "authorization:present:Bearer override-token"});
+
+  const auto malformed = bearer_client.image_styles(
+      {.authentication = Authentication::bearer("malformed-styles")});
+  REQUIRE_FALSE(malformed.has_value());
+  REQUIRE(malformed.error().kind == ErrorKind::Parse);
+  REQUIRE(malformed.error().status == 200);
+
+  const auto wrong_auth = public_client.image_styles(
+      {.authentication = Authentication::sign_in_with_x("signed-wallet")});
+  REQUIRE_FALSE(wrong_auth.has_value());
+  REQUIRE(wrong_auth.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(server.image_styles_hits() == 3);
+}
+
+TEST_CASE("cancellation interrupts native image generation",
+          "[transport][images][cancel][failure]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+  auto request = minimal_native_image();
+  request.prompt = "stall";
+  venice::CancelToken token;
+  std::thread canceller{[&] {
+    while (server.image_stall_hits() == 0) std::this_thread::sleep_for(5ms);
+    token.cancel();
+  }};
+
+  std::expected<venice::ImageGenerationResult, venice::Error> result;
+  const auto elapsed = timed([&] { result = client.generate_image(request, {.cancel = &token}); });
+  canceller.join();
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().kind == ErrorKind::Cancelled);
+  REQUIRE(elapsed < kPromptly);
+  REQUIRE(server.image_stall_hits() == 1);
 }
 
 TEST_CASE("character detail rejects an empty slug before auth or transport",
