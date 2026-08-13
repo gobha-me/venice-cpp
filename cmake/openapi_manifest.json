@@ -1116,8 +1116,10 @@
       "method": "POST",
       "path": "/image/generate",
       "family": "images",
-      "state": "planned",
-      "tracking_issue": 10,
+      "state": "implemented",
+      "public_api": [
+        "Client::generate_image"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -1210,8 +1212,10 @@
       "method": "GET",
       "path": "/image/styles",
       "family": "images",
-      "state": "planned",
-      "tracking_issue": 10,
+      "state": "implemented",
+      "public_api": [
+        "Client::image_styles"
+      ],
       "security": [
         [],
         [
@@ -1280,8 +1284,10 @@
       "method": "POST",
       "path": "/images/generations",
       "family": "images",
-      "state": "planned",
-      "tracking_issue": 10,
+      "state": "implemented",
+      "public_api": [
+        "Client::generate_image_openai"
+      ],
       "security": [
         [
           "BearerAuth"

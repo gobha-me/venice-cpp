@@ -301,6 +301,143 @@ auto embeddings_report(const venice::Client& client, std::string_view model) -> 
   return floats && base64 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+// ── image generation and public styles (VC-40, #64) ─────────────────────
+
+constexpr std::array<std::string_view, 4> kModeledNativeImageKeys{
+    "id", "images", "request", "timing"};
+constexpr std::array<std::string_view, 4> kModeledImageTimingKeys{
+    "inferenceDuration", "inferencePreprocessingTime", "inferenceQueueTime", "total"};
+constexpr std::array<std::string_view, 2> kModeledOpenAIImageKeys{"created", "data"};
+constexpr std::array<std::string_view, 2> kModeledOpenAIImageEntryKeys{"b64_json", "url"};
+constexpr std::array<std::string_view, 2> kModeledImageStyleKeys{"data", "object"};
+
+auto image_styles_report(const venice::Client& client) -> int {
+  const auto response = client.image_styles();
+  if (!response) {
+    std::cerr << "image styles failed [" << venice::to_string(response.error().kind) << "] "
+              << response.error().message << '\n';
+    if (!response.error().body.empty()) std::cerr << response.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+
+  std::cerr << "image styles, envelope verbatim:\n" << response->raw.dump(2) << '\n';
+  report_unmodeled("unmodeled style envelope keys: ", response->raw,
+                   kModeledImageStyleKeys, "ImageStyles::raw");
+  std::cout << response->entries.size() << " usable styles (" << response->returned
+            << " values arrived)\n";
+  for (const auto& style : response->entries) std::cout << "  " << style << '\n';
+
+  if (response->returned != response->entries.size()) {
+    std::cerr << "STYLE COUNT MISMATCH -- a non-string entry arrived; see ImageStyles::raw\n";
+    return EXIT_FAILURE;
+  }
+  return EXIT_SUCCESS;
+}
+
+auto image_report(const venice::Client& client, std::string_view model) -> int {
+  ModelPick pick;
+  if (model.empty()) {
+    auto selected = pick_by_modality(client, "image");
+    if (!selected) return EXIT_FAILURE;
+    pick = std::move(*selected);
+  } else {
+    pick.chosen = std::string{model};
+  }
+  report_pick(pick, "type=image", "`venice-cpp --image <id>`");
+
+  const std::string prompt =
+      "A small blue ceramic teacup on a plain white background, product photograph";
+  bool agrees = true;
+
+  venice::ImageGenerationRequest native;
+  native.model = pick.chosen;
+  native.prompt = prompt;
+  native.format = "png";
+  native.variants = 1;
+  native.safe_mode = true;
+  native.return_binary = false;
+  const auto json_result = client.generate_image(native);
+  if (!json_result) {
+    std::cerr << "native JSON generation failed ["
+              << venice::to_string(json_result.error().kind) << "] "
+              << json_result.error().message << '\n';
+    if (!json_result.error().body.empty()) std::cerr << json_result.error().body << '\n';
+    agrees = false;
+  } else if (const auto* json =
+                 std::get_if<venice::NativeImageGenerationResponse>(&*json_result)) {
+    std::cerr << "\n-- native JSON, envelope verbatim --\n" << json->raw.dump(2) << '\n';
+    report_unmodeled("unmodeled native image keys: ", json->raw,
+                     kModeledNativeImageKeys, "NativeImageGenerationResponse::raw");
+    if (const auto* timing = venice::detail::opt_object(json->raw, "timing"))
+      report_unmodeled("unmodeled image timing keys: ", *timing,
+                       kModeledImageTimingKeys,
+                       "NativeImageGenerationResponse::raw[\"timing\"]");
+    std::cerr << "typed images: " << json->images.size() << ", id=" << json->id << '\n';
+    const auto* raw_images = venice::detail::opt_array(json->raw, "images");
+    if (raw_images == nullptr || raw_images->size() != json->images.size()) {
+      std::cerr << "RAW/TYPED IMAGE COUNT MISMATCH\n";
+      agrees = false;
+    }
+  } else {
+    std::cerr << "native JSON request returned media instead of JSON\n";
+    agrees = false;
+  }
+
+  native.return_binary = true;
+  const auto binary_result = client.generate_image(native);
+  if (!binary_result) {
+    std::cerr << "native binary generation failed ["
+              << venice::to_string(binary_result.error().kind) << "] "
+              << binary_result.error().message << '\n';
+    if (!binary_result.error().body.empty()) std::cerr << binary_result.error().body << '\n';
+    agrees = false;
+  } else if (const auto* media =
+                 std::get_if<venice::GeneratedImageMedia>(&*binary_result)) {
+    std::cerr << "\n-- native binary --\nmedia type: " << media->media_type
+              << "\nbytes: " << media->bytes.size() << '\n';
+    if (media->bytes.empty()) {
+      std::cerr << "EMPTY IMAGE MEDIA\n";
+      agrees = false;
+    }
+  } else {
+    std::cerr << "native binary request returned JSON instead of media\n";
+    agrees = false;
+  }
+
+  venice::OpenAIImageGenerationRequest openai;
+  openai.prompt = prompt;
+  openai.model = pick.chosen;
+  openai.output_format = "png";
+  openai.response_format = "b64_json";
+  openai.n = 1;
+  const auto openai_result = client.generate_image_openai(openai);
+  if (!openai_result) {
+    std::cerr << "OpenAI-compatible generation failed ["
+              << venice::to_string(openai_result.error().kind) << "] "
+              << openai_result.error().message << '\n';
+    if (!openai_result.error().body.empty()) std::cerr << openai_result.error().body << '\n';
+    agrees = false;
+  } else {
+    std::cerr << "\n-- OpenAI-compatible JSON, envelope verbatim --\n"
+              << openai_result->raw.dump(2) << '\n';
+    report_unmodeled("unmodeled OpenAI image keys: ", openai_result->raw,
+                     kModeledOpenAIImageKeys, "OpenAIImageGenerationResponse::raw");
+    for (const auto& entry : openai_result->data)
+      report_unmodeled("unmodeled OpenAI image entry keys: ", entry.raw,
+                       kModeledOpenAIImageEntryKeys, "OpenAIImageGenerationEntry::raw");
+    std::cerr << "typed images: " << openai_result->data.size()
+              << ", created=" << openai_result->created << '\n';
+    const auto* raw_data = venice::detail::opt_array(openai_result->raw, "data");
+    if (raw_data == nullptr || raw_data->size() != openai_result->data.size()) {
+      std::cerr << "RAW/TYPED OPENAI IMAGE COUNT MISMATCH\n";
+      agrees = false;
+    }
+  }
+
+  std::cerr << "\nNo image bytes were decoded or written to disk.\n";
+  return agrees ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 
 // ── `--traits` and `--compat` (VC-38, #59) ────────────────────────────────
 //
@@ -1672,7 +1809,7 @@ auto main(int argc, char** argv) -> int {
   const std::string_view leg = argc > 1 ? std::string_view{argv[1]} : std::string_view{};
   const std::string_view arg = argc > 2 ? std::string_view{argv[2]} : std::string_view{};
 
-  // The three legs that need no credential, dispatched above the key lookup
+  // The four legs that need no credential, dispatched above the key lookup
   // deliberately. Measured 2026-08-11: /models/traits and
   // /models/compatibility_mapping (VC-38, #59) and /models itself (VC-39, #60)
   // all answer 200 with no Authorization header at all, for every modality.
@@ -1690,12 +1827,14 @@ auto main(int argc, char** argv) -> int {
                                       arg);
   if (leg == "--modality")
     return show_modality(venice::Client{venice::Authentication::public_access()}, arg);
+  if (leg == "--styles")
+    return image_styles_report(venice::Client{venice::Authentication::public_access()});
 
   const char* key = std::getenv("VENICE_API_KEY");
   if (key == nullptr || *key == '\0') {
     std::cerr << "VENICE_API_KEY not set; nothing to call with a credential.\n"
-                 "(--traits, --compat and --modality need no key and run without one;\n"
-                 " --embeddings needs a key.)\n";
+                 "(--traits, --compat, --modality and --styles need no key;\n"
+                 " --embeddings and --image need a key.)\n";
     return EXIT_SUCCESS;
   }
 
@@ -1714,6 +1853,7 @@ auto main(int argc, char** argv) -> int {
   if (leg == "--tools") return tools_report(client, arg);
   if (leg == "--usage") return usage_report(client, arg);
   if (leg == "--embeddings") return embeddings_report(client, arg);
+  if (leg == "--image") return image_report(client, arg);
 
   const std::string prompt = argc > 1 ? argv[1] : "Say hello in one short sentence.";
 

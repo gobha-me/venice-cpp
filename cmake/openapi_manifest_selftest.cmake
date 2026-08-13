@@ -44,7 +44,7 @@ expect_invalid("implemented operation without public API" "${_bad}" "public_api 
 string(JSON _bad SET "${_manifest}" source sha256 "\"not-a-digest\"")
 expect_invalid("invalid source digest" "${_bad}" "64 lowercase hexadecimal")
 
-validate_openapi_coverage_text("OpenAPI coverage: 8/49 operations implemented." "OpenAPI coverage: 9/49 operations implemented." _coverage_ok)
+validate_openapi_coverage_text("OpenAPI coverage: 9/49 operations implemented." "OpenAPI coverage: 12/49 operations implemented." _coverage_ok)
 if(_coverage_ok)
   message(WARNING "FAIL : stale documentation coverage was accepted")
   math(EXPR _fail_count "${_fail_count} + 1")
@@ -54,7 +54,7 @@ endif()
 
 # Happy path last: validate the real manifest and the two public status claims.
 validate_openapi_manifest("${_manifest}" _ok _report _total _implemented)
-if(NOT _ok OR NOT _total EQUAL 49 OR NOT _implemented EQUAL 9)
+if(NOT _ok OR NOT _total EQUAL 49 OR NOT _implemented EQUAL 12)
   message(WARNING "FAIL : checked-in manifest — ${_report}; total=${_total}, implemented=${_implemented}")
   math(EXPR _fail_count "${_fail_count} + 1")
 else()

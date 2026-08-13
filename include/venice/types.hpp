@@ -966,6 +966,272 @@ struct EmbeddingResponse {
   return response;
 }
 
+// ── image generation ─────────────────────────────────────────────────────
+//
+// Venice exposes two generation operations with deliberately distinct
+// contracts. /image/generate is Venice-native and may return either JSON or
+// encoded image bytes; /images/generations is OpenAI-compatible and always
+// returns JSON. Keeping the request and response types separate prevents a
+// field accepted by one spelling from looking meaningful on the other.
+
+struct ImageStyleReference {
+  std::string image{};
+  std::optional<double> strength{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["image"] = image;
+    if (strength) j["strength"] = *strength;
+    return j;
+  }
+};
+
+struct ImageGenerationRequest {
+  std::string model{};
+  std::string prompt{};
+  std::optional<double> cfg_scale{};
+  std::optional<bool> embed_exif_metadata{};
+  std::optional<std::string> format{};
+  std::optional<int> height{};
+  std::optional<bool> hide_watermark{};
+  std::optional<int> lora_strength{};
+  std::optional<std::string> negative_prompt{};
+  std::optional<bool> return_binary{};
+  std::optional<int> variants{};
+  std::optional<bool> safe_mode{};
+  std::optional<int> seed{};
+  std::optional<int> steps{};
+  std::optional<std::string> style_preset{};
+  std::optional<std::string> aspect_ratio{};
+  std::optional<std::string> resolution{};
+  std::optional<std::string> quality{};
+  std::optional<bool> enable_web_search{};
+  std::optional<bool> disable_prompt_optimization_thinking{};
+  std::optional<bool> enhance_prompt{};
+  std::optional<int> width{};
+  // Optional container so omission and an explicit [] remain different wire
+  // requests. The model catalogue says whether references are supported and
+  // how many are accepted; this client does not duplicate that policy.
+  std::optional<std::vector<ImageStyleReference>> style_references{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["model"] = model;
+    j["prompt"] = prompt;
+    if (cfg_scale) j["cfg_scale"] = *cfg_scale;
+    if (embed_exif_metadata) j["embed_exif_metadata"] = *embed_exif_metadata;
+    if (format) j["format"] = *format;
+    if (height) j["height"] = *height;
+    if (hide_watermark) j["hide_watermark"] = *hide_watermark;
+    if (lora_strength) j["lora_strength"] = *lora_strength;
+    if (negative_prompt) j["negative_prompt"] = *negative_prompt;
+    if (return_binary) j["return_binary"] = *return_binary;
+    if (variants) j["variants"] = *variants;
+    if (safe_mode) j["safe_mode"] = *safe_mode;
+    if (seed) j["seed"] = *seed;
+    if (steps) j["steps"] = *steps;
+    if (style_preset) j["style_preset"] = *style_preset;
+    if (aspect_ratio) j["aspect_ratio"] = *aspect_ratio;
+    if (resolution) j["resolution"] = *resolution;
+    if (quality) j["quality"] = *quality;
+    if (enable_web_search) j["enable_web_search"] = *enable_web_search;
+    if (disable_prompt_optimization_thinking)
+      j["disable_prompt_optimization_thinking"] = *disable_prompt_optimization_thinking;
+    if (enhance_prompt) j["enhance_prompt"] = *enhance_prompt;
+    if (width) j["width"] = *width;
+    if (style_references) {
+      j["style_references"] = nlohmann::json::array();
+      for (const auto& reference : *style_references)
+        j["style_references"].push_back(reference.to_json_body());
+    }
+    return j;
+  }
+};
+
+struct ImageGenerationTiming {
+  double inference_duration{0.0};
+  double inference_preprocessing_time{0.0};
+  double inference_queue_time{0.0};
+  double total{0.0};
+};
+
+struct NativeImageGenerationResponse {
+  std::string id{};
+  std::vector<std::string> images{};
+  std::optional<nlohmann::json> request{};
+  ImageGenerationTiming timing{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+// The bytes stay in std::string because that is cpp-httplib's byte container.
+// size(), not a terminating NUL, is authoritative. The media type is the
+// normalized actual response Content-Type, never inferred from the request.
+struct GeneratedImageMedia {
+  std::string bytes{};
+  std::string media_type{};
+  ResponseMetadata metadata{};
+};
+
+using ImageGenerationResult =
+    std::variant<NativeImageGenerationResponse, GeneratedImageMedia>;
+
+[[nodiscard]] inline auto native_image_generation_from_json_body(const nlohmann::json& j)
+    -> NativeImageGenerationResponse {
+  const auto required_string = [](const nlohmann::json& object, const char* key,
+                                  const char* where) -> std::string {
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_string())
+      throw std::runtime_error{std::string{where} + ": " + key + " must be a string"};
+    return it->get<std::string>();
+  };
+  const auto required_number = [](const nlohmann::json& object, const char* key,
+                                  const char* where) -> double {
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_number())
+      throw std::runtime_error{std::string{where} + ": " + key + " must be a number"};
+    return it->get<double>();
+  };
+
+  if (!j.is_object()) throw std::runtime_error{"image generation: response must be an object"};
+  const auto* images = detail::opt_array(j, "images");
+  if (images == nullptr)
+    throw std::runtime_error{"image generation: response has no images array"};
+  const auto* timing = detail::opt_object(j, "timing");
+  if (timing == nullptr)
+    throw std::runtime_error{"image generation: response has no timing object"};
+
+  NativeImageGenerationResponse response;
+  response.raw = j;
+  response.id = required_string(j, "id", "image generation");
+  response.images.reserve(images->size());
+  for (const auto& image : *images) {
+    if (!image.is_string())
+      throw std::runtime_error{"image generation: image must be a string"};
+    response.images.push_back(image.get<std::string>());
+  }
+  if (const auto request = j.find("request"); request != j.end() && !request->is_null())
+    response.request = *request;
+  response.timing = {
+      .inference_duration =
+          required_number(*timing, "inferenceDuration", "image generation timing"),
+      .inference_preprocessing_time = required_number(
+          *timing, "inferencePreprocessingTime", "image generation timing"),
+      .inference_queue_time =
+          required_number(*timing, "inferenceQueueTime", "image generation timing"),
+      .total = required_number(*timing, "total", "image generation timing"),
+  };
+  return response;
+}
+
+struct OpenAIImageGenerationRequest {
+  std::string prompt{};
+  std::optional<std::string> background{};
+  std::optional<std::string> model{};
+  std::optional<std::string> moderation{};
+  std::optional<int> n{};
+  std::optional<int> output_compression{};
+  std::optional<std::string> output_format{};
+  std::optional<std::string> quality{};
+  std::optional<std::string> response_format{};
+  std::optional<std::string> size{};
+  std::optional<std::string> style{};
+  std::optional<std::string> user{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["prompt"] = prompt;
+    if (background) j["background"] = *background;
+    if (model) j["model"] = *model;
+    if (moderation) j["moderation"] = *moderation;
+    if (n) j["n"] = *n;
+    if (output_compression) j["output_compression"] = *output_compression;
+    if (output_format) j["output_format"] = *output_format;
+    if (quality) j["quality"] = *quality;
+    if (response_format) j["response_format"] = *response_format;
+    if (size) j["size"] = *size;
+    if (style) j["style"] = *style;
+    if (user) j["user"] = *user;
+    return j;
+  }
+};
+
+struct OpenAIImageGenerationEntry {
+  std::optional<std::string> b64_json{};
+  std::optional<std::string> url{};
+  nlohmann::json raw{};
+};
+
+struct OpenAIImageGenerationResponse {
+  std::int64_t created{0};
+  std::vector<OpenAIImageGenerationEntry> data{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+[[nodiscard]] inline auto openai_image_generation_from_json_body(const nlohmann::json& j)
+    -> OpenAIImageGenerationResponse {
+  if (!j.is_object())
+    throw std::runtime_error{"OpenAI image generation: response must be an object"};
+  const auto created = detail::opt_i64(j, "created");
+  if (!created)
+    throw std::runtime_error{"OpenAI image generation: created must be an int64"};
+  const auto* entries = detail::opt_array(j, "data");
+  if (entries == nullptr)
+    throw std::runtime_error{"OpenAI image generation: response has no data array"};
+
+  OpenAIImageGenerationResponse response;
+  response.raw = j;
+  response.created = *created;
+  response.data.reserve(entries->size());
+  for (const auto& item : *entries) {
+    if (!item.is_object())
+      throw std::runtime_error{"OpenAI image generation: data entry must be an object"};
+    OpenAIImageGenerationEntry entry;
+    entry.raw = item;
+    if (const auto value = item.find("b64_json"); value != item.end()) {
+      if (!value->is_string())
+        throw std::runtime_error{"OpenAI image generation: b64_json must be a string"};
+      entry.b64_json = value->get<std::string>();
+    }
+    if (const auto value = item.find("url"); value != item.end()) {
+      if (!value->is_string())
+        throw std::runtime_error{"OpenAI image generation: url must be a string"};
+      entry.url = value->get<std::string>();
+    }
+    if (!entry.b64_json && !entry.url)
+      throw std::runtime_error{"OpenAI image generation: entry has no image value"};
+    response.data.push_back(std::move(entry));
+  }
+  return response;
+}
+
+struct ImageStyles {
+  std::vector<std::string> entries{};
+  std::size_t returned{0};
+  std::optional<std::string> object{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+[[nodiscard]] inline auto image_styles_from_json_body(const nlohmann::json& j) -> ImageStyles {
+  if (!j.is_object()) throw std::runtime_error{"image styles: response must be an object"};
+  const auto* data = detail::opt_array(j, "data");
+  if (data == nullptr) throw std::runtime_error{"image styles: response has no data array"};
+
+  ImageStyles response;
+  response.raw = j;
+  response.object = detail::opt_string(j, "object");
+  response.returned = data->size();
+  response.entries.reserve(data->size());
+  for (const auto& item : *data)
+    if (item.is_string()) response.entries.push_back(item.get<std::string>());
+  return response;
+}
+
 // ── money ─────────────────────────────────────────────────────────────────
 //
 // Venice quotes every amount in two currencies at once: USD and `diem`, its
@@ -1222,6 +1488,21 @@ struct PriceTier {
   }
 };
 
+// Image-family pricing uses keys that are not token buckets. Keep the literal
+// 2x/4x wire split rather than flattening it into one number: callers choose an
+// upscale factor, and those factors are priced differently.
+struct ImageUpscalePricing {
+  std::optional<Price> x2;
+  std::optional<Price> x4;
+
+  friend void from_json(const nlohmann::json& j, ImageUpscalePricing& p) {
+    p.x2.reset();
+    p.x4.reset();
+    if (const auto* value = detail::opt_object(j, "2x")) p.x2 = value->get<Price>();
+    if (const auto* value = detail::opt_object(j, "4x")) p.x4 = value->get<Price>();
+  }
+};
+
 // A model's rate card: the base tier, and for some models a second tier that
 // takes over past a context threshold.
 //
@@ -1244,13 +1525,21 @@ struct Pricing {
   PriceTier base;
   std::optional<std::int64_t> extended_threshold_tokens;
   std::optional<PriceTier> extended;
+  std::optional<Price> generation;
+  std::optional<ImageUpscalePricing> upscale;
 
   friend void from_json(const nlohmann::json& j, Pricing& p) {
     p.base = j.get<PriceTier>();
+    p.generation.reset();
+    p.upscale.reset();
     if (const auto* ext = detail::opt_object(j, "extended")) {
       p.extended = ext->get<PriceTier>();
       p.extended_threshold_tokens = detail::opt_i64(*ext, "context_token_threshold");
     }
+    if (const auto* generation = detail::opt_object(j, "generation"))
+      p.generation = generation->get<Price>();
+    if (const auto* upscale = detail::opt_object(j, "upscale"))
+      p.upscale = upscale->get<ImageUpscalePricing>();
   }
 };
 

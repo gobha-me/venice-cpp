@@ -58,6 +58,11 @@ right bridge.
 - **Embeddings** (`/embeddings`) — single text, text batches, token arrays and
   token-array batches; float vectors and opaque base64 results remain distinct,
   with strict index and usage accounting plus the verbatim response as `raw`.
+- **Image generation** (`/image/generate`, `/images/generations`) — separate
+  Venice-native and OpenAI-compatible requests. Native success is a typed JSON
+  envelope or byte-exact JPEG/PNG/WebP selected from the actual response media
+  type; the client never decodes or writes an image. Public `/image/styles`
+  discovers the current style strings without a credential.
 - **Explicit authentication** — Public, Bearer, pre-signed SIWX and pre-built
   x402 payment payloads are distinct modes, selectable per client or per call.
   The client never owns wallet private keys or constructs signatures.
@@ -71,12 +76,12 @@ right bridge.
   auth / payment-required / rate-limit / invalid-arg / cancelled. Response
   failures carry status, raw body and response metadata, including x402 headers.
 
-Later phases (fed by real use): image/audio/video, TTS,
+Later phases (fed by real use): image editing/upscale, audio/video, TTS,
 retries/backoff, async.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 9/49 operations implemented.
+OpenAPI coverage: 12/49 operations implemented.
 
 The checked inventory is [`cmake/openapi_manifest.json`](cmake/openapi_manifest.json),
 keyed by HTTP method + path rather than `operationId` (the published
@@ -249,6 +254,38 @@ client rejects missing/empty required structure, but transmits range and value
 policy verbatim. Base64 is not decoded because Venice does not specify the
 decoded element width or byte order. Successful SIWX calls expose the exact
 `X-Balance-Remaining` string through `EmbeddingResponse::metadata`.
+
+### Image generation
+
+Native generation can return JSON/base64 or encoded media. The actual response
+`Content-Type` selects the result alternative; `return_binary` is a request,
+not a promise the client uses to guess the response:
+
+```cpp
+venice::ImageGenerationRequest image_request;
+image_request.model = "flux-dev-uncensored";
+image_request.prompt = "A blue ceramic cup on a white background";
+image_request.format = "png";
+image_request.return_binary = true;
+
+const auto image_result = client.generate_image(image_request);
+if (!image_result) return;  // inspect image_result.error()
+
+if (const auto* media = std::get_if<venice::GeneratedImageMedia>(&*image_result)) {
+  std::cout << media->media_type << ": " << media->bytes.size() << " bytes\n";
+} else if (const auto* json =
+               std::get_if<venice::NativeImageGenerationResponse>(&*image_result)) {
+  std::cout << json->images.size() << " base64 image(s)\n";
+}
+```
+
+`OpenAIImageGenerationRequest` and `generate_image_openai()` expose the
+OpenAI-compatible operation separately because its fields and JSON-only result
+are different. Both requests serialize only engaged options and retain an
+`extra` passthrough with modeled fields winning. Model-specific formats,
+qualities, dimensions and ranges pass through to Venice; `models("image")`
+provides the typed constraints callers can use to choose them. `image_styles()`
+is public and returns its complete envelope in `ImageStyles::raw`.
 
 **`response_format` is raw JSON, not an enum.** The API accepts both
 `{"type":"json_object"}` and a full `{"type":"json_schema", …}` block, and no
@@ -878,7 +915,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.18.0)
+  GIT_TAG        v0.19.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -1037,10 +1074,12 @@ VENICE_API_KEY=... venice-cpp --characters     # v0.10.0: the character entry
 VENICE_API_KEY=... venice-cpp --character SLUG # v0.14.0: detail + v0.15.0: reviews
 VENICE_API_KEY=... venice-cpp --usage [model]  # v0.12.0: usage + cost + envelope
 VENICE_API_KEY=... venice-cpp --embeddings [model] # v0.18.0: float + base64
+VENICE_API_KEY=... venice-cpp --image [model]      # v0.19.0: JSON + media
 
 venice-cpp --traits [type]                     # v0.16.0: no key needed
 venice-cpp --compat [type]                     # v0.16.0: no key needed
 venice-cpp --modality [type]                   # v0.17.0: no key needed
+venice-cpp --styles                             # v0.19.0: no key needed
 ```
 
 `--modality` walks **every** entry of every modality rather than picking one,

@@ -11,6 +11,9 @@
 //   * chat_stream(req, on_token)    -> expected<ChatResponse>   (content text)
 //   * chat_stream(req, acc[, on_delta])                         (structured)
 //   * embeddings(req)               -> expected<EmbeddingResponse>
+//   * generate_image(req)           -> expected<ImageGenerationResult>
+//   * generate_image_openai(req)    -> expected<OpenAIImageGenerationResponse>
+//   * image_styles()                -> expected<ImageStyles>
 //   * models()                      -> expected<vector<Model>>
 //   * model_traits(type)            -> expected<ModelTraits>
 //   * model_compatibility_mapping(type)
@@ -29,7 +32,7 @@
 // per-call timeouts, cancellation and authentication override — see
 // venice/options.hpp (VC-06/VC-23).
 //
-// Not in Phase 0 (later phases, fed by real use): image/audio/video, TTS,
+// Later phases, fed by real use: image edit/upscale, audio/video, TTS,
 // retries/backoff, async.
 
 #include <array>
@@ -689,6 +692,84 @@ class Client {
     }
   }
 
+  // ── image generation ─────────────────────────────────────────────────
+  // The native operation has a response union. `return_binary` expresses the
+  // caller's request, but the actual successful Content-Type decides which
+  // alternative is returned; gateways and future server changes do not get to
+  // turn image bytes into a JSON parse attempt or vice versa.
+  [[nodiscard]] auto generate_image(const ImageGenerationRequest& req,
+                                    const RequestOptions& opts = {}) const
+      -> std::expected<ImageGenerationResult, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+
+    auto response = post_json_raw_response("/image/generate", req.to_json_body(),
+                                           detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+
+    static constexpr std::array<std::string_view, 4> kAllowed{
+        "application/json", "image/jpeg", "image/png", "image/webp"};
+    if (auto media = detail::require_media_type(*response, kAllowed); !media)
+      return std::unexpected{std::move(media.error())};
+
+    auto metadata = detail::metadata_from_headers(response->headers);
+    if (response->content_type != "application/json") {
+      return ImageGenerationResult{GeneratedImageMedia{
+          .bytes = std::move(response->body),
+          .media_type = std::move(response->content_type),
+          .metadata = std::move(metadata),
+      }};
+    }
+
+    auto body = detail::decode_json(*response);
+    if (!body) return std::unexpected{std::move(body.error())};
+    try {
+      auto parsed = native_image_generation_from_json_body(*body);
+      parsed.metadata = std::move(metadata);
+      return ImageGenerationResult{std::move(parsed)};
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"image generation parse: "} + e.what(),
+                                   response->body, std::move(metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto generate_image_openai(
+      const OpenAIImageGenerationRequest& req,
+      const RequestOptions& opts = {}) const
+      -> std::expected<OpenAIImageGenerationResponse, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+
+    auto res = post_json_response("/images/generations", req.to_json_body(),
+                                  detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      auto response = openai_image_generation_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"OpenAI image generation parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
+  }
+
+  // Public style discovery. A public client sends no Authorization header at
+  // all; a Bearer client remains accepted for source-compatible composition.
+  [[nodiscard]] auto image_styles(const RequestOptions& opts = {}) const
+      -> std::expected<ImageStyles, Error> {
+    auto res = get_json_response("/image/styles", detail::AuthPolicy::PublicOrBearer, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      auto response = image_styles_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"image styles parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
+  }
+
   // ── models ────────────────────────────────────────────────────────────
   //
   // Only the shape of the *response* can fail here; individual entries degrade
@@ -714,9 +795,9 @@ class Client {
   // inside the client, a value the server would have accepted. An unrecognised
   // type is the server's 400 to give (AGENTS.md, "range checking: none").
   //
-  // The typed surface stays the text shape (VC-03). A non-text entry parses
-  // with most fields absent and keeps its type-specific keys in Model::raw;
-  // test/04models/ pins that with a captured image entry.
+  // Since VC-39 each modeled modality has its own optional view, including the
+  // image constraints this operation's request builder consumes. A future or
+  // deliberately unmodeled modality still keeps its complete entry in raw.
   [[nodiscard]] auto models(std::string_view type = {}, const RequestOptions& opts = {}) const
       -> std::expected<std::vector<Model>, Error> {
     auto res = get_json_response(detail::with_query("/models", {{"type", type}}),
@@ -1049,6 +1130,43 @@ class Client {
     return {};
   }
 
+  [[nodiscard]] static auto validate(const ImageGenerationRequest& req)
+      -> std::expected<void, Error> {
+    if (req.cfg_scale && !std::isfinite(*req.cfg_scale))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "cfg_scale is not finite", {}}};
+    if (req.style_references) {
+      for (std::size_t i = 0; i < req.style_references->size(); ++i) {
+        const auto& reference = (*req.style_references)[i];
+        if (reference.strength && !std::isfinite(*reference.strength))
+          return std::unexpected{Error{ErrorKind::InvalidArg, 0,
+                                       "style_references[" + std::to_string(i) +
+                                           "].strength is not finite",
+                                       {}}};
+      }
+    }
+    if (req.model.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "model is empty", {}}};
+    if (req.prompt.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "prompt is empty", {}}};
+    if (req.style_references) {
+      for (std::size_t i = 0; i < req.style_references->size(); ++i)
+        if ((*req.style_references)[i].image.empty())
+          return std::unexpected{Error{ErrorKind::InvalidArg, 0,
+                                       "style_references[" + std::to_string(i) +
+                                           "].image is empty",
+                                       {}}};
+    }
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const OpenAIImageGenerationRequest& req)
+      -> std::expected<void, Error> {
+    if (req.prompt.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "prompt is empty", {}}};
+    return {};
+  }
+
   [[nodiscard]] auto request_headers(detail::AuthPolicy policy,
                                      const RequestOptions& opts) const
       -> std::expected<httplib::Headers, Error> {
@@ -1091,17 +1209,28 @@ class Client {
                                         detail::AuthPolicy policy,
                                         const RequestOptions& opts) const
       -> std::expected<detail::JsonResponse, Error> {
+    auto response = post_json_raw_response(endpoint, body, policy, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    return detail::decode_json_response(*response);
+  }
+
+  // The native image endpoint consumes this undecoded form because a successful
+  // call may be JSON or media. Other JSON POST methods layer their decoder on
+  // the same helper, so method/auth/body construction still has one owner.
+  [[nodiscard]] auto post_json_raw_response(std::string_view endpoint,
+                                            const nlohmann::json& body,
+                                            detail::AuthPolicy policy,
+                                            const RequestOptions& opts) const
+      -> std::expected<detail::BufferedResponse, Error> {
     auto headers = request_headers(policy, opts);
     if (!headers) return std::unexpected{std::move(headers.error())};
-    auto response = detail::send_buffered(
+    return detail::send_buffered(
         m_base_url,
         detail::BufferedRequest{.method = detail::HttpMethod::Post,
                                 .endpoint = std::string{endpoint},
                                 .headers = std::move(*headers),
                                 .body = detail::ByteBody{body.dump(), "application/json"}},
         opts);
-    if (!response) return std::unexpected{std::move(response.error())};
-    return detail::decode_json_response(*response);
   }
 
   // SSE framing used to live here as a private static plus a "\n\n" loop inside
