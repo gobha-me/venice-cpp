@@ -31,8 +31,7 @@ AGENTS.md (which holds standing conventions, not state).
   key present, no unmodeled key at any of the four levels.
 - `embeddings(request)` — all four documented input shapes, float/base64 output
   kept distinct, strict ordering/accounting fields, and the exact envelope in
-  `raw` (VC-26). Offline and loopback coverage is complete; the two-format live
-  leg awaits a credential before merge.
+  `raw` (VC-26). Verified live in both formats on 2026-08-13.
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   payment_required/rate_limited/invalid_arg/cancelled, each carrying status +
@@ -92,6 +91,11 @@ indices and usage counts parse loudly because silently narrowing either would
 corrupt vector ordering or accounting. `venice-cpp --embeddings [model]` runs
 both response formats, reports runner-up embedding models, prints the verbatim
 envelope and reconciles raw types against the typed variant.
+
+The live leg selected `text-embedding-bge-m3` and named four alternatives. One
+input returned index 0 as a 1,024-element float vector and then as a 5,464-byte
+opaque base64 string. Both raw values agreed with the typed variant, and the
+envelope, usage object and entry contained no unmodeled keys.
 
 The OpenAPI snapshot moved to `20260811.214155` / `784fe23e…`, repository commit
 `476df95…`. Auditing that document against the old snapshot reported only the

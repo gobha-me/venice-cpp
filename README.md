@@ -991,6 +991,12 @@ tool turn rejected by Gemini-family models); **#29 is fixed in v0.11.0**, and
 `--tools` now passes both legs on `gemini-3-6-flash`, `gemini-3-5-flash` and
 `zai-org-glm-4.7`.
 
+**Embeddings were measured live in both formats on 2026-08-13.** The selected
+`text-embedding-bge-m3` returned a 1,024-element float vector and a 5,464-byte
+opaque base64 string for the same input. Raw and typed shapes agreed, with no
+unmodeled envelope, usage or entry keys; four alternate embedding models were
+reported beside the pick.
+
 **#28 is settled in v0.11.1, and its premise was wrong.** Venice does send both
 detail objects, at exactly the nesting the library reads — but only on some
 model families. `--stream` had auto-picked `gemini-3-6-flash`, one of two
