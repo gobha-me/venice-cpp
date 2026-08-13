@@ -142,6 +142,18 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   *loses* whenever `tools` is engaged, so the hatch's behaviour would flip on an
   unrelated field. The container stays typed
   (`optional<vector<nlohmann::json>>`) so engaged-but-empty can emit `[]`.
+- **Embedding input follows that same raw-with-builders rule; embedding output
+  does not collapse two wire shapes.** `EmbeddingRequest::input` is raw json,
+  with `embedding_input::{text,texts,tokens,token_batches}` for the documented
+  forms. The client rejects only missing/empty required structure and leaves
+  element kinds, counts, dimensions, model ids and encoding names to the server,
+  so the raw escape hatch remains an escape hatch. On the response side,
+  `EmbeddingValue` distinguishes `vector<double>` from opaque base64 even
+  though the 20260811 OpenAPI 200 schema describes only the numeric array while
+  the request explicitly offers `encoding_format: base64`. Indices, vector
+  elements and usage counts parse loudly: a tolerant zero there would silently
+  corrupt ordering, search data or accounting. Base64 is never decoded because
+  Venice specifies neither element width nor byte order.
 - **Braces build arrays, parentheses build scalars.** `nlohmann::json{"auto"}` is
   `["auto"]`; `nlohmann::json("auto")` is `"auto"`. Both compile, so only an
   `is_string()`-style assertion catches the wrong one. The *object* builders

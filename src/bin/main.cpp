@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -78,6 +79,35 @@ auto pick_by_capability(const venice::Client& client,
   if (pick.chosen.empty()) {
     std::cerr << "no text model reported " << flag_name
               << " -- either none does, or that flag is not where Model expects it\n";
+    return std::nullopt;
+  }
+  return pick;
+}
+
+// The embedding endpoint chooses by modality rather than by a flag inside a
+// text model's capabilities. It still returns ModelPick so the reporting rule
+// stays shared: an auto-picked family never appears alone on screen.
+auto pick_by_modality(const venice::Client& client, std::string_view type,
+                      std::size_t max_alternates = 4) -> std::optional<ModelPick> {
+  const auto models = client.models(type);
+  if (!models) {
+    std::cerr << "models(" << type << ") failed [" << venice::to_string(models.error().kind)
+              << "] " << models.error().message << '\n';
+    return std::nullopt;
+  }
+
+  ModelPick pick;
+  for (const auto& model : *models) {
+    if (model.id.empty()) continue;
+    if (pick.chosen.empty())
+      pick.chosen = model.id;
+    else if (pick.alternates.size() < max_alternates)
+      pick.alternates.push_back(model.id);
+    else
+      break;
+  }
+  if (pick.chosen.empty()) {
+    std::cerr << "no " << type << " model carried a usable id\n";
     return std::nullopt;
   }
   return pick;
@@ -182,6 +212,93 @@ void report_unmodeled(std::string_view label, const nlohmann::json& obj,
   for (std::size_t i = 0; i < unmodeled.size(); ++i)
     std::cerr << (i != 0U ? ", " : "") << unmodeled[i];
   std::cerr << "   (reachable via " << reachable_via << ")\n";
+}
+
+// ── `--embeddings [model]` (VC-26, #41) ─────────────────────────────────
+//
+// Two paid calls because the wire question is itself two-valued. The OpenAPI
+// request offers float and base64 while its 200 schema describes only an array;
+// a float-only leg would therefore leave the disputed half unmeasured. Each run
+// prints the complete envelope and independently reconciles the raw value type
+// with the variant selected by the parser.
+
+constexpr std::array<std::string_view, 4> kModeledEmbeddingBodyKeys{
+    "data", "model", "object", "usage"};
+constexpr std::array<std::string_view, 3> kModeledEmbeddingEntryKeys{
+    "embedding", "index", "object"};
+constexpr std::array<std::string_view, 2> kModeledEmbeddingUsageKeys{
+    "prompt_tokens", "total_tokens"};
+
+auto embeddings_report(const venice::Client& client, std::string_view model) -> int {
+  ModelPick pick;
+  if (model.empty()) {
+    auto selected = pick_by_modality(client, "embedding");
+    if (!selected) return EXIT_FAILURE;
+    pick = std::move(*selected);
+  } else {
+    pick.chosen = std::string{model};
+  }
+  report_pick(pick, "type=embedding", "`venice-cpp --embeddings <id>`");
+
+  const auto run = [&](std::string_view format) -> bool {
+    venice::EmbeddingRequest request;
+    request.model = pick.chosen;
+    request.input = venice::embedding_input::text("The quick brown fox jumped over the lazy dog");
+    request.encoding_format = std::string{format};
+
+    const auto response = client.embeddings(request);
+    if (!response) {
+      std::cerr << format << " embeddings failed [" << venice::to_string(response.error().kind)
+                << "] " << response.error().message << '\n';
+      if (!response.error().body.empty()) std::cerr << response.error().body << '\n';
+      return false;
+    }
+
+    std::cerr << "\n-- " << format << ", envelope verbatim --\n"
+              << response->raw.dump(2) << '\n';
+    report_unmodeled("unmodeled envelope keys: ", response->raw, kModeledEmbeddingBodyKeys,
+                     "EmbeddingResponse::raw");
+    if (const auto* usage = venice::detail::opt_object(response->raw, "usage"))
+      report_unmodeled("unmodeled usage keys: ", *usage, kModeledEmbeddingUsageKeys,
+                       "EmbeddingResponse::raw[\"usage\"]");
+
+    if (response->data.empty()) {
+      std::cerr << "EMPTY DATA -- one input produced no embedding\n";
+      return false;
+    }
+
+    bool agrees = true;
+    for (std::size_t i = 0; i < response->data.size(); ++i) {
+      const auto& entry = response->data[i];
+      report_unmodeled("unmodeled entry keys: ", entry.raw, kModeledEmbeddingEntryKeys,
+                       "Embedding::raw");
+      const auto raw = entry.raw.find("embedding");
+      const bool raw_float = raw != entry.raw.end() && raw->is_array();
+      const bool raw_base64 = raw != entry.raw.end() && raw->is_string();
+      const bool typed_float = std::holds_alternative<std::vector<double>>(entry.value);
+      const bool typed_base64 = std::holds_alternative<std::string>(entry.value);
+      const bool expected = format == "float" ? typed_float : typed_base64;
+      if (raw_float != typed_float || raw_base64 != typed_base64 || !expected) {
+        std::cerr << "entry " << i << " RAW/TYPED FORMAT MISMATCH\n";
+        agrees = false;
+      }
+      std::cerr << "entry " << i << ": index=" << entry.index << ", typed="
+                << (typed_float ? "float[" +
+                                      std::to_string(std::get<std::vector<double>>(entry.value).size()) +
+                                      "]"
+                                : "base64[" +
+                                      std::to_string(std::get<std::string>(entry.value).size()) +
+                                      "]")
+                << '\n';
+    }
+    if (response->metadata.x_balance_remaining)
+      std::cerr << "X-Balance-Remaining: " << *response->metadata.x_balance_remaining << '\n';
+    return agrees;
+  };
+
+  const bool floats = run("float");
+  const bool base64 = run("base64");
+  return floats && base64 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 
@@ -1577,7 +1694,8 @@ auto main(int argc, char** argv) -> int {
   const char* key = std::getenv("VENICE_API_KEY");
   if (key == nullptr || *key == '\0') {
     std::cerr << "VENICE_API_KEY not set; nothing to call with a credential.\n"
-                 "(--traits, --compat and --modality need no key and run without one.)\n";
+                 "(--traits, --compat and --modality need no key and run without one;\n"
+                 " --embeddings needs a key.)\n";
     return EXIT_SUCCESS;
   }
 
@@ -1595,6 +1713,7 @@ auto main(int argc, char** argv) -> int {
                                           : std::string{"Think step by step: what is 17 * 23?"});
   if (leg == "--tools") return tools_report(client, arg);
   if (leg == "--usage") return usage_report(client, arg);
+  if (leg == "--embeddings") return embeddings_report(client, arg);
 
   const std::string prompt = argc > 1 ? argv[1] : "Say hello in one short sentence.";
 

@@ -2,10 +2,10 @@
   "schema_version": 1,
   "source": {
     "url": "https://api.venice.ai/doc/api/swagger.yaml",
-    "repository_url": "https://github.com/veniceai/api-docs/blob/3e9f4dde61cbe2454afd05841a963463f6e14446/swagger.yaml",
-    "version": "20260806.142021",
-    "sha256": "afb975c4aa80b85c7f0866f3abd6c184ac98a07e8471ffe18e6a1875efb93ee2",
-    "audited_on": "2026-08-10"
+    "repository_url": "https://github.com/veniceai/api-docs/blob/476df95b1f8230c4b4046a545301b3a5907114a3/swagger.yaml",
+    "version": "20260811.214155",
+    "sha256": "784fe23e888b77e355dcb65ddd12ca55f87a790f4b37cb19b94e880407187841",
+    "audited_on": "2026-08-13"
   },
   "operations": [
     {
@@ -977,8 +977,11 @@
       "method": "POST",
       "path": "/embeddings",
       "family": "embeddings",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 41,
+      "public_api": [
+        "Client::embeddings"
+      ],
       "security": [
         [
           "BearerAuth"

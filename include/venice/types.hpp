@@ -17,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -824,6 +825,146 @@ struct ChatRequest {
     return j;
   }
 };
+
+// ── embeddings ────────────────────────────────────────────────────────────
+//
+// `input` is caller-authored and polymorphic, so it follows the same contract
+// as response_format and tools: raw json is the forward-compatible floor and
+// builders make the documented shapes easy to spell. A closed variant here
+// would turn the next input form Venice adds into a source release of this
+// header instead of something callers can use immediately.
+
+namespace embedding_input {
+
+inline auto text(std::string value) -> nlohmann::json {
+  return nlohmann::json(std::move(value));
+}
+
+inline auto texts(std::vector<std::string> values) -> nlohmann::json {
+  return nlohmann::json(std::move(values));
+}
+
+inline auto tokens(std::vector<int> values) -> nlohmann::json {
+  return nlohmann::json(std::move(values));
+}
+
+inline auto token_batches(std::vector<std::vector<int>> values) -> nlohmann::json {
+  return nlohmann::json(std::move(values));
+}
+
+}  // namespace embedding_input
+
+struct EmbeddingRequest {
+  std::string model{};
+  nlohmann::json input{};
+  std::optional<int> dimensions{};
+  std::optional<std::string> encoding_format{};
+  std::optional<std::string> user{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["model"] = model;
+    j["input"] = input;
+    if (dimensions) j["dimensions"] = *dimensions;
+    if (encoding_format) j["encoding_format"] = *encoding_format;
+    if (user) j["user"] = *user;
+    return j;
+  }
+};
+
+// Venice documents `encoding_format` as float or base64, although the current
+// 200-response schema describes only the numeric-array half. Keep the two wire
+// shapes discriminated and keep base64 opaque: the API does not specify the
+// decoded element width or byte order.
+using EmbeddingValue = std::variant<std::vector<double>, std::string>;
+
+struct Embedding {
+  EmbeddingValue value{};
+  int index{0};
+  std::string object{};
+  nlohmann::json raw{};
+};
+
+struct EmbeddingUsage {
+  int prompt_tokens{0};
+  int total_tokens{0};
+
+  friend auto operator==(const EmbeddingUsage&, const EmbeddingUsage&) -> bool = default;
+};
+
+struct EmbeddingResponse {
+  std::vector<Embedding> data{};
+  std::string model{};
+  std::string object{};
+  EmbeddingUsage usage{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+// Parse a successful /embeddings envelope. Every modeled field is required by
+// the operation and affects either vector ordering or accounting, so this is a
+// loud parser: malformed data throws here and Client::embeddings turns it into
+// ErrorKind::Parse. Unknown fields survive in the two raw objects.
+[[nodiscard]] inline auto embeddings_from_json_body(const nlohmann::json& j)
+    -> EmbeddingResponse {
+  const auto required_string = [](const nlohmann::json& object, const char* key,
+                                  const char* where) -> std::string {
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_string())
+      throw std::runtime_error{std::string{where} + ": " + key + " must be a string"};
+    return it->get<std::string>();
+  };
+  const auto required_int = [](const nlohmann::json& object, const char* key,
+                               const char* where) -> int {
+    const auto value = detail::opt_int(object, key);
+    if (!value)
+      throw std::runtime_error{std::string{where} + ": " + key + " must be an int"};
+    return *value;
+  };
+
+  if (!j.is_object()) throw std::runtime_error{"embeddings: response must be an object"};
+  const auto* entries = detail::opt_array(j, "data");
+  if (entries == nullptr) throw std::runtime_error{"embeddings: response has no data array"};
+  const auto* usage = detail::opt_object(j, "usage");
+  if (usage == nullptr) throw std::runtime_error{"embeddings: response has no usage object"};
+
+  EmbeddingResponse response;
+  response.raw = j;
+  response.model = required_string(j, "model", "embeddings");
+  response.object = required_string(j, "object", "embeddings");
+  response.usage.prompt_tokens = required_int(*usage, "prompt_tokens", "embeddings usage");
+  response.usage.total_tokens = required_int(*usage, "total_tokens", "embeddings usage");
+  response.data.reserve(entries->size());
+
+  for (const auto& item : *entries) {
+    if (!item.is_object()) throw std::runtime_error{"embeddings: data entry must be an object"};
+    const auto value = item.find("embedding");
+    if (value == item.end())
+      throw std::runtime_error{"embeddings: data entry has no embedding"};
+
+    Embedding entry;
+    entry.raw = item;
+    entry.index = required_int(item, "index", "embedding entry");
+    entry.object = required_string(item, "object", "embedding entry");
+    if (value->is_string()) {
+      entry.value = value->get<std::string>();
+    } else if (value->is_array()) {
+      std::vector<double> numbers;
+      numbers.reserve(value->size());
+      for (const auto& element : *value) {
+        if (!element.is_number())
+          throw std::runtime_error{"embeddings: vector element must be a number"};
+        numbers.push_back(element.get<double>());
+      }
+      entry.value = std::move(numbers);
+    } else {
+      throw std::runtime_error{"embeddings: embedding must be an array or string"};
+    }
+    response.data.push_back(std::move(entry));
+  }
+  return response;
+}
 
 // ── money ─────────────────────────────────────────────────────────────────
 //

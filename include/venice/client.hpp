@@ -10,6 +10,7 @@
 //   * chat(req)                     -> expected<ChatResponse>   (non-streaming)
 //   * chat_stream(req, on_token)    -> expected<ChatResponse>   (content text)
 //   * chat_stream(req, acc[, on_delta])                         (structured)
+//   * embeddings(req)               -> expected<EmbeddingResponse>
 //   * models()                      -> expected<vector<Model>>
 //   * model_traits(type)            -> expected<ModelTraits>
 //   * model_compatibility_mapping(type)
@@ -29,7 +30,7 @@
 // venice/options.hpp (VC-06/VC-23).
 //
 // Not in Phase 0 (later phases, fed by real use): image/audio/video, TTS,
-// embeddings, retries/backoff, async.
+// retries/backoff, async.
 
 #include <array>
 #include <cctype>
@@ -668,6 +669,26 @@ class Client {
     return chat_stream(req, acc, std::function<bool(const StreamDelta&)>{}, opts);
   }
 
+  // ── embeddings ────────────────────────────────────────────────────────
+  [[nodiscard]] auto embeddings(const EmbeddingRequest& req,
+                                const RequestOptions& opts = {}) const
+      -> std::expected<EmbeddingResponse, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+
+    auto res = post_json_response("/embeddings", req.to_json_body(),
+                                  detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      auto response = embeddings_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"embeddings parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
+  }
+
   // ── models ────────────────────────────────────────────────────────────
   //
   // Only the shape of the *response* can fail here; individual entries degrade
@@ -679,7 +700,7 @@ class Client {
   // `type` filters by modality (VC-13, #19). Empty — the default — sends no
   // query string at all, which is what every release before this one did and
   // what Venice reads as type=text: roughly a third of the models it serves.
-  // The rest (image, video, tts, embedding, inpaint, music, asr, upscale) could
+  // The rest (image, video, tts, inpaint, music, asr, upscale) could
   // not be listed through this library at all until this parameter existed.
   // "all" returns every one of them.
   //
@@ -1012,6 +1033,19 @@ class Client {
     if (req.messages.empty())
       return std::unexpected{Error{ErrorKind::InvalidArg, 0, "messages is empty", {}}};
 
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const EmbeddingRequest& req)
+      -> std::expected<void, Error> {
+    if (req.model.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "model is empty", {}}};
+    if (req.input.is_null())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "embedding input is missing", {}}};
+    if (req.input.is_string() && req.input.get_ref<const std::string&>().empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "embedding input is empty", {}}};
+    if (req.input.is_array() && req.input.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "embedding input is empty", {}}};
     return {};
   }
 

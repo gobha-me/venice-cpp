@@ -53,6 +53,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include <httplib.h>
@@ -62,6 +63,7 @@
 
 using venice::ChatRequest;
 using venice::Client;
+using venice::EmbeddingRequest;
 using venice::ErrorKind;
 using venice::Message;
 using venice::Authentication;
@@ -295,6 +297,54 @@ class TestServer {
                       "application/json");
     });
 
+    m_svr.Post("/api/v1/embeddings",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_embeddings_hits;
+                 const auto bearer = req.get_header_value("Authorization");
+                 const auto siwx = req.get_header_value("SIGN-IN-WITH-X");
+                 if (bearer.empty() && siwx.empty()) {
+                   res.status = 401;
+                   res.set_content(R"({"error":"missing test authentication"})",
+                                   "application/json");
+                   return;
+                 }
+                 if (siwx == "needs-payment") {
+                   res.status = 402;
+                   res.set_header("PAYMENT-REQUIRED", "embedding-payment-requirements");
+                   res.set_content(R"({"code":"PAYMENT_REQUIRED"})", "application/json");
+                   return;
+                 }
+                 const auto body = nlohmann::json::parse(req.body);
+                 const auto format = body.value("encoding_format", std::string{"float"});
+                 if (format == "unsupported-media") {
+                   res.status = 415;
+                   res.set_content(R"({"error":"unsupported media"})", "application/json");
+                   return;
+                 }
+                 if (format == "rate-limit") {
+                   res.status = 429;
+                   res.set_content(R"({"error":"slow down"})", "application/json");
+                   return;
+                 }
+
+                 nlohmann::json embedding = nlohmann::json::array({0.25, -1, 2.5});
+                 if (format == "base64") embedding = "AQIDBA==";
+                 if (format == "malformed") embedding = nlohmann::json::array({0.25, "bad"});
+                 const nlohmann::json response{
+                     {"data", nlohmann::json::array({{{"embedding", std::move(embedding)},
+                                                       {"index", 0},
+                                                       {"object", "embedding"}}})},
+                     {"model", body.at("model")},
+                     {"object", "list"},
+                     {"usage", {{"prompt_tokens", 3}, {"total_tokens", 3}}},
+                     {"seen_body", body},
+                     {"seen_authorization", bearer},
+                     {"seen_siwx", siwx}};
+                 res.set_header("X-Balance-Remaining", "4.230000");
+                 res.set_header("X-Protocol-Trace", "embedding-success");
+                 res.set_content(response.dump(), "application/json; charset=utf-8");
+               });
+
     // Registered *before* the catch-all below, and that ordering is the whole
     // reason this route works: httplib matches handlers in registration order,
     // and `/api/v1/characters/(.*)` matches "alan-watts/reviews" perfectly
@@ -453,6 +503,7 @@ class TestServer {
   [[nodiscard]] auto review_hits() const -> int { return m_review_hits.load(); }
   [[nodiscard]] auto traits_hits() const -> int { return m_traits_hits.load(); }
   [[nodiscard]] auto compat_hits() const -> int { return m_compat_hits.load(); }
+  [[nodiscard]] auto embeddings_hits() const -> int { return m_embeddings_hits.load(); }
   [[nodiscard]] auto multipart_stall_hits() const -> int { return m_multipart_stall_hits.load(); }
 
   static constexpr int kFrames = 2;
@@ -472,6 +523,7 @@ class TestServer {
   std::atomic<int> m_review_hits{0};
   std::atomic<int> m_traits_hits{0};
   std::atomic<int> m_compat_hits{0};
+  std::atomic<int> m_embeddings_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
 };
 
@@ -491,6 +543,13 @@ auto minimal_chat() -> ChatRequest {
   r.model = "test-model";
   r.messages = {Message::user("hi")};
   return r;
+}
+
+auto minimal_embedding() -> EmbeddingRequest {
+  EmbeddingRequest request;
+  request.model = "text-embedding-test";
+  request.input = venice::embedding_input::text("hello");
+  return request;
 }
 
 // Elapsed wall time around a call, for the one-sided bounds described above.
@@ -518,6 +577,11 @@ TEST_CASE("endpoint authentication policies reject impossible modes before the s
   REQUIRE(public_chat.error().kind == ErrorKind::InvalidArg);
   REQUIRE(server.chat_hits() == 0);
 
+  const auto public_embeddings = public_client.embeddings(minimal_embedding());
+  REQUIRE_FALSE(public_embeddings.has_value());
+  REQUIRE(public_embeddings.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(server.embeddings_hits() == 0);
+
   const auto public_characters = public_client.characters();
   REQUIRE_FALSE(public_characters.has_value());
   REQUIRE(public_characters.error().kind == ErrorKind::InvalidArg);
@@ -542,6 +606,11 @@ TEST_CASE("endpoint authentication policies reject impossible modes before the s
   REQUIRE(payment_chat.error().body.empty());
   REQUIRE(payment_chat.error().metadata.headers.empty());
   REQUIRE(server.chat_hits() == 0);
+
+  const auto payment_embeddings = payment_client.embeddings(minimal_embedding());
+  REQUIRE_FALSE(payment_embeddings.has_value());
+  REQUIRE(payment_embeddings.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(server.embeddings_hits() == 0);
 
   const Client empty_bearer{"", server.base_url()};
   const auto empty_models = empty_bearer.models();
@@ -581,6 +650,81 @@ TEST_CASE("all four authentication modes traverse the buffered fixture independe
     REQUIRE((*body)["siwx"] == test.siwx);
     REQUIRE((*body)["payment"] == test.payment);
   }
+}
+
+TEST_CASE("embeddings posts exact JSON with Bearer auth and keeps response metadata",
+          "[transport][embeddings]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+  auto request = minimal_embedding();
+  request.input = venice::embedding_input::texts({"one", "two"});
+  request.dimensions = 7;
+  request.encoding_format = "float";
+  request.user = "fixture-user";
+
+  const auto response = client.embeddings(request);
+  REQUIRE(response.has_value());
+  REQUIRE(server.embeddings_hits() == 1);
+  REQUIRE(response->raw["seen_authorization"] == "Bearer default-token");
+  REQUIRE(response->raw["seen_siwx"] == "");
+  REQUIRE(response->raw["seen_body"] == request.to_json_body());
+  REQUIRE(response->raw["seen_body"]["input"] == nlohmann::json::array({"one", "two"}));
+  REQUIRE(response->metadata.x_balance_remaining == "4.230000");
+  REQUIRE(response->metadata.header("x-protocol-trace") == "embedding-success");
+  REQUIRE(std::holds_alternative<std::vector<double>>(response->data.front().value));
+}
+
+TEST_CASE("embeddings supports SIWX and keeps base64 opaque", "[transport][embeddings][auth]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+  auto request = minimal_embedding();
+  request.encoding_format = "base64";
+
+  const auto response = client.embeddings(
+      request, {.authentication = Authentication::sign_in_with_x("signed-wallet")});
+  REQUIRE(response.has_value());
+  REQUIRE(response->raw["seen_authorization"] == "");
+  REQUIRE(response->raw["seen_siwx"] == "signed-wallet");
+  const auto* encoded = std::get_if<std::string>(&response->data.front().value);
+  REQUIRE(encoded != nullptr);
+  REQUIRE(*encoded == "AQIDBA==");
+}
+
+TEST_CASE("embeddings preserves endpoint errors and rejects malformed success data",
+          "[transport][embeddings][failure]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  auto request = minimal_embedding();
+  request.encoding_format = "unsupported-media";
+  const auto unsupported = client.embeddings(request);
+  REQUIRE_FALSE(unsupported.has_value());
+  REQUIRE(unsupported.error().kind == ErrorKind::Http);
+  REQUIRE(unsupported.error().status == 415);
+  REQUIRE(unsupported.error().body == R"({"error":"unsupported media"})");
+
+  request.encoding_format = "rate-limit";
+  const auto limited = client.embeddings(request);
+  REQUIRE_FALSE(limited.has_value());
+  REQUIRE(limited.error().kind == ErrorKind::RateLimited);
+  REQUIRE(limited.error().status == 429);
+
+  request.encoding_format = "malformed";
+  const auto malformed = client.embeddings(request);
+  REQUIRE_FALSE(malformed.has_value());
+  REQUIRE(malformed.error().kind == ErrorKind::Parse);
+  REQUIRE(malformed.error().status == 200);
+  REQUIRE(malformed.error().message.starts_with("embeddings parse: embeddings:"));
+  REQUIRE(malformed.error().metadata.x_balance_remaining == "4.230000");
+
+  const Client wallet{Authentication::sign_in_with_x("needs-payment"), server.base_url()};
+  request.encoding_format = "float";
+  const auto payment = wallet.embeddings(request);
+  REQUIRE_FALSE(payment.has_value());
+  REQUIRE(payment.error().kind == ErrorKind::PaymentRequired);
+  REQUIRE(payment.error().status == 402);
+  REQUIRE(payment.error().metadata.payment_required == "embedding-payment-requirements");
+  REQUIRE(server.embeddings_hits() == 4);
 }
 
 TEST_CASE("character detail rejects an empty slug before auth or transport",

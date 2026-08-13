@@ -29,17 +29,20 @@ AGENTS.md (which holds standing conventions, not state).
 - `character_reviews(slug, query)` — the reviews behind a rating, paged by the
   server's own `pagination` (VC-36). Verified live on 2026-08-11: every modeled
   key present, no unmodeled key at any of the four levels.
+- `embeddings(request)` — all four documented input shapes, float/base64 output
+  kept distinct, strict ordering/accounting fields, and the exact envelope in
+  `raw` (VC-26). Verified live in both formats on 2026-08-13.
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   payment_required/rate_limited/invalid_arg/cancelled, each carrying status +
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 8/49 operations implemented. The other 41 are assigned to
+- OpenAPI coverage: 9/49 operations implemented. The other 40 are assigned to
   family issues and checked in `cmake/openapi_manifest.json` (VC-35). Characters
   and Models are both 3/3 on operations, and since VC-39 the `Model` metadata
-  half is done too — #40 stays open only for the music and ASR shapes, which
-  that ticket scoped out deliberately.
+  half is done too. Music and ASR remain deliberately raw rather than keeping
+  the completed Models family open on shapes no current endpoint consumes.
 
 **Build system synced with cpp-template, tagged v0.1.0 — the first release.**
 The repo was scaffolded before upstream's fix rounds landed, so it was running a
@@ -76,10 +79,29 @@ a single-family run.
    acceptance criterion. The hard half is streaming: a merge rule for arbitrary
    unmodeled keys across fragments has no wire evidence to choose it yet.
 3. Thicken endpoints as AIForge/KDE need them (image/audio/video, TTS,
-   embeddings, retries/backoff, async). Driven by real use, not
+   retries/backoff, async). Driven by real use, not
    speculatively.
 4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-26 (#41) is implemented for v0.18.0.** `EmbeddingRequest::input` remains
+raw JSON, with builders for text, text batches, token arrays and token-array
+batches. `EmbeddingValue` discriminates numeric vectors from opaque base64;
+indices and usage counts parse loudly because silently narrowing either would
+corrupt vector ordering or accounting. `venice-cpp --embeddings [model]` runs
+both response formats, reports runner-up embedding models, prints the verbatim
+envelope and reconciles raw types against the typed variant.
+
+The live leg selected `text-embedding-bge-m3` and named four alternatives. One
+input returned index 0 as a 1,024-element float vector and then as a 5,464-byte
+opaque base64 string. Both raw values agreed with the typed variant, and the
+envelope, usage object and entry contained no unmodeled keys.
+
+The OpenAPI snapshot moved to `20260811.214155` / `784fe23e…`, repository commit
+`476df95…`. Auditing that document against the old snapshot reported only the
+version and digest changes: no operation, authentication, request-media or
+response-media contract changed. The manifest now records that source and
+marks `/embeddings` implemented, taking coverage to 9/49.
 
 **VC-39 (#60) is done** — see v0.17.0, and it is the ticket that pays for the
 "measure first" habit most visibly.
@@ -154,11 +176,8 @@ any level, no reconciliation mismatch. The typed surface reproduces all 30
 counts from an independent raw-JSON tabulation, including video
 `aspect_ratios` engaged 111 / non-empty 71.
 
-Also worth its own ticket, found in passing and not fixed here: the live
-swagger has moved to `20260811.123440` / `ef08464b…`, past the manifest's
-pinned `20260806.142021` / `afb975c4…`, so `tools/openapi_audit.py` exits 1 on
-version and sha before comparing anything. No operation changed, so coverage
-stays 8/49.
+That run also found the OpenAPI source drift now resolved by VC-26; the current
+snapshot and the audit result are recorded in its entry above.
 
 **VC-38 (#59) is done** — see v0.16.0. It is the first ticket here whose whole
 contract was measured before a line of it was written, because for once that was
