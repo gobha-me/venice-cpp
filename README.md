@@ -496,7 +496,9 @@ makes. The 400's body names the values it would have accepted.
 ### Account billing
 
 Account balance, aggregate analytics and the ledger export have unambiguous
-`billing_` names; `balance()` remains the older API-key rate-limit call.
+`billing_` names; `balance()` remains the older API-key rate-limit call. Venice
+requires an **admin API key** for all three billing operations. A valid ordinary
+inference key still receives HTTP 401 with `Admin API key required`.
 
 ```cpp
 const auto balance = client.billing_balance();

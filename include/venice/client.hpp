@@ -1171,7 +1171,8 @@ class Client {
   // These are account billing resources, not the API-key rate-limit object
   // exposed under the historical balance() name below. Keeping `billing_` in
   // every spelling prevents return-type context from deciding which account
-  // quantity a call means.
+  // quantity a call means. Venice requires the Bearer token to be an admin API
+  // key; a valid non-admin inference key reaches the server and returns 401.
   [[nodiscard]] auto billing_balance(const RequestOptions& opts = {}) const
       -> std::expected<BillingBalance, Error> {
     auto res = get_json_response("/billing/balance", detail::AuthPolicy::BearerOnly, opts);
