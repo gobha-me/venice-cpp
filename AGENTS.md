@@ -367,6 +367,15 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   answers; and `cost` lives on `ChatResponse`, not on `Usage`, because
   `Usage::from_json` only ever receives the `usage` sub-object and structurally
   cannot reach a sibling.
+- **Billing is account state, not the historical `balance()` rate-limit call.**
+  The three account methods keep `billing_` in their public names. JSON money
+  remains `optional<double>` because the wire publishes numbers: it preserves
+  absent versus zero but promises approximate arithmetic, not decimal-ledger
+  equality. Usage-history CSV is the exact export and stays byte-for-byte with
+  its continuation and disposition headers. A cursor is an exclusive
+  continuation input — never combine it with first-page filters — and actual
+  successful `Content-Type`, not the requested format, selects the JSON/CSV
+  result union (VC-42).
 - **KDE/Qt-readiness:** keep the library UI-free and Qt-linkable. No Qt types
   in the API client; a separate service layer owns D-Bus/KF concerns.
 

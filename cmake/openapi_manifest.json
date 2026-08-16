@@ -668,8 +668,11 @@
       "method": "GET",
       "path": "/billing/balance",
       "family": "billing",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 46,
+      "public_api": [
+        "Client::billing_balance"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -708,8 +711,11 @@
       "method": "GET",
       "path": "/billing/usage-analytics",
       "family": "billing",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 46,
+      "public_api": [
+        "Client::billing_usage_analytics"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -738,8 +744,11 @@
       "method": "GET",
       "path": "/billing/usage-history",
       "family": "billing",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 46,
+      "public_api": [
+        "Client::billing_usage_history"
+      ],
       "security": [
         [
           "BearerAuth"

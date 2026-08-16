@@ -562,6 +562,176 @@ auto image_transform_report(const venice::Client& client, std::string_view model
 }
 
 
+// ── `--billing [lookback]` (VC-42, #68) ───────────────────────────────────
+//
+constexpr std::array<std::string_view, 4> kModeledBillingBalanceKeys{
+    "canConsume", "consumptionCurrency", "balances", "diemEpochAllocation"};
+constexpr std::array<std::string_view, 2> kModeledBillingBucketKeys{"diem", "usd"};
+constexpr std::array<std::string_view, 8> kModeledBillingAnalyticsKeys{
+    "lookback", "byDate", "byModel", "byModelDaily", "topModels", "byKey",
+    "byKeyDaily", "topKeyNames"};
+constexpr std::array<std::string_view, 3> kModeledBillingDateKeys{"date", "USD", "DIEM"};
+constexpr std::array<std::string_view, 7> kModeledBillingModelKeys{
+    "modelName", "unitType", "modelType", "totalUsd", "totalDiem", "totalUnits",
+    "breakdown"};
+constexpr std::array<std::string_view, 4> kModeledBillingBreakdownKeys{
+    "type", "usd", "diem", "units"};
+constexpr std::array<std::string_view, 5> kModeledBillingKeyKeys{
+    "apiKeyId", "description", "totalUsd", "totalDiem", "totalUnits"};
+constexpr std::array<std::string_view, 2> kModeledBillingHistoryKeys{"data", "nextCursor"};
+constexpr std::array<std::string_view, 8> kModeledBillingHistoryEntryKeys{
+    "amount", "currency", "inferenceDetails", "notes", "pricePerUnitUsd", "sku",
+    "timestamp", "units"};
+constexpr std::array<std::string_view, 4> kModeledBillingInferenceKeys{
+    "completionTokens", "inferenceExecutionTime", "promptTokens", "requestId"};
+
+auto billing_report(const venice::Client& client, std::string_view lookback) -> int {
+  bool agrees = true;
+
+  const auto balance = client.billing_balance();
+  if (!balance) {
+    std::cerr << "billing balance failed [" << venice::to_string(balance.error().kind)
+              << "] " << balance.error().message << '\n';
+    if (!balance.error().body.empty()) std::cerr << balance.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+  std::cerr << "\n-- billing balance, envelope verbatim --\n"
+            << balance->raw.dump(2) << '\n';
+  report_unmodeled("unmodeled balance keys: ", balance->raw,
+                   kModeledBillingBalanceKeys, "BillingBalance::raw");
+  if (const auto* buckets = venice::detail::opt_object(balance->raw, "balances"))
+    report_unmodeled("unmodeled balance bucket keys: ", *buckets,
+                     kModeledBillingBucketKeys, "BillingBalance::balances->raw");
+
+  venice::BillingUsageAnalyticsQuery analytics_query;
+  if (!lookback.empty()) analytics_query.lookback = std::string{lookback};
+  const auto analytics = client.billing_usage_analytics(analytics_query);
+  if (!analytics) {
+    std::cerr << "billing analytics failed ["
+              << venice::to_string(analytics.error().kind) << "] "
+              << analytics.error().message << '\n';
+    if (!analytics.error().body.empty()) std::cerr << analytics.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+  std::cerr << "\n-- billing analytics, envelope verbatim --\n"
+            << analytics->raw.dump(2) << '\n';
+  report_unmodeled("unmodeled analytics keys: ", analytics->raw,
+                   kModeledBillingAnalyticsKeys, "BillingUsageAnalytics::raw");
+
+  const auto check_count = [&](const char* key, std::optional<std::size_t> typed) {
+    const auto raw = analytics->raw.find(key);
+    const bool raw_array = raw != analytics->raw.end() && raw->is_array();
+    const auto raw_size = raw_array ? std::optional<std::size_t>{raw->size()} : std::nullopt;
+    if (raw_size != typed) {
+      std::cerr << key << " RAW/TYPED COUNT MISMATCH: raw="
+                << (raw_size ? std::to_string(*raw_size) : "absent/malformed")
+                << ", typed=" << (typed ? std::to_string(*typed) : "absent") << '\n';
+      agrees = false;
+    }
+  };
+  check_count("byDate", analytics->by_date
+                            ? std::optional<std::size_t>{analytics->by_date->size()}
+                            : std::nullopt);
+  check_count("byModel", analytics->by_model
+                             ? std::optional<std::size_t>{analytics->by_model->size()}
+                             : std::nullopt);
+  check_count("byModelDaily", analytics->by_model_daily
+                                  ? std::optional<std::size_t>{analytics->by_model_daily->size()}
+                                  : std::nullopt);
+  check_count("topModels", analytics->top_models
+                              ? std::optional<std::size_t>{analytics->top_models->size()}
+                              : std::nullopt);
+  check_count("byKey", analytics->by_key
+                           ? std::optional<std::size_t>{analytics->by_key->size()}
+                           : std::nullopt);
+  check_count("byKeyDaily", analytics->by_key_daily
+                                ? std::optional<std::size_t>{analytics->by_key_daily->size()}
+                                : std::nullopt);
+  check_count("topKeyNames", analytics->top_key_names
+                                ? std::optional<std::size_t>{analytics->top_key_names->size()}
+                                : std::nullopt);
+
+  if (analytics->by_date)
+    for (const auto& item : *analytics->by_date)
+      report_unmodeled("unmodeled byDate keys: ", item.raw, kModeledBillingDateKeys,
+                       "BillingUsageByDate::raw");
+  if (analytics->by_model)
+    for (const auto& item : *analytics->by_model) {
+      report_unmodeled("unmodeled byModel keys: ", item.raw, kModeledBillingModelKeys,
+                       "BillingUsageByModel::raw");
+      if (item.breakdown)
+        for (const auto& part : *item.breakdown)
+          report_unmodeled("unmodeled breakdown keys: ", part.raw,
+                           kModeledBillingBreakdownKeys,
+                           "BillingUsageBreakdown::raw");
+    }
+  if (analytics->by_key)
+    for (const auto& item : *analytics->by_key)
+      report_unmodeled("unmodeled byKey keys: ", item.raw, kModeledBillingKeyKeys,
+                       "BillingUsageByKey::raw");
+  // byModelDaily/byKeyDaily keys are response-generated display names. Their
+  // whole objects are the modeled value, so a per-key set difference there
+  // would print the payload rather than detect a parser gap.
+
+  venice::BillingUsageHistoryRequest json_request;
+  json_request.query.page_size = 10;
+  const auto json_history = client.billing_usage_history(json_request);
+  if (!json_history) {
+    std::cerr << "billing JSON history failed ["
+              << venice::to_string(json_history.error().kind) << "] "
+              << json_history.error().message << '\n';
+    if (!json_history.error().body.empty()) std::cerr << json_history.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+  const auto* page = std::get_if<venice::BillingUsageHistoryPage>(&*json_history);
+  if (page == nullptr) {
+    std::cerr << "billing JSON request returned CSV; actual media routing worked, but the live"
+                 " contract disagrees with Accept\n";
+    agrees = false;
+  } else {
+    std::cerr << "\n-- billing history, envelope verbatim --\n"
+              << page->raw.dump(2) << '\n';
+    report_unmodeled("unmodeled history envelope keys: ", page->raw,
+                     kModeledBillingHistoryKeys, "BillingUsageHistoryPage::raw");
+    if (page->returned != page->entries.size()) {
+      std::cerr << "history RAW/TYPED COUNT MISMATCH\n";
+      agrees = false;
+    }
+    for (const auto& item : page->entries) {
+      report_unmodeled("unmodeled history entry keys: ", item.raw,
+                       kModeledBillingHistoryEntryKeys,
+                       "BillingUsageHistoryEntry::raw");
+      if (item.inference_details)
+        report_unmodeled("unmodeled inference detail keys: ",
+                         item.inference_details->raw, kModeledBillingInferenceKeys,
+                         "BillingInferenceDetails::raw");
+    }
+  }
+
+  venice::BillingUsageHistoryRequest csv_request = json_request;
+  csv_request.format = venice::BillingUsageHistoryFormat::Csv;
+  const auto csv_history = client.billing_usage_history(csv_request);
+  if (!csv_history) {
+    std::cerr << "billing CSV history failed ["
+              << venice::to_string(csv_history.error().kind) << "] "
+              << csv_history.error().message << '\n';
+    if (!csv_history.error().body.empty()) std::cerr << csv_history.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+  const auto* csv = std::get_if<venice::BillingUsageHistoryCsv>(&*csv_history);
+  if (csv == nullptr || csv->text.empty()) {
+    std::cerr << "billing CSV request returned no CSV bytes\n";
+    agrees = false;
+  } else {
+    std::cerr << "CSV history: " << csv->text.size() << " bytes, " << csv->media_type
+              << ", next cursor " << (csv->next_cursor ? "present" : "absent")
+              << ", disposition " << (csv->content_disposition ? "present" : "absent")
+              << '\n';
+  }
+  std::cerr << "CSV contents were retained in memory and not written to disk.\n";
+  return agrees ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 // ── `--traits` and `--compat` (VC-38, #59) ────────────────────────────────
 //
 // The two legs that run with no key at all. Everything above this point needs a
@@ -1957,7 +2127,7 @@ auto main(int argc, char** argv) -> int {
   if (key == nullptr || *key == '\0') {
     std::cerr << "VENICE_API_KEY not set; nothing to call with a credential.\n"
                  "(--traits, --compat, --modality and --styles need no key;\n"
-                 " --embeddings, --image and --image-transform need a key.)\n";
+                 " --embeddings, --image, --image-transform and --billing need a key.)\n";
     return EXIT_SUCCESS;
   }
 
@@ -1978,6 +2148,7 @@ auto main(int argc, char** argv) -> int {
   if (leg == "--embeddings") return embeddings_report(client, arg);
   if (leg == "--image") return image_report(client, arg);
   if (leg == "--image-transform") return image_transform_report(client, arg);
+  if (leg == "--billing") return billing_report(client, arg);
 
   const std::string prompt = argc > 1 ? argv[1] : "Say hello in one short sentence.";
 
