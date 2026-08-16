@@ -3113,4 +3113,336 @@ struct CharacterReviewQuery {
   return out;
 }
 
+// ── billing ───────────────────────────────────────────────────────────────
+//
+// Venice publishes billing values as JSON numbers, not decimal strings. The
+// typed values below are therefore display/arithmetic approximations, like
+// Price's usd/diem members; they do not promise exact decimal-ledger equality.
+// The usage-history CSV alternative is retained byte-for-byte for callers that
+// need the server's exact export representation.
+
+struct BillingBalanceBuckets {
+  std::optional<double> diem{};
+  std::optional<double> usd{};
+  nlohmann::json raw{};
+};
+
+struct BillingBalance {
+  std::optional<bool> can_consume{};
+  std::optional<std::string> consumption_currency{};
+  std::optional<BillingBalanceBuckets> balances{};
+  std::optional<double> diem_epoch_allocation{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+[[nodiscard]] inline auto billing_balance_from_json_body(const nlohmann::json& j)
+    -> BillingBalance {
+  if (!j.is_object()) throw std::runtime_error{"billing balance: response must be an object"};
+
+  BillingBalance response;
+  response.raw = j;
+  response.can_consume = detail::opt_bool(j, "canConsume");
+  response.consumption_currency = detail::opt_string(j, "consumptionCurrency");
+  response.diem_epoch_allocation = detail::opt_double(j, "diemEpochAllocation");
+  if (const auto* value = detail::opt_object(j, "balances")) {
+    BillingBalanceBuckets buckets;
+    buckets.raw = *value;
+    buckets.diem = detail::opt_double(*value, "diem");
+    buckets.usd = detail::opt_double(*value, "usd");
+    response.balances = std::move(buckets);
+  }
+  return response;
+}
+
+struct BillingUsageAnalyticsQuery {
+  std::optional<std::string> lookback = std::nullopt;
+  std::optional<std::string> start_date = std::nullopt;
+  std::optional<std::string> end_date = std::nullopt;
+  std::vector<std::pair<std::string, std::string>> extra = {};
+};
+
+[[nodiscard]] inline auto billing_usage_analytics_query_params(
+    const BillingUsageAnalyticsQuery& q)
+    -> std::vector<std::pair<std::string, std::string>> {
+  std::vector<std::pair<std::string, std::string>> out;
+  const auto add = [&out](std::string key, const std::optional<std::string>& value) {
+    if (value && !value->empty()) out.emplace_back(std::move(key), *value);
+  };
+  add("lookback", q.lookback);
+  add("startDate", q.start_date);
+  add("endDate", q.end_date);
+  for (const auto& [key, value] : q.extra) {
+    if (key.empty() || value.empty()) continue;
+    const bool taken = std::any_of(out.begin(), out.end(),
+                                   [&key](const auto& p) { return p.first == key; });
+    if (!taken) out.emplace_back(key, value);
+  }
+  return out;
+}
+
+struct BillingUsageByDate {
+  std::optional<std::string> date{};
+  std::optional<double> usd{};
+  std::optional<double> diem{};
+  nlohmann::json raw{};
+};
+
+struct BillingUsageBreakdown {
+  std::optional<std::string> type{};
+  std::optional<double> usd{};
+  std::optional<double> diem{};
+  std::optional<double> units{};
+  nlohmann::json raw{};
+};
+
+struct BillingUsageByModel {
+  std::optional<std::string> model_name{};
+  std::optional<std::string> unit_type{};
+  std::optional<std::string> model_type{};
+  std::optional<double> total_usd{};
+  std::optional<double> total_diem{};
+  std::optional<double> total_units{};
+  std::optional<std::vector<BillingUsageBreakdown>> breakdown{};
+  nlohmann::json raw{};
+};
+
+struct BillingUsageByKey {
+  std::optional<std::string> api_key_id{};
+  std::optional<std::string> description{};
+  std::optional<double> total_usd{};
+  std::optional<double> total_diem{};
+  std::optional<double> total_units{};
+  nlohmann::json raw{};
+};
+
+struct BillingUsageAnalytics {
+  std::optional<std::string> lookback{};
+  std::optional<std::vector<BillingUsageByDate>> by_date{};
+  std::optional<std::vector<BillingUsageByModel>> by_model{};
+  // Keys other than `date` are response-generated model/key display names.
+  // Keeping each chart object whole avoids freezing those names into an API.
+  std::optional<std::vector<nlohmann::json>> by_model_daily{};
+  // Undocumented on 20260814 OpenAPI, present live 2026-08-16. The shape is
+  // the same dynamic chart map in the account's USD view.
+  std::optional<std::vector<nlohmann::json>> by_model_daily_usd{};
+  std::optional<std::vector<std::string>> top_models{};
+  std::optional<std::vector<BillingUsageByKey>> by_key{};
+  std::optional<std::vector<nlohmann::json>> by_key_daily{};
+  std::optional<std::vector<nlohmann::json>> by_key_daily_usd{};
+  std::optional<std::vector<std::string>> top_key_names{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+[[nodiscard]] inline auto billing_usage_analytics_from_json_body(const nlohmann::json& j)
+    -> BillingUsageAnalytics {
+  if (!j.is_object())
+    throw std::runtime_error{"billing usage analytics: response must be an object"};
+
+  BillingUsageAnalytics response;
+  response.raw = j;
+  response.lookback = detail::opt_string(j, "lookback");
+
+  if (const auto* values = detail::opt_array(j, "byDate")) {
+    response.by_date.emplace();
+    response.by_date->reserve(values->size());
+    for (const auto& value : *values) {
+      BillingUsageByDate item;
+      item.raw = value;
+      if (value.is_object()) {
+        item.date = detail::opt_string(value, "date");
+        item.usd = detail::opt_double(value, "USD");
+        item.diem = detail::opt_double(value, "DIEM");
+      }
+      response.by_date->push_back(std::move(item));
+    }
+  }
+
+  if (const auto* values = detail::opt_array(j, "byModel")) {
+    response.by_model.emplace();
+    response.by_model->reserve(values->size());
+    for (const auto& value : *values) {
+      BillingUsageByModel item;
+      item.raw = value;
+      if (value.is_object()) {
+        item.model_name = detail::opt_string(value, "modelName");
+        item.unit_type = detail::opt_string(value, "unitType");
+        item.model_type = detail::opt_string(value, "modelType");
+        item.total_usd = detail::opt_double(value, "totalUsd");
+        item.total_diem = detail::opt_double(value, "totalDiem");
+        item.total_units = detail::opt_double(value, "totalUnits");
+        if (const auto* parts = detail::opt_array(value, "breakdown")) {
+          item.breakdown.emplace();
+          item.breakdown->reserve(parts->size());
+          for (const auto& part : *parts) {
+            BillingUsageBreakdown parsed;
+            parsed.raw = part;
+            if (part.is_object()) {
+              parsed.type = detail::opt_string(part, "type");
+              parsed.usd = detail::opt_double(part, "usd");
+              parsed.diem = detail::opt_double(part, "diem");
+              parsed.units = detail::opt_double(part, "units");
+            }
+            item.breakdown->push_back(std::move(parsed));
+          }
+        }
+      }
+      response.by_model->push_back(std::move(item));
+    }
+  }
+
+  const auto copy_raw_array = [&j](const char* key)
+      -> std::optional<std::vector<nlohmann::json>> {
+    const auto* values = detail::opt_array(j, key);
+    if (values == nullptr) return std::nullopt;
+    return values->get<std::vector<nlohmann::json>>();
+  };
+  response.by_model_daily = copy_raw_array("byModelDaily");
+  response.by_model_daily_usd = copy_raw_array("byModelDailyUsd");
+  response.top_models = detail::opt_string_array(j, "topModels");
+
+  if (const auto* values = detail::opt_array(j, "byKey")) {
+    response.by_key.emplace();
+    response.by_key->reserve(values->size());
+    for (const auto& value : *values) {
+      BillingUsageByKey item;
+      item.raw = value;
+      if (value.is_object()) {
+        item.api_key_id = detail::opt_string(value, "apiKeyId");
+        item.description = detail::opt_string(value, "description");
+        item.total_usd = detail::opt_double(value, "totalUsd");
+        item.total_diem = detail::opt_double(value, "totalDiem");
+        item.total_units = detail::opt_double(value, "totalUnits");
+      }
+      response.by_key->push_back(std::move(item));
+    }
+  }
+  response.by_key_daily = copy_raw_array("byKeyDaily");
+  response.by_key_daily_usd = copy_raw_array("byKeyDailyUsd");
+  response.top_key_names = detail::opt_string_array(j, "topKeyNames");
+  return response;
+}
+
+struct BillingUsageHistoryQuery {
+  std::optional<std::string> currency = std::nullopt;
+  std::optional<std::string> cursor = std::nullopt;
+  std::optional<std::string> end_timestamp = std::nullopt;
+  std::optional<int> page_size = std::nullopt;
+  std::optional<std::string> start_timestamp = std::nullopt;
+  std::vector<std::pair<std::string, std::string>> extra = {};
+};
+
+[[nodiscard]] inline auto billing_usage_history_query_params(
+    const BillingUsageHistoryQuery& q)
+    -> std::vector<std::pair<std::string, std::string>> {
+  std::vector<std::pair<std::string, std::string>> out;
+  const auto add = [&out](std::string key, const std::optional<std::string>& value) {
+    if (value && !value->empty()) out.emplace_back(std::move(key), *value);
+  };
+  add("currency", q.currency);
+  add("cursor", q.cursor);
+  add("endTimestamp", q.end_timestamp);
+  if (q.page_size) out.emplace_back("pageSize", std::to_string(*q.page_size));
+  add("startTimestamp", q.start_timestamp);
+  for (const auto& [key, value] : q.extra) {
+    if (key.empty() || value.empty()) continue;
+    const bool taken = std::any_of(out.begin(), out.end(),
+                                   [&key](const auto& p) { return p.first == key; });
+    if (!taken) out.emplace_back(key, value);
+  }
+  return out;
+}
+
+enum class BillingUsageHistoryFormat { Json, Csv };
+
+struct BillingUsageHistoryRequest {
+  BillingUsageHistoryQuery query = {};
+  BillingUsageHistoryFormat format = BillingUsageHistoryFormat::Json;
+};
+
+struct BillingInferenceDetails {
+  std::optional<std::int64_t> completion_tokens{};
+  std::optional<std::int64_t> inference_execution_time{};
+  std::optional<std::int64_t> prompt_tokens{};
+  std::optional<std::string> request_id{};
+  nlohmann::json raw{};
+};
+
+struct BillingUsageHistoryEntry {
+  std::optional<double> amount{};
+  std::optional<std::string> currency{};
+  std::optional<BillingInferenceDetails> inference_details{};
+  std::optional<std::string> notes{};
+  std::optional<double> price_per_unit_usd{};
+  std::optional<std::string> sku{};
+  std::optional<std::string> timestamp{};
+  std::optional<double> units{};
+  nlohmann::json raw{};
+};
+
+struct BillingUsageHistoryPage {
+  std::vector<BillingUsageHistoryEntry> entries{};
+  std::size_t returned{0};
+  std::optional<std::string> next_cursor{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct BillingUsageHistoryCsv {
+  std::string text{};
+  std::string media_type{};
+  std::optional<std::string> next_cursor{};
+  std::optional<std::string> content_disposition{};
+  ResponseMetadata metadata{};
+};
+
+using BillingUsageHistoryResult =
+    std::variant<BillingUsageHistoryPage, BillingUsageHistoryCsv>;
+
+[[nodiscard]] inline auto billing_usage_history_from_json_body(const nlohmann::json& j)
+    -> BillingUsageHistoryPage {
+  if (!j.is_object())
+    throw std::runtime_error{"billing usage history: response must be an object"};
+  const auto* values = detail::opt_array(j, "data");
+  if (values == nullptr)
+    throw std::runtime_error{"billing usage history: response has no data array"};
+
+  const auto cursor = j.find("nextCursor");
+  if (cursor == j.end() || (!cursor->is_null() && !cursor->is_string()))
+    throw std::runtime_error{
+        "billing usage history: nextCursor must be a string or null"};
+
+  BillingUsageHistoryPage response;
+  response.raw = j;
+  response.returned = values->size();
+  if (cursor->is_string()) response.next_cursor = cursor->get<std::string>();
+  response.entries.reserve(values->size());
+  for (const auto& value : *values) {
+    BillingUsageHistoryEntry item;
+    item.raw = value;
+    if (value.is_object()) {
+      item.amount = detail::opt_double(value, "amount");
+      item.currency = detail::opt_string(value, "currency");
+      item.notes = detail::opt_string(value, "notes");
+      item.price_per_unit_usd = detail::opt_double(value, "pricePerUnitUsd");
+      item.sku = detail::opt_string(value, "sku");
+      item.timestamp = detail::opt_string(value, "timestamp");
+      item.units = detail::opt_double(value, "units");
+      if (const auto* details = detail::opt_object(value, "inferenceDetails")) {
+        BillingInferenceDetails parsed;
+        parsed.raw = *details;
+        parsed.completion_tokens = detail::opt_i64(*details, "completionTokens");
+        parsed.inference_execution_time =
+            detail::opt_i64(*details, "inferenceExecutionTime");
+        parsed.prompt_tokens = detail::opt_i64(*details, "promptTokens");
+        parsed.request_id = detail::opt_string(*details, "requestId");
+        item.inference_details = std::move(parsed);
+      }
+    }
+    response.entries.push_back(std::move(item));
+  }
+  return response;
+}
+
 }  // namespace venice

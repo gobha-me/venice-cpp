@@ -367,6 +367,20 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   answers; and `cost` lives on `ChatResponse`, not on `Usage`, because
   `Usage::from_json` only ever receives the `usage` sub-object and structurally
   cannot reach a sibling.
+- **Billing is account state, not the historical `balance()` rate-limit call.**
+  The three account methods keep `billing_` in their public names and Venice
+  requires their Bearer token to be an admin API key; a valid ordinary inference
+  key returns 401 with `Admin API key required`. JSON money remains
+  `optional<double>` because the wire publishes numbers: it preserves absent
+  versus zero but promises approximate arithmetic, not decimal-ledger equality.
+  Usage-history CSV is the exact export and stays byte-for-byte with its
+  continuation and disposition headers. A cursor is an exclusive continuation
+  input — never combine it with first-page filters — and actual successful
+  `Content-Type`, not the requested format, selects the JSON/CSV result union
+  Analytics' four daily chart families stay raw objects because their keys are
+  account-defined display names; `byModelDailyUsd` and `byKeyDailyUsd` were
+  present live on 2026-08-16 but absent from that day's OpenAPI document
+  (VC-42).
 - **KDE/Qt-readiness:** keep the library UI-free and Qt-linkable. No Qt types
   in the API client; a separate service layer owns D-Bus/KF concerns.
 

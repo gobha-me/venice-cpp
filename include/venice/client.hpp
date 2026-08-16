@@ -25,6 +25,9 @@
 //   * characters(query)             -> expected<CharacterPage>
 //   * character(slug)               -> expected<Character>
 //   * character_reviews(slug, query)-> expected<CharacterReviewPage>
+//   * billing_balance()             -> expected<BillingBalance>
+//   * billing_usage_analytics(query)-> expected<BillingUsageAnalytics>
+//   * billing_usage_history(request)-> expected<BillingUsageHistoryResult>
 //   * balance()                     -> expected<json>           (rate-limit/balance)
 //
 // A ChatResponse carries the whole assistant turn as a Message, so a reply can
@@ -1164,7 +1167,117 @@ class Client {
     }
   }
 
-  // ── balance / rate limits ─────────────────────────────────────────────
+  // ── billing / API-key rate limits ─────────────────────────────────────
+  // These are account billing resources, not the API-key rate-limit object
+  // exposed under the historical balance() name below. Keeping `billing_` in
+  // every spelling prevents return-type context from deciding which account
+  // quantity a call means. Venice requires the Bearer token to be an admin API
+  // key; a valid non-admin inference key reaches the server and returns 401.
+  [[nodiscard]] auto billing_balance(const RequestOptions& opts = {}) const
+      -> std::expected<BillingBalance, Error> {
+    auto res = get_json_response("/billing/balance", detail::AuthPolicy::BearerOnly, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      auto response = billing_balance_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"billing balance parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto billing_usage_analytics(
+      const BillingUsageAnalyticsQuery& query = {},
+      const RequestOptions& opts = {}) const
+      -> std::expected<BillingUsageAnalytics, Error> {
+    const auto present = [](const std::optional<std::string>& value) {
+      return value && !value->empty();
+    };
+    if (present(query.start_date) != present(query.end_date))
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0,
+                                   "billing analytics start_date and end_date must be paired",
+                                   {}}};
+
+    const auto params = billing_usage_analytics_query_params(query);
+    auto res = get_json_response(detail::with_query("/billing/usage-analytics", params),
+                                 detail::AuthPolicy::BearerOnly, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      auto response = billing_usage_analytics_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"billing usage analytics parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto billing_usage_history(
+      const BillingUsageHistoryRequest& request = {},
+      const RequestOptions& opts = {}) const
+      -> std::expected<BillingUsageHistoryResult, Error> {
+    const auto present = [](const std::optional<std::string>& value) {
+      return value && !value->empty();
+    };
+    const auto& query = request.query;
+    if (query.cursor && query.cursor->empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "billing usage cursor must not be empty", {}}};
+    if (present(query.cursor)) {
+      const bool has_first_page_filter =
+          present(query.currency) || present(query.end_timestamp) || query.page_size ||
+          present(query.start_timestamp) ||
+          std::any_of(query.extra.begin(), query.extra.end(), [](const auto& pair) {
+            return !pair.first.empty() && !pair.second.empty();
+          });
+      if (has_first_page_filter)
+        return std::unexpected{Error{
+            ErrorKind::InvalidArg, 0,
+            "billing usage cursor cannot be combined with first-page filters", {}}};
+    }
+
+    const auto params = billing_usage_history_query_params(query);
+    const std::string accept = request.format == BillingUsageHistoryFormat::Csv
+                                   ? "text/csv"
+                                   : "application/json";
+    auto response = get_raw_response(
+        detail::with_query("/billing/usage-history", params),
+        detail::AuthPolicy::BearerOnly, opts, httplib::Headers{{"Accept", accept}});
+    if (!response) return std::unexpected{std::move(response.error())};
+
+    static constexpr std::array<std::string_view, 2> kAllowed{
+        "application/json", "text/csv"};
+    if (auto media = detail::require_media_type(*response, kAllowed); !media)
+      return std::unexpected{std::move(media.error())};
+
+    auto metadata = detail::metadata_from_headers(response->headers);
+    if (response->content_type == "text/csv") {
+      return BillingUsageHistoryResult{BillingUsageHistoryCsv{
+          .text = std::move(response->body),
+          .media_type = std::move(response->content_type),
+          .next_cursor = metadata.header("X-Next-Cursor"),
+          .content_disposition = metadata.header("Content-Disposition"),
+          .metadata = std::move(metadata),
+      }};
+    }
+
+    auto body = detail::decode_json(*response);
+    if (!body) return std::unexpected{std::move(body.error())};
+    try {
+      auto parsed = billing_usage_history_from_json_body(*body);
+      parsed.metadata = std::move(metadata);
+      return BillingUsageHistoryResult{std::move(parsed)};
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"billing usage history parse: "} + e.what(),
+                                   response->body, std::move(metadata)}};
+    }
+  }
+
+  // Historical API-key rate-limit spelling. This is not billing_balance().
   [[nodiscard]] auto balance(const RequestOptions& opts = {}) const
       -> std::expected<nlohmann::json, Error> {
     auto res = get_json_response("/api_keys/rate_limits", detail::AuthPolicy::BearerOnly, opts);
@@ -1428,8 +1541,19 @@ class Client {
   [[nodiscard]] auto get_json_response(std::string_view endpoint, detail::AuthPolicy policy,
                                        const RequestOptions& opts) const
       -> std::expected<detail::JsonResponse, Error> {
+    auto response = get_raw_response(endpoint, policy, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    return detail::decode_json_response(*response);
+  }
+
+  [[nodiscard]] auto get_raw_response(std::string_view endpoint, detail::AuthPolicy policy,
+                                      const RequestOptions& opts,
+                                      httplib::Headers additional_headers = {}) const
+      -> std::expected<detail::BufferedResponse, Error> {
     auto headers = request_headers(policy, opts);
     if (!headers) return std::unexpected{std::move(headers.error())};
+    for (auto& [name, value] : additional_headers)
+      headers->emplace(std::move(name), std::move(value));
     auto response = detail::send_buffered(
         m_base_url,
         detail::BufferedRequest{.method = detail::HttpMethod::Get,
@@ -1437,7 +1561,7 @@ class Client {
                                 .headers = std::move(*headers)},
         opts);
     if (!response) return std::unexpected{std::move(response.error())};
-    return detail::decode_json_response(*response);
+    return response;
   }
 
   [[nodiscard]] auto post_json_response(std::string_view endpoint,

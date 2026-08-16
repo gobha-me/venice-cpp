@@ -67,10 +67,15 @@ right bridge.
   removal accept explicit inline, URL or owned-file inputs as each endpoint
   permits. JSON versus multipart is selected from that input, and successful
   image bytes retain their actual media type and response metadata.
+- **Account billing** (`/billing/balance`, `/billing/usage-analytics`,
+  `/billing/usage-history`) — typed balance and aggregate views plus ordered,
+  cursor-paged ledger history. History can return typed JSON or byte-exact CSV,
+  selected from the response's actual media type.
 - **Explicit authentication** — Public, Bearer, pre-signed SIWX and pre-built
   x402 payment payloads are distinct modes, selectable per client or per call.
   The client never owns wallet private keys or constructs signatures.
-- **Balance / rate limits** (`/api_keys/rate_limits`).
+- **API-key rate limits** (`/api_keys/rate_limits`) through the historical
+  `balance()` compatibility spelling, kept distinct from account billing.
 - **Per-request timeouts and cancellation** — every call takes an optional
   `RequestOptions` with connect/read/write timeout overrides and a
   `CancelToken` that aborts an in-flight request from another thread, including
@@ -84,7 +89,7 @@ Later phases (fed by real use): audio/video, TTS, retries/backoff, async.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 16/49 operations implemented.
+OpenAPI coverage: 19/49 operations implemented.
 
 One additional published operation is explicitly unsupported:
 `GET /billing/usage` already returns 410 for every request and points callers
@@ -487,6 +492,58 @@ is a 400. That divergence is the server's, measured rather than inferred, and it
 is why `type` is passed through untouched rather than validated here — a set
 hardcoded in this header would have to encode a mistake the specification itself
 makes. The 400's body names the values it would have accepted.
+
+### Account billing
+
+Account balance, aggregate analytics and the ledger export have unambiguous
+`billing_` names; `balance()` remains the older API-key rate-limit call. Venice
+requires an **admin API key** for all three billing operations. A valid ordinary
+inference key still receives HTTP 401 with `Admin API key required`.
+
+```cpp
+const auto balance = client.billing_balance();
+if (!balance) return;  // inspect balance.error()
+if (balance->balances && balance->balances->diem)
+  std::cout << "diem balance: " << *balance->balances->diem << '\n';
+
+const auto analytics = client.billing_usage_analytics({.lookback = "7d"});
+if (!analytics) return;
+
+venice::BillingUsageHistoryRequest request;
+request.query.page_size = 100;
+const auto history = client.billing_usage_history(request);
+if (!history) return;
+if (const auto* page = std::get_if<venice::BillingUsageHistoryPage>(&*history)) {
+  for (const auto& entry : page->entries)
+    if (entry.amount) std::cout << *entry.amount << '\n';
+
+  // A continuation request carries only the cursor. First-page filters cannot
+  // be mixed with it, so a stale filter cannot silently change the page chain.
+  if (page->next_cursor) {
+    venice::BillingUsageHistoryRequest next;
+    next.query.cursor = *page->next_cursor;
+    const auto next_page = client.billing_usage_history(next);
+    (void)next_page;  // inspect success/error as appropriate
+  }
+}
+```
+
+For an export, set `request.format = venice::BillingUsageHistoryFormat::Csv`.
+The result variant then normally holds `BillingUsageHistoryCsv`, including the
+exact response bytes, normalized media type, `Content-Disposition`,
+`X-Next-Cursor` and all response metadata. The union is selected from the
+server's actual `Content-Type`, not from the requested format, so a JSON error
+or a server-side representation change is never mislabeled as CSV.
+
+JSON monetary values are `std::optional<double>` because Venice publishes JSON
+numbers rather than decimal strings. They are suitable for display and
+approximate arithmetic, not exact ledger equality; use the retained CSV bytes
+when the export representation must remain exact. All response structs also
+carry `raw`, and missing or malformed optional values remain disengaged rather
+than becoming zero. Analytics is Beta and currently sends four dynamic daily
+chart maps (`byModelDaily`, `byModelDailyUsd`, `byKeyDaily`, `byKeyDailyUsd`);
+their objects remain raw JSON because their keys are account-defined display
+names rather than a stable schema.
 
 ### What a call cost
 
@@ -950,7 +1007,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.20.0)
+  GIT_TAG        v0.21.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -1111,6 +1168,7 @@ VENICE_API_KEY=... venice-cpp --usage [model]  # v0.12.0: usage + cost + envelop
 VENICE_API_KEY=... venice-cpp --embeddings [model] # v0.18.0: float + base64
 VENICE_API_KEY=... venice-cpp --image [model]      # v0.19.0: JSON + media
 VENICE_API_KEY=... venice-cpp --image-transform [model] # v0.20.0: four transforms
+VENICE_API_KEY=... venice-cpp --billing [lookback] # v0.21.0: balance + analytics + history
 
 venice-cpp --traits [type]                     # v0.16.0: no key needed
 venice-cpp --compat [type]                     # v0.16.0: no key needed

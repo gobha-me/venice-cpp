@@ -597,6 +597,111 @@ class TestServer {
                  transform(req, res, "background-remove-success");
                });
 
+    m_svr.Get("/api/v1/billing/balance",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                ++m_billing_hits;
+                res.set_header("X-Test-Response", "billing-balance");
+                res.set_content(
+                    nlohmann::json{{"canConsume", false},
+                                   {"consumptionCurrency", "DIEM"},
+                                   {"balances", {{"diem", 0}, {"usd", nullptr}}},
+                                   {"diemEpochAllocation", 100},
+                                   {"target", req.target},
+                                   {"authorization", req.get_header_value("Authorization")}}
+                        .dump(),
+                    "application/json");
+              });
+
+    m_svr.Get("/api/v1/billing/usage-analytics",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                ++m_billing_hits;
+                if (req.target.find("status=504") != std::string::npos) {
+                  res.status = 504;
+                  res.set_header("X-Protocol-Trace", "billing-timeout");
+                  res.set_content(R"({"error":"reduce the lookback"})", "text/plain");
+                  return;
+                }
+                if (req.target.find("wrong-shape") != std::string::npos) {
+                  res.set_content("[]", "application/json");
+                  return;
+                }
+                res.set_header("X-Test-Response", "billing-analytics");
+                res.set_content(
+                    nlohmann::json{{"lookback", "7d"},
+                                   {"byDate", nlohmann::json::array()},
+                                   {"byModel", nlohmann::json::array()},
+                                   {"byModelDaily", nlohmann::json::array()},
+                                   {"topModels", nlohmann::json::array()},
+                                   {"byKey", nlohmann::json::array()},
+                                   {"byKeyDaily", nlohmann::json::array()},
+                                   {"topKeyNames", nlohmann::json::array()},
+                                   {"target", req.target},
+                                   {"authorization", req.get_header_value("Authorization")}}
+                        .dump(),
+                    "application/json");
+              });
+
+    m_svr.Get("/api/v1/billing/usage-history",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                ++m_billing_hits;
+                const auto target = std::string_view{req.target};
+                if (target.find("status=400") != std::string_view::npos ||
+                    target.find("status=401") != std::string_view::npos ||
+                    target.find("status=500") != std::string_view::npos) {
+                  const int status = target.find("status=400") != std::string_view::npos
+                                         ? 400
+                                     : target.find("status=401") != std::string_view::npos ? 401
+                                                                                           : 500;
+                  res.status = status;
+                  res.set_header("X-Protocol-Trace", "billing-history-error");
+                  res.set_content(R"({"error":"history failed"})", "text/plain");
+                  return;
+                }
+                if (target.find("wrong-media") != std::string_view::npos) {
+                  res.set_header("X-Protocol-Trace", "billing-history-media");
+                  res.set_content("not a supported success", "text/plain");
+                  return;
+                }
+                if (target.find("wrong-shape") != std::string_view::npos) {
+                  res.set_content(R"({"data":[]})", "application/json");
+                  return;
+                }
+
+                const bool force_csv = target.find("force=csv") != std::string_view::npos;
+                const bool force_json = target.find("force=json") != std::string_view::npos;
+                const bool csv = force_csv ||
+                                 (!force_json && req.get_header_value("Accept") == "text/csv");
+                res.set_header("X-Test-Response", "billing-history");
+                if (csv) {
+                  res.set_header("X-Next-Cursor", "next_csv_page");
+                  res.set_header(
+                      "Content-Disposition",
+                      "attachment; filename=billing-usage-history-20260816T120000000Z.csv");
+                  const std::string body =
+                      "amount,currency,notes\r\n-0.25,DIEM,synthetic\r\n";
+                  res.set_content(body, "Text/CSV; charset=utf-8");
+                  return;
+                }
+
+                res.set_content(
+                    nlohmann::json{
+                        {"data",
+                         nlohmann::json::array(
+                             {{{"amount", -0.25},
+                               {"currency", "DIEM"},
+                               {"inferenceDetails", nullptr},
+                               {"notes", req.target},
+                               {"pricePerUnitUsd", 1.5},
+                               {"sku", "fixture"},
+                               {"timestamp", "2026-08-16T12:00:00Z"},
+                               {"units", 1}}})},
+                        {"nextCursor", nullptr},
+                        {"accept", req.get_header_value("Accept")},
+                        {"authorization", req.get_header_value("Authorization")}}
+                        .dump(),
+                    "application/json");
+              });
+
     // Registered *before* the catch-all below, and that ordering is the whole
     // reason this route works: httplib matches handlers in registration order,
     // and `/api/v1/characters/(.*)` matches "alan-watts/reviews" perfectly
@@ -753,6 +858,7 @@ class TestServer {
   [[nodiscard]] auto chat_hits() const -> int { return m_chat_hits.load(); }
   [[nodiscard]] auto character_hits() const -> int { return m_character_hits.load(); }
   [[nodiscard]] auto review_hits() const -> int { return m_review_hits.load(); }
+  [[nodiscard]] auto billing_hits() const -> int { return m_billing_hits.load(); }
   [[nodiscard]] auto traits_hits() const -> int { return m_traits_hits.load(); }
   [[nodiscard]] auto compat_hits() const -> int { return m_compat_hits.load(); }
   [[nodiscard]] auto embeddings_hits() const -> int { return m_embeddings_hits.load(); }
@@ -787,6 +893,7 @@ class TestServer {
   std::atomic<int> m_chat_hits{0};
   std::atomic<int> m_character_hits{0};
   std::atomic<int> m_review_hits{0};
+  std::atomic<int> m_billing_hits{0};
   std::atomic<int> m_traits_hits{0};
   std::atomic<int> m_compat_hits{0};
   std::atomic<int> m_embeddings_hits{0};
@@ -1651,6 +1758,149 @@ TEST_CASE("a reviews page arrives with its pagination and summary", "[transport]
   REQUIRE(page->pagination->total_pages == 5);
   REQUIRE(page->summary.has_value());
   REQUIRE(page->summary->average_rating == 4.7);
+}
+
+// ── billing (VC-42, #68) ──────────────────────────────────────────────────
+//
+// Parser/guard cases live in test/13billing/. What is only visible from here is
+// the exact target and Accept header that went on the wire, actual-media routing,
+// response metadata, cancellation, and non-2xx classification before media.
+
+TEST_CASE("billing calls reject non-Bearer authentication before the socket",
+          "[transport][billing][auth][failure]") {
+  const TestServer server;
+  for (const auto& authentication :
+       {Authentication::public_access(), Authentication::sign_in_with_x("signed-wallet"),
+        Authentication::x402_payment("payment-payload")}) {
+    const Client client{authentication, server.base_url()};
+    REQUIRE_FALSE(client.billing_balance());
+    REQUIRE_FALSE(client.billing_usage_analytics());
+    REQUIRE_FALSE(client.billing_usage_history());
+  }
+  REQUIRE(server.billing_hits() == 0);
+}
+
+TEST_CASE("billing calls preserve exact targets, Bearer overrides and metadata",
+          "[transport][billing]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  const auto balance = client.billing_balance(
+      {.authentication = Authentication::bearer("override-token")});
+  REQUIRE(balance);
+  REQUIRE(balance->raw["target"] == "/api/v1/billing/balance");
+  REQUIRE(balance->raw["authorization"] == "Bearer override-token");
+  REQUIRE(balance->metadata.header("x-test-response") == "billing-balance");
+
+  const auto analytics = client.billing_usage_analytics(
+      {.lookback = "7 d", .extra = {{"future", "a&b"}}});
+  REQUIRE(analytics);
+  REQUIRE(analytics->raw["target"] ==
+          "/api/v1/billing/usage-analytics?lookback=7%20d&future=a%26b");
+  REQUIRE(analytics->raw["authorization"] == "Bearer default-token");
+  REQUIRE(analytics->metadata.header("x-test-response") == "billing-analytics");
+
+  const auto history = client.billing_usage_history({.query = {
+                                                          .currency = "DIEM",
+                                                          .end_timestamp = "later",
+                                                          .page_size = 10,
+                                                          .start_timestamp = "earlier",
+                                                      }});
+  REQUIRE(history);
+  const auto* page = std::get_if<venice::BillingUsageHistoryPage>(&*history);
+  REQUIRE(page != nullptr);
+  REQUIRE(page->raw["accept"] == "application/json");
+  REQUIRE(page->raw["authorization"] == "Bearer default-token");
+  REQUIRE(page->entries.front().notes ==
+          "/api/v1/billing/usage-history?currency=DIEM&endTimestamp=later&pageSize=10&startTimestamp=earlier");
+  REQUIRE(page->metadata.header("x-test-response") == "billing-history");
+  REQUIRE(server.billing_hits() == 3);
+}
+
+TEST_CASE("billing history follows actual response media and preserves CSV bytes",
+          "[transport][billing][media]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  const auto forced_csv = client.billing_usage_history(
+      {.query = {.extra = {{"force", "csv"}}},
+       .format = venice::BillingUsageHistoryFormat::Json});
+  REQUIRE(forced_csv);
+  const auto* csv = std::get_if<venice::BillingUsageHistoryCsv>(&*forced_csv);
+  REQUIRE(csv != nullptr);
+  REQUIRE(csv->text == "amount,currency,notes\r\n-0.25,DIEM,synthetic\r\n");
+  REQUIRE(csv->media_type == "text/csv");
+  REQUIRE(csv->next_cursor == "next_csv_page");
+  REQUIRE(csv->content_disposition ==
+          "attachment; filename=billing-usage-history-20260816T120000000Z.csv");
+  REQUIRE(csv->metadata.header("x-test-response") == "billing-history");
+
+  const auto forced_json = client.billing_usage_history(
+      {.query = {.extra = {{"force", "json"}}},
+       .format = venice::BillingUsageHistoryFormat::Csv});
+  REQUIRE(forced_json);
+  const auto* page = std::get_if<venice::BillingUsageHistoryPage>(&*forced_json);
+  REQUIRE(page != nullptr);
+  REQUIRE(page->raw["accept"] == "text/csv");
+}
+
+TEST_CASE("billing errors are classified before success media and shape",
+          "[transport][billing][failure]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  for (const auto& [status, kind] :
+       std::vector<std::pair<int, ErrorKind>>{{400, ErrorKind::Http},
+                                               {401, ErrorKind::Auth},
+                                               {500, ErrorKind::Http}}) {
+    const auto result = client.billing_usage_history(
+        {.query = {.extra = {{"status", std::to_string(status)}}},
+         .format = venice::BillingUsageHistoryFormat::Csv});
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().status == status);
+    REQUIRE(result.error().kind == kind);
+    REQUIRE(result.error().body == R"({"error":"history failed"})");
+    REQUIRE(result.error().metadata.header("x-protocol-trace") ==
+            "billing-history-error");
+  }
+
+  const auto timeout = client.billing_usage_analytics({.extra = {{"status", "504"}}});
+  REQUIRE_FALSE(timeout);
+  REQUIRE(timeout.error().kind == ErrorKind::Http);
+  REQUIRE(timeout.error().status == 504);
+  REQUIRE(timeout.error().metadata.header("x-protocol-trace") == "billing-timeout");
+
+  const auto wrong_media = client.billing_usage_history(
+      {.query = {.extra = {{"wrong-media", "yes"}}}});
+  REQUIRE_FALSE(wrong_media);
+  REQUIRE(wrong_media.error().kind == ErrorKind::Parse);
+  REQUIRE(wrong_media.error().status == 200);
+  REQUIRE(wrong_media.error().metadata.header("x-protocol-trace") ==
+          "billing-history-media");
+
+  const auto wrong_history = client.billing_usage_history(
+      {.query = {.extra = {{"wrong-shape", "yes"}}}});
+  REQUIRE_FALSE(wrong_history);
+  REQUIRE(wrong_history.error().kind == ErrorKind::Parse);
+  REQUIRE(wrong_history.error().body == R"({"data":[]})");
+
+  const auto wrong_analytics = client.billing_usage_analytics(
+      {.extra = {{"wrong-shape", "yes"}}});
+  REQUIRE_FALSE(wrong_analytics);
+  REQUIRE(wrong_analytics.error().kind == ErrorKind::Parse);
+  REQUIRE(wrong_analytics.error().body == "[]");
+}
+
+TEST_CASE("pre-cancelled billing calls send no request", "[transport][billing][cancel]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+  venice::CancelToken token;
+  token.cancel();
+
+  const auto balance = client.billing_balance({.cancel = &token});
+  REQUIRE_FALSE(balance);
+  REQUIRE(balance.error().kind == ErrorKind::Cancelled);
+  REQUIRE(server.billing_hits() == 0);
 }
 
 // ── the catalogue sub-paths (VC-38, #59) ──────────────────────────────────
