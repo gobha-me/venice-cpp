@@ -28,6 +28,13 @@
 //   * billing_balance()             -> expected<BillingBalance>
 //   * billing_usage_analytics(query)-> expected<BillingUsageAnalytics>
 //   * billing_usage_history(request)-> expected<BillingUsageHistoryResult>
+//   * api_keys()                    -> expected<ApiKeyList>
+//   * api_key(id)                   -> expected<ApiKey>
+//   * create_api_key(request)       -> expected<ApiKeyCreated>
+//   * update_api_key(request)       -> expected<ApiKeyUpdateResult>
+//   * delete_api_key(id)            -> expected<ApiKeyDeleteResult>
+//   * api_key_rate_limits()         -> expected<ApiKeyRateLimits>
+//   * api_key_rate_limit_logs()     -> expected<ApiKeyRateLimitLogPage>
 //   * balance()                     -> expected<json>           (rate-limit/balance)
 //
 // A ChatResponse carries the whole assistant turn as a Message, so a reply can
@@ -1277,12 +1284,152 @@ class Client {
     }
   }
 
+  // ── API-key lifecycle and rate limits ────────────────────────────────
+  //
+  // These seven operations are account administration and therefore
+  // Bearer-only. The two public wallet-signing operations at
+  // /api_keys/generate_web3_key remain a separate contract: this client does
+  // not blur an admin credential into a wallet proof.
+  [[nodiscard]] auto api_keys(const RequestOptions& opts = {}) const
+      -> std::expected<ApiKeyList, Error> {
+    auto res = get_json_response("/api_keys", detail::AuthPolicy::BearerOnly, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      auto response = api_keys_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"API keys parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto api_key(std::string_view id,
+                             const RequestOptions& opts = {}) const
+      -> std::expected<ApiKey, Error> {
+    if (id.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "API key id must not be empty", {}}};
+    auto res = get_json_response(detail::with_path_segment("/api_keys", id),
+                                 detail::AuthPolicy::BearerOnly, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      auto response = api_key_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"API key parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto create_api_key(const ApiKeyCreateRequest& request,
+                                    const RequestOptions& opts = {}) const
+      -> std::expected<ApiKeyCreated, Error> {
+    if (auto ok = validate(request); !ok)
+      return std::unexpected{std::move(ok.error())};
+    auto res = post_json_response("/api_keys", request.to_json_body(),
+                                  detail::AuthPolicy::BearerOnly, opts);
+    if (!res) {
+      auto error = std::move(res.error());
+      error.body = detail::redacted_api_key_body(error.body);
+      return std::unexpected{std::move(error)};
+    }
+    try {
+      auto response = api_key_created_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"API key create parse: "} + e.what(),
+                                   detail::redacted_api_key_body(res->raw_body),
+                                   std::move(res->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto update_api_key(const ApiKeyUpdateRequest& request,
+                                    const RequestOptions& opts = {}) const
+      -> std::expected<ApiKeyUpdateResult, Error> {
+    if (auto ok = validate(request); !ok)
+      return std::unexpected{std::move(ok.error())};
+    const auto body = request.to_json_body();
+    auto res = request_json_response(detail::HttpMethod::Patch, "/api_keys", &body,
+                                     detail::AuthPolicy::BearerOnly, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      auto response = api_key_update_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"API key update parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto delete_api_key(std::string_view id,
+                                    const RequestOptions& opts = {}) const
+      -> std::expected<ApiKeyDeleteResult, Error> {
+    if (id.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "API key id must not be empty", {}}};
+    auto res = request_json_response(
+        detail::HttpMethod::Delete, detail::with_query("/api_keys", {{"id", id}}),
+        nullptr, detail::AuthPolicy::BearerOnly, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      auto response = api_key_delete_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"API key delete parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto api_key_rate_limits(const RequestOptions& opts = {}) const
+      -> std::expected<ApiKeyRateLimits, Error> {
+    auto res = get_json_response("/api_keys/rate_limits",
+                                 detail::AuthPolicy::BearerOnly, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      auto response = api_key_rate_limits_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"API-key rate limits parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto api_key_rate_limit_logs(const RequestOptions& opts = {}) const
+      -> std::expected<ApiKeyRateLimitLogPage, Error> {
+    auto res = get_json_response("/api_keys/rate_limits/log",
+                                 detail::AuthPolicy::BearerOnly, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      auto response = api_key_rate_limit_logs_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"API-key rate-limit logs parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
+  }
+
   // Historical API-key rate-limit spelling. This is not billing_balance().
+  // The return type stays byte-for-byte source compatible; the implementation
+  // now shares the typed parser and hands back its retained envelope.
   [[nodiscard]] auto balance(const RequestOptions& opts = {}) const
       -> std::expected<nlohmann::json, Error> {
-    auto res = get_json_response("/api_keys/rate_limits", detail::AuthPolicy::BearerOnly, opts);
-    if (!res) return std::unexpected{std::move(res.error())};
-    return std::move(res->body);
+    auto result = api_key_rate_limits(opts);
+    if (!result) return std::unexpected{std::move(result.error())};
+    return std::move(result->raw);
   }
 
   [[nodiscard]] auto base_url() const noexcept -> const std::string& { return m_base_url; }
@@ -1516,6 +1663,39 @@ class Client {
     return {};
   }
 
+  [[nodiscard]] static auto validate_api_key_limits(
+      const std::optional<ApiKeyConsumptionLimitRequest>& limits)
+      -> std::expected<void, Error> {
+    if (!limits) return {};
+    const auto finite = [](const std::optional<double>& value) {
+      return !value || std::isfinite(*value);
+    };
+    if (!finite(limits->usd))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "consumption_limit.usd is not finite", {}}};
+    if (!finite(limits->diem))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "consumption_limit.diem is not finite", {}}};
+    if (!finite(limits->vcu))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "consumption_limit.vcu is not finite", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const ApiKeyCreateRequest& req)
+      -> std::expected<void, Error> {
+    return validate_api_key_limits(req.consumption_limit);
+  }
+
+  [[nodiscard]] static auto validate(const ApiKeyUpdateRequest& req)
+      -> std::expected<void, Error> {
+    if (auto ok = validate_api_key_limits(req.consumption_limit); !ok) return ok;
+    if (req.id.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "API key id must not be empty", {}}};
+    return {};
+  }
+
   [[nodiscard]] auto request_headers(detail::AuthPolicy policy,
                                      const RequestOptions& opts) const
       -> std::expected<httplib::Headers, Error> {
@@ -1538,12 +1718,41 @@ class Client {
   // Guard placement and ordering are identical to chat_stream's; see there. The
   // substrate's post-call token test comes before its transport-result test for
   // the same reason it does over there.
+  [[nodiscard]] auto request_json_response(detail::HttpMethod method,
+                                            std::string_view endpoint,
+                                            const nlohmann::json* body,
+                                            detail::AuthPolicy policy,
+                                            const RequestOptions& opts) const
+      -> std::expected<detail::JsonResponse, Error> {
+    auto response = request_json_raw_response(method, endpoint, body, policy, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    return detail::decode_json_response(*response);
+  }
+
+  [[nodiscard]] auto request_json_raw_response(detail::HttpMethod method,
+                                                std::string_view endpoint,
+                                                const nlohmann::json* body,
+                                                detail::AuthPolicy policy,
+                                                const RequestOptions& opts) const
+      -> std::expected<detail::BufferedResponse, Error> {
+    auto headers = request_headers(policy, opts);
+    if (!headers) return std::unexpected{std::move(headers.error())};
+    detail::BufferedBody encoded{};
+    if (body != nullptr)
+      encoded = detail::ByteBody{body->dump(), "application/json"};
+    return detail::send_buffered(
+        m_base_url,
+        detail::BufferedRequest{.method = method,
+                                .endpoint = std::string{endpoint},
+                                .headers = std::move(*headers),
+                                .body = std::move(encoded)},
+        opts);
+  }
+
   [[nodiscard]] auto get_json_response(std::string_view endpoint, detail::AuthPolicy policy,
                                        const RequestOptions& opts) const
       -> std::expected<detail::JsonResponse, Error> {
-    auto response = get_raw_response(endpoint, policy, opts);
-    if (!response) return std::unexpected{std::move(response.error())};
-    return detail::decode_json_response(*response);
+    return request_json_response(detail::HttpMethod::Get, endpoint, nullptr, policy, opts);
   }
 
   [[nodiscard]] auto get_raw_response(std::string_view endpoint, detail::AuthPolicy policy,
@@ -1569,9 +1778,7 @@ class Client {
                                         detail::AuthPolicy policy,
                                         const RequestOptions& opts) const
       -> std::expected<detail::JsonResponse, Error> {
-    auto response = post_json_raw_response(endpoint, body, policy, opts);
-    if (!response) return std::unexpected{std::move(response.error())};
-    return detail::decode_json_response(*response);
+    return request_json_response(detail::HttpMethod::Post, endpoint, &body, policy, opts);
   }
 
   // The native image endpoint consumes this undecoded form because a successful
@@ -1582,15 +1789,8 @@ class Client {
                                             detail::AuthPolicy policy,
                                             const RequestOptions& opts) const
       -> std::expected<detail::BufferedResponse, Error> {
-    auto headers = request_headers(policy, opts);
-    if (!headers) return std::unexpected{std::move(headers.error())};
-    return detail::send_buffered(
-        m_base_url,
-        detail::BufferedRequest{.method = detail::HttpMethod::Post,
-                                .endpoint = std::string{endpoint},
-                                .headers = std::move(*headers),
-                                .body = detail::ByteBody{body.dump(), "application/json"}},
-        opts);
+    return request_json_raw_response(detail::HttpMethod::Post, endpoint, &body, policy,
+                                     opts);
   }
 
   [[nodiscard]] auto post_image_media_response(

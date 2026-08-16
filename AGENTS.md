@@ -381,6 +381,18 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   account-defined display names; `byModelDailyUsd` and `byKeyDailyUsd` were
   present live on 2026-08-16 but absent from that day's OpenAPI document
   (VC-42).
+- **API-key administration never turns a returned key into diagnostics.**
+  `ApiKeyCreated::api_key` is the one public field that can contain complete
+  one-time credential material. Its `raw` tree and create-error bodies replace
+  every nested `apiKey` value with `[REDACTED]`; it has no display/stream helper and the
+  committed `--api-keys` leg is read-only: list/detail expose only Venice's
+  last-six suffix, while create/update/delete stay in offline loopback tests.
+  API-key usage totals remain decimal strings because that is the wire's exact
+  accounting representation; configured limits are optional JSON numbers, so
+  absent and zero remain distinct. Type, limit-period and rate-limit values are
+  server-owned strings. `balance()` keeps its historical `expected<json,
+  Error>` source contract by returning `api_key_rate_limits()`'s retained raw
+  envelope rather than preserving a second parser (VC-43).
 - **KDE/Qt-readiness:** keep the library UI-free and Qt-linkable. No Qt types
   in the API client; a separate service layer owns D-Bus/KF concerns.
 

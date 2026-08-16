@@ -32,19 +32,22 @@ expect_invalid("missing required field" "${_bad}" "family is required")
 string(JSON _bad SET "${_manifest}" operations 0 state "\"mystery\"")
 expect_invalid("unknown state" "${_bad}" "state 'mystery' is unknown")
 
-string(JSON _bad REMOVE "${_manifest}" operations 0 tracking_issue)
+# Row 4 remains planned (the Web3 token operation); row 0 is now implemented.
+# Pinning each failure to a row in the matching state keeps this matrix honest
+# as family work advances the first operations in the manifest.
+string(JSON _bad REMOVE "${_manifest}" operations 4 tracking_issue)
 expect_invalid("planned operation without issue" "${_bad}" "tracking_issue is required")
 
-string(JSON _bad SET "${_manifest}" operations 0 tracking_issue 26)
+string(JSON _bad SET "${_manifest}" operations 4 tracking_issue 26)
 expect_invalid("planned operation linked only to a child ticket" "${_bad}" "not a family issue under #36")
 
-string(JSON _bad SET "${_manifest}" operations 0 state "\"implemented\"")
+string(JSON _bad REMOVE "${_manifest}" operations 0 public_api)
 expect_invalid("implemented operation without public API" "${_bad}" "public_api is required")
 
 string(JSON _bad SET "${_manifest}" source sha256 "\"not-a-digest\"")
 expect_invalid("invalid source digest" "${_bad}" "64 lowercase hexadecimal")
 
-validate_openapi_coverage_text("OpenAPI coverage: 16/49 operations implemented." "OpenAPI coverage: 19/49 operations implemented." _coverage_ok)
+validate_openapi_coverage_text("OpenAPI coverage: 19/49 operations implemented." "OpenAPI coverage: 25/49 operations implemented." _coverage_ok)
 if(_coverage_ok)
   message(WARNING "FAIL : stale documentation coverage was accepted")
   math(EXPR _fail_count "${_fail_count} + 1")
@@ -54,7 +57,7 @@ endif()
 
 # Happy path last: validate the real manifest and the two public status claims.
 validate_openapi_manifest("${_manifest}" _ok _report _total _implemented)
-if(NOT _ok OR NOT _total EQUAL 49 OR NOT _implemented EQUAL 19)
+if(NOT _ok OR NOT _total EQUAL 49 OR NOT _implemented EQUAL 25)
   message(WARNING "FAIL : checked-in manifest — ${_report}; total=${_total}, implemented=${_implemented}")
   math(EXPR _fail_count "${_fail_count} + 1")
 else()

@@ -741,6 +741,137 @@ auto billing_report(const venice::Client& client, std::string_view lookback) -> 
   return agrees ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+// ── `--api-keys` (VC-43, #70) ───────────────────────────────────────────
+//
+// Read-only by construction. Create/update/delete are loopback-tested and stay
+// out of this long-lived binary so a smoke command cannot accidentally mint or
+// revoke a credential. None of the four calls below can return complete key
+// material; list/detail expose only the server's last-six display suffix.
+constexpr std::array<std::string_view, 2> kModeledApiKeyListKeys{"data", "object"};
+constexpr std::array<std::string_view, 11> kModeledApiKeyKeys{
+    "apiKeyType",       "consumptionLimits", "limitPeriod", "createdAt",
+    "description",      "expiresAt",         "id",          "last6Chars",
+    "lastUsedAt",       "usage",             "currentPeriodUsage"};
+constexpr std::array<std::string_view, 3> kModeledApiKeyLimitKeys{"usd", "diem", "vcu"};
+constexpr std::array<std::string_view, 1> kModeledApiKeyUsageKeys{"trailingSevenDays"};
+constexpr std::array<std::string_view, 1> kModeledApiKeyRateEnvelopeKeys{"data"};
+constexpr std::array<std::string_view, 6> kModeledApiKeyRateDataKeys{
+    "accessPermitted", "apiTier", "balances", "keyExpiration", "nextEpochBegins",
+    "rateLimits"};
+constexpr std::array<std::string_view, 2> kModeledApiKeyTierKeys{"id", "isCharged"};
+constexpr std::array<std::string_view, 2> kModeledApiKeyBalanceKeys{"USD", "DIEM"};
+constexpr std::array<std::string_view, 2> kModeledApiKeyModelRateKeys{"apiModelId",
+                                                                     "rateLimits"};
+constexpr std::array<std::string_view, 2> kModeledApiKeyRateKeys{"amount", "type"};
+constexpr std::array<std::string_view, 5> kModeledApiKeyLogKeys{
+    "apiKeyId", "modelId", "rateLimitTier", "rateLimitType", "timestamp"};
+
+auto api_keys_report(const venice::Client& client) -> int {
+  bool agrees = true;
+  const auto list = client.api_keys();
+  if (!list) {
+    std::cerr << "API-key list failed [" << venice::to_string(list.error().kind) << "] "
+              << list.error().message << '\n';
+    if (!list.error().body.empty()) std::cerr << list.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+
+  std::cerr << "\n-- API-key list, envelope verbatim (no complete keys are returned) --\n"
+            << list->raw.dump(2) << '\n';
+  report_unmodeled("unmodeled API-key list keys: ", list->raw,
+                   kModeledApiKeyListKeys, "ApiKeyList::raw");
+  const auto* raw_keys = venice::detail::opt_array(list->raw, "data");
+  if (raw_keys == nullptr || raw_keys->size() != list->returned ||
+      list->returned != list->entries.size()) {
+    std::cerr << "API-key RAW/TYPED COUNT MISMATCH\n";
+    agrees = false;
+  }
+
+  std::optional<std::string> detail_id;
+  for (const auto& key : list->entries) {
+    report_unmodeled("unmodeled API-key fields: ", key.raw, kModeledApiKeyKeys,
+                     "ApiKey::raw");
+    if (key.consumption_limits)
+      report_unmodeled("unmodeled consumption-limit fields: ",
+                       key.consumption_limits->raw, kModeledApiKeyLimitKeys,
+                       "ApiKeyConsumptionLimits::raw");
+    if (key.usage)
+      report_unmodeled("unmodeled usage fields: ", key.usage->raw,
+                       kModeledApiKeyUsageKeys, "ApiKeyUsage::raw");
+    if (!detail_id && key.id) detail_id = key.id;
+  }
+
+  if (detail_id) {
+    const auto detail = client.api_key(*detail_id);
+    if (!detail) {
+      std::cerr << "API-key detail failed [" << venice::to_string(detail.error().kind)
+                << "] " << detail.error().message << '\n';
+      return EXIT_FAILURE;
+    }
+    std::cerr << "\n-- API-key detail, envelope verbatim --\n"
+              << detail->envelope_raw.dump(2) << '\n';
+    report_unmodeled("unmodeled API-key detail fields: ", detail->raw,
+                     kModeledApiKeyKeys, "ApiKey::raw");
+  } else {
+    std::cerr << "No API-key id was available for the read-only detail check.\n";
+  }
+
+  const auto limits = client.api_key_rate_limits();
+  if (!limits) {
+    std::cerr << "API-key rate limits failed ["
+              << venice::to_string(limits.error().kind) << "] "
+              << limits.error().message << '\n';
+    return EXIT_FAILURE;
+  }
+  std::cerr << "\n-- API-key rate limits, envelope verbatim --\n"
+            << limits->raw.dump(2) << '\n';
+  report_unmodeled("unmodeled rate-limit envelope keys: ", limits->raw,
+                   kModeledApiKeyRateEnvelopeKeys, "ApiKeyRateLimits::raw");
+  if (const auto* data = venice::detail::opt_object(limits->raw, "data")) {
+    report_unmodeled("unmodeled rate-limit data keys: ", *data,
+                     kModeledApiKeyRateDataKeys, "ApiKeyRateLimits::raw[data]");
+    if (const auto* tier = venice::detail::opt_object(*data, "apiTier"))
+      report_unmodeled("unmodeled tier keys: ", *tier, kModeledApiKeyTierKeys,
+                       "ApiKeyTier::raw");
+    if (const auto* balances = venice::detail::opt_object(*data, "balances"))
+      report_unmodeled("unmodeled rate-limit balance keys: ", *balances,
+                       kModeledApiKeyBalanceKeys, "ApiKeyBalances::raw");
+  }
+  if (limits->rate_limits)
+    for (const auto& group : *limits->rate_limits) {
+      report_unmodeled("unmodeled model rate-limit keys: ", group.raw,
+                       kModeledApiKeyModelRateKeys, "ApiKeyModelRateLimits::raw");
+      if (group.rate_limits)
+        for (const auto& limit : *group.rate_limits)
+          report_unmodeled("unmodeled rate-limit keys: ", limit.raw,
+                           kModeledApiKeyRateKeys, "ApiKeyRateLimit::raw");
+    }
+
+  const auto logs = client.api_key_rate_limit_logs();
+  if (!logs) {
+    std::cerr << "API-key rate-limit logs failed ["
+              << venice::to_string(logs.error().kind) << "] "
+              << logs.error().message << '\n';
+    return EXIT_FAILURE;
+  }
+  std::cerr << "\n-- API-key rate-limit logs, envelope verbatim --\n"
+            << logs->raw.dump(2) << '\n';
+  report_unmodeled("unmodeled rate-limit log envelope keys: ", logs->raw,
+                   kModeledApiKeyListKeys, "ApiKeyRateLimitLogPage::raw");
+  const auto* raw_logs = venice::detail::opt_array(logs->raw, "data");
+  if (raw_logs == nullptr || raw_logs->size() != logs->returned ||
+      logs->returned != logs->entries.size()) {
+    std::cerr << "rate-limit-log RAW/TYPED COUNT MISMATCH\n";
+    agrees = false;
+  }
+  for (const auto& entry : logs->entries)
+    report_unmodeled("unmodeled rate-limit log fields: ", entry.raw,
+                     kModeledApiKeyLogKeys, "ApiKeyRateLimitLogEntry::raw");
+
+  std::cerr << "Read-only API-key checks completed; no key was created, updated, or deleted.\n";
+  return agrees ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 // ── `--traits` and `--compat` (VC-38, #59) ────────────────────────────────
 //
 // The two legs that run with no key at all. Everything above this point needs a
@@ -2136,7 +2267,7 @@ auto main(int argc, char** argv) -> int {
   if (key == nullptr || *key == '\0') {
     std::cerr << "VENICE_API_KEY not set; nothing to call with a credential.\n"
                  "(--traits, --compat, --modality and --styles need no key;\n"
-                 " --embeddings, --image, --image-transform and --billing need a key.)\n";
+                 " --embeddings, --image, --image-transform, --billing and --api-keys need a key.)\n";
     return EXIT_SUCCESS;
   }
 
@@ -2158,6 +2289,7 @@ auto main(int argc, char** argv) -> int {
   if (leg == "--image") return image_report(client, arg);
   if (leg == "--image-transform") return image_transform_report(client, arg);
   if (leg == "--billing") return billing_report(client, arg);
+  if (leg == "--api-keys") return api_keys_report(client);
 
   const std::string prompt = argc > 1 ? argv[1] : "Say hello in one short sentence.";
 

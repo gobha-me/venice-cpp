@@ -220,10 +220,170 @@ class TestServer {
     });
 
     m_svr.Get("/api/v1/api_keys/rate_limits",
-              [this](const httplib::Request&, httplib::Response& res) {
-                ++m_stall_hits;
-                m_gate.wait(kStallCap);
-                res.set_content("{}", "application/json");
+              [this](const httplib::Request& req, httplib::Response& res) {
+                // Historical timeout/cancellation tests use their ordinary
+                // fixture token and need this route to stall. VC-43's typed
+                // contract tests opt into the non-stalling response with a
+                // distinct synthetic bearer.
+                if (req.get_header_value("Authorization") != "Bearer api-key-fixture") {
+                  ++m_stall_hits;
+                  m_gate.wait(kStallCap);
+                  res.set_content("{}", "application/json");
+                  return;
+                }
+                ++m_api_key_hits;
+                res.set_header("X-Test-Response", "api-key-rate-limits");
+                res.set_content(
+                    nlohmann::json{
+                        {"data",
+                         {{"accessPermitted", true},
+                          {"apiTier", {{"id", "paid"}, {"isCharged", true}}},
+                          {"balances", {{"USD", 0}, {"DIEM", 2.5}}},
+                          {"keyExpiration", nullptr},
+                          {"nextEpochBegins", "later"},
+                          {"rateLimits",
+                           nlohmann::json::array({{{"apiModelId", "fixture-model"},
+                                                  {"rateLimits",
+                                                   nlohmann::json::array(
+                                                       {{{"amount", 10}, {"type", "RPM"}}})}}})},
+                          {"target", req.target},
+                          {"authorization", req.get_header_value("Authorization")}}},
+                        {"futureEnvelope", true}}
+                        .dump(),
+                    "application/json");
+              });
+
+    m_svr.Get("/api/v1/api_keys/rate_limits/log",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                ++m_api_key_hits;
+                res.set_header("X-Test-Response", "api-key-rate-limit-logs");
+                res.set_content(
+                    nlohmann::json{
+                        {"data",
+                         nlohmann::json::array({{{"apiKeyId", "fixture-id"},
+                                                  {"modelId", "fixture-model"},
+                                                  {"rateLimitTier", "paid"},
+                                                  {"rateLimitType", "RPM"},
+                                                  {"timestamp", "now"},
+                                                  {"target", req.target}}})},
+                        {"object", "list"},
+                        {"authorization", req.get_header_value("Authorization")}}
+                        .dump(),
+                    "application/json");
+              });
+
+    const auto key_object = [](const httplib::Request& req) {
+      return nlohmann::json{{"apiKeyType", "INFERENCE"},
+                            {"consumptionLimits", {{"usd", 0}, {"diem", nullptr}}},
+                            {"limitPeriod", "EPOCH"},
+                            {"createdAt", "created"},
+                            {"description", "fixture"},
+                            {"expiresAt", nullptr},
+                            {"id", "fixture-id"},
+                            {"last6Chars", "ABC123"},
+                            {"lastUsedAt", nullptr},
+                            {"target", req.target},
+                            {"method", req.method},
+                            {"authorization", req.get_header_value("Authorization")}};
+    };
+
+    m_svr.Get("/api/v1/api_keys",
+              [this, key_object](const httplib::Request& req, httplib::Response& res) {
+                ++m_api_key_hits;
+                res.set_header("X-Test-Response", "api-key-list");
+                res.set_content(
+                    nlohmann::json{{"data", nlohmann::json::array({key_object(req)})},
+                                   {"object", "list"},
+                                   {"futureEnvelope", true}}
+                        .dump(),
+                    "application/json");
+              });
+
+    m_svr.Post("/api/v1/api_keys",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_api_key_hits;
+                 res.set_header("X-Test-Response", "api-key-create");
+                 const auto body = nlohmann::json::parse(req.body);
+                 const nlohmann::json secret_error{
+                     {"data", {{"apiKey", "SYNTHETIC_SECRET_RETURNED_ONCE"}}},
+                     {"error", "synthetic failure"}};
+                 if (body.value("forceHttpError", false)) {
+                   res.status = 400;
+                   res.set_content(secret_error.dump(), "application/json");
+                   return;
+                 }
+                 if (body.value("forceMalformed", false)) {
+                   res.set_content(secret_error.dump(), "application/json");
+                   return;
+                 }
+                 res.set_content(
+                     nlohmann::json{
+                         {"data",
+                          {{"apiKey", "SYNTHETIC_SECRET_RETURNED_ONCE"},
+                           {"apiKeyType", "INFERENCE"},
+                           {"consumptionLimit", {{"usd", 0}}},
+                           {"limitPeriod", "EPOCH"},
+                           {"expiresAt", nullptr},
+                           {"id", "fixture-created-id"}}},
+                         {"success", true},
+                         {"seenBody", body},
+                         {"authorization", req.get_header_value("Authorization")}}
+                         .dump(),
+                     "application/json");
+               });
+
+    m_svr.Patch("/api/v1/api_keys",
+                [this, key_object](const httplib::Request& req, httplib::Response& res) {
+                  ++m_api_key_hits;
+                  res.set_header("X-Test-Response", "api-key-update");
+                  res.set_content(
+                      nlohmann::json{{"data", key_object(req)},
+                                     {"success", true},
+                                     {"seenBody", nlohmann::json::parse(req.body)}}
+                          .dump(),
+                      "application/json");
+                });
+
+    m_svr.Delete("/api/v1/api_keys",
+                 [this](const httplib::Request& req, httplib::Response& res) {
+                   ++m_api_key_hits;
+                   res.set_header("X-Test-Response", "api-key-delete");
+                   res.set_content(
+                       nlohmann::json{{"success", true},
+                                      {"target", req.target},
+                                      {"authorization", req.get_header_value("Authorization")}}
+                           .dump(),
+                       "application/json");
+                 });
+
+    // Registered after the exact rate-limit routes so a decoded path cannot
+    // turn their suffix into an API-key id.
+    m_svr.Get(R"(/api/v1/api_keys/(.*))",
+              [this, key_object](const httplib::Request& req, httplib::Response& res) {
+                ++m_api_key_hits;
+                constexpr std::array<int, 5> kErrorStatuses{400, 401, 402, 429, 500};
+                for (const int status : kErrorStatuses) {
+                  if (req.target != "/api/v1/api_keys/status-" +
+                                        std::to_string(status))
+                    continue;
+                  res.status = status;
+                  res.set_header("X-Protocol-Trace", "api-key-auth-error");
+                  res.set_content(R"({"error":"denied"})", "text/plain");
+                  return;
+                }
+                if (req.target == "/api/v1/api_keys/wrong-media") {
+                  res.set_header("X-Protocol-Trace", "api-key-wrong-media");
+                  res.set_content("not json", "text/plain");
+                  return;
+                }
+                if (req.target == "/api/v1/api_keys/wrong-shape") {
+                  res.set_content("[]", "application/json");
+                  return;
+                }
+                res.set_header("X-Test-Response", "api-key-detail");
+                res.set_content(
+                    nlohmann::json{{"data", key_object(req)}, {"futureEnvelope", true}}.dump(),
+                    "application/json");
               });
 
     // The two catalogue sub-paths (VC-38, #59), registered ahead of
@@ -859,6 +1019,7 @@ class TestServer {
   [[nodiscard]] auto character_hits() const -> int { return m_character_hits.load(); }
   [[nodiscard]] auto review_hits() const -> int { return m_review_hits.load(); }
   [[nodiscard]] auto billing_hits() const -> int { return m_billing_hits.load(); }
+  [[nodiscard]] auto api_key_hits() const -> int { return m_api_key_hits.load(); }
   [[nodiscard]] auto traits_hits() const -> int { return m_traits_hits.load(); }
   [[nodiscard]] auto compat_hits() const -> int { return m_compat_hits.load(); }
   [[nodiscard]] auto embeddings_hits() const -> int { return m_embeddings_hits.load(); }
@@ -894,6 +1055,7 @@ class TestServer {
   std::atomic<int> m_character_hits{0};
   std::atomic<int> m_review_hits{0};
   std::atomic<int> m_billing_hits{0};
+  std::atomic<int> m_api_key_hits{0};
   std::atomic<int> m_traits_hits{0};
   std::atomic<int> m_compat_hits{0};
   std::atomic<int> m_embeddings_hits{0};
@@ -1901,6 +2063,184 @@ TEST_CASE("pre-cancelled billing calls send no request", "[transport][billing][c
   REQUIRE_FALSE(balance);
   REQUIRE(balance.error().kind == ErrorKind::Cancelled);
   REQUIRE(server.billing_hits() == 0);
+}
+
+// ── API-key lifecycle and rate limits (VC-43, #70) ─────────────────────
+
+TEST_CASE("API-key calls reject non-Bearer authentication before the socket",
+          "[transport][api-keys][auth][failure]") {
+  const TestServer server;
+  for (const auto& authentication :
+       {Authentication::public_access(), Authentication::sign_in_with_x("signed-wallet"),
+        Authentication::x402_payment("payment-payload")}) {
+    const Client client{authentication, server.base_url()};
+    REQUIRE_FALSE(client.api_keys());
+    REQUIRE_FALSE(client.api_key("fixture-id"));
+    REQUIRE_FALSE(client.create_api_key({.api_key_type = "INFERENCE",
+                                         .description = "fixture"}));
+    REQUIRE_FALSE(client.update_api_key({.id = "fixture-id"}));
+    REQUIRE_FALSE(client.delete_api_key("fixture-id"));
+    REQUIRE_FALSE(client.api_key_rate_limits());
+    REQUIRE_FALSE(client.api_key_rate_limit_logs());
+  }
+  REQUIRE(server.api_key_hits() == 0);
+}
+
+TEST_CASE("API-key calls preserve exact methods targets bodies and metadata",
+          "[transport][api-keys]") {
+  const TestServer server;
+  const Client client{"api-key-fixture", server.base_url()};
+
+  const auto list = client.api_keys();
+  REQUIRE(list);
+  REQUIRE(list->entries.front().raw["target"] == "/api/v1/api_keys");
+  REQUIRE(list->entries.front().raw["method"] == "GET");
+  REQUIRE(list->entries.front().raw["authorization"] == "Bearer api-key-fixture");
+  REQUIRE(list->metadata.header("x-test-response") == "api-key-list");
+
+  const auto detail = client.api_key("a/b ?");
+  REQUIRE(detail);
+  REQUIRE(detail->raw["target"] == "/api/v1/api_keys/a%2Fb%20%3F");
+  REQUIRE(detail->metadata.header("x-test-response") == "api-key-detail");
+
+  const auto created = client.create_api_key({
+      .api_key_type = "INFERENCE",
+      .description = "fixture",
+      .consumption_limit = venice::ApiKeyConsumptionLimitRequest{.usd = 0.0},
+      .limit_period = "EPOCH",
+      .extra = {{"future", true}},
+  });
+  REQUIRE(created);
+  REQUIRE(created->id == "fixture-created-id");
+  REQUIRE(created->api_key == "SYNTHETIC_SECRET_RETURNED_ONCE");
+  REQUIRE(created->raw["data"]["apiKey"] == "[REDACTED]");
+  REQUIRE(created->raw.dump().find("SYNTHETIC_SECRET_RETURNED_ONCE") ==
+          std::string::npos);
+  REQUIRE(created->raw["seenBody"]["apiKeyType"] == "INFERENCE");
+  REQUIRE(created->raw["seenBody"]["consumptionLimit"]["usd"] == 0.0);
+  REQUIRE(created->raw["seenBody"]["future"] == true);
+  REQUIRE(created->raw["authorization"] == "Bearer api-key-fixture");
+  REQUIRE(created->metadata.header("x-test-response") == "api-key-create");
+
+  const auto updated = client.update_api_key({
+      .id = "fixture-id",
+      .description = "updated",
+      .expires_at = "",
+  });
+  REQUIRE(updated);
+  REQUIRE(updated->key.raw["method"] == "PATCH");
+  REQUIRE(updated->raw["seenBody"]["id"] == "fixture-id");
+  REQUIRE(updated->raw["seenBody"]["description"] == "updated");
+  REQUIRE(updated->raw["seenBody"]["expiresAt"] == "");
+  REQUIRE(updated->metadata.header("x-test-response") == "api-key-update");
+
+  const auto deleted = client.delete_api_key("a/b ?");
+  REQUIRE(deleted);
+  REQUIRE(deleted->success);
+  REQUIRE(deleted->raw["target"] == "/api/v1/api_keys?id=a%2Fb%20%3F");
+  REQUIRE(deleted->raw["authorization"] == "Bearer api-key-fixture");
+  REQUIRE(deleted->metadata.header("x-test-response") == "api-key-delete");
+
+  const auto limits = client.api_key_rate_limits();
+  REQUIRE(limits);
+  REQUIRE(limits->balances->usd == 0.0);
+  REQUIRE(limits->raw["data"]["target"] == "/api/v1/api_keys/rate_limits");
+  REQUIRE(limits->metadata.header("x-test-response") == "api-key-rate-limits");
+
+  const auto logs = client.api_key_rate_limit_logs();
+  REQUIRE(logs);
+  REQUIRE(logs->returned == 1);
+  REQUIRE(logs->entries.front().raw["target"] ==
+          "/api/v1/api_keys/rate_limits/log");
+  REQUIRE(logs->metadata.header("x-test-response") == "api-key-rate-limit-logs");
+  REQUIRE(server.api_key_hits() == 7);
+}
+
+TEST_CASE("API-key errors classify before success media and shape",
+          "[transport][api-keys][failure]") {
+  const TestServer server;
+  const Client client{"api-key-fixture", server.base_url()};
+
+  struct ErrorCase {
+    int status;
+    ErrorKind kind;
+  };
+  for (const auto [status, kind] :
+       {ErrorCase{400, ErrorKind::Http}, ErrorCase{401, ErrorKind::Auth},
+        ErrorCase{402, ErrorKind::PaymentRequired},
+        ErrorCase{429, ErrorKind::RateLimited}, ErrorCase{500, ErrorKind::Http}}) {
+    const auto denied = client.api_key("status-" + std::to_string(status));
+    REQUIRE_FALSE(denied);
+    REQUIRE(denied.error().kind == kind);
+    REQUIRE(denied.error().status == status);
+    REQUIRE(denied.error().body == R"({"error":"denied"})");
+    REQUIRE(denied.error().metadata.header("x-protocol-trace") ==
+            "api-key-auth-error");
+  }
+
+  const auto wrong_media = client.api_key("wrong-media");
+  REQUIRE_FALSE(wrong_media);
+  REQUIRE(wrong_media.error().kind == ErrorKind::Parse);
+  REQUIRE(wrong_media.error().status == 200);
+  REQUIRE(wrong_media.error().metadata.header("x-protocol-trace") ==
+          "api-key-wrong-media");
+
+  const auto wrong_shape = client.api_key("wrong-shape");
+  REQUIRE_FALSE(wrong_shape);
+  REQUIRE(wrong_shape.error().kind == ErrorKind::Parse);
+  REQUIRE(wrong_shape.error().body == "[]");
+}
+
+TEST_CASE("API-key creation errors redact returned key material",
+          "[transport][api-keys][security][failure]") {
+  const TestServer server;
+  const Client client{"api-key-fixture", server.base_url()};
+
+  const auto malformed = client.create_api_key({
+      .api_key_type = "INFERENCE",
+      .description = "fixture",
+      .extra = {{"forceMalformed", true}},
+  });
+  REQUIRE_FALSE(malformed);
+  REQUIRE(malformed.error().kind == ErrorKind::Parse);
+  REQUIRE(malformed.error().body.find("SYNTHETIC_SECRET_RETURNED_ONCE") ==
+          std::string::npos);
+  REQUIRE(malformed.error().body.find("[REDACTED]") != std::string::npos);
+
+  const auto rejected = client.create_api_key({
+      .api_key_type = "INFERENCE",
+      .description = "fixture",
+      .extra = {{"forceHttpError", true}},
+  });
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().kind == ErrorKind::Http);
+  REQUIRE(rejected.error().body.find("SYNTHETIC_SECRET_RETURNED_ONCE") ==
+          std::string::npos);
+  REQUIRE(rejected.error().body.find("[REDACTED]") != std::string::npos);
+}
+
+TEST_CASE("balance remains the raw compatibility view of typed rate limits",
+          "[transport][api-keys][compat]") {
+  const TestServer server;
+  const Client client{"api-key-fixture", server.base_url()};
+  const auto balance = client.balance();
+  REQUIRE(balance);
+  REQUIRE((*balance)["data"]["accessPermitted"] == true);
+  REQUIRE((*balance)["data"]["balances"]["USD"] == 0.0);
+  REQUIRE((*balance)["futureEnvelope"] == true);
+  REQUIRE(server.api_key_hits() == 1);
+}
+
+TEST_CASE("pre-cancelled API-key calls send no request",
+          "[transport][api-keys][cancel]") {
+  const TestServer server;
+  const Client client{"api-key-fixture", server.base_url()};
+  venice::CancelToken token;
+  token.cancel();
+  const auto result = client.api_keys({.cancel = &token});
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().kind == ErrorKind::Cancelled);
+  REQUIRE(server.api_key_hits() == 0);
 }
 
 // ── the catalogue sub-paths (VC-38, #59) ──────────────────────────────────

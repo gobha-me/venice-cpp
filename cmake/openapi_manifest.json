@@ -12,8 +12,11 @@
       "method": "DELETE",
       "path": "/api_keys",
       "family": "api-keys",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 45,
+      "public_api": [
+        "Client::delete_api_key"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -39,8 +42,11 @@
       "method": "GET",
       "path": "/api_keys",
       "family": "api-keys",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 45,
+      "public_api": [
+        "Client::api_keys"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -63,8 +69,11 @@
       "method": "PATCH",
       "path": "/api_keys",
       "family": "api-keys",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 45,
+      "public_api": [
+        "Client::update_api_key"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -92,8 +101,11 @@
       "method": "POST",
       "path": "/api_keys",
       "family": "api-keys",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 45,
+      "public_api": [
+        "Client::create_api_key"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -161,6 +173,7 @@
       "state": "implemented",
       "tracking_issue": 45,
       "public_api": [
+        "Client::api_key_rate_limits",
         "Client::balance"
       ],
       "security": [
@@ -185,8 +198,11 @@
       "method": "GET",
       "path": "/api_keys/rate_limits/log",
       "family": "api-keys",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 45,
+      "public_api": [
+        "Client::api_key_rate_limit_logs"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -209,8 +225,11 @@
       "method": "GET",
       "path": "/api_keys/{id}",
       "family": "api-keys",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 45,
+      "public_api": [
+        "Client::api_key"
+      ],
       "security": [
         [
           "BearerAuth"

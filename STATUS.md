@@ -49,14 +49,19 @@ AGENTS.md (which holds standing conventions, not state).
   `byModelDailyUsd` and `byKeyDailyUsd` maps; both remain raw dynamic objects like
   their DIEM siblings. A valid ordinary inference key was also measured and
   returns 401 `Admin API key required`, while `/api_keys/rate_limits` stays 200.
+- `api_keys`, `api_key`, `create_api_key`, `update_api_key` and
+  `delete_api_key` — typed Bearer-authenticated key administration, plus typed
+  `api_key_rate_limits` and ordered `api_key_rate_limit_logs`. The historical
+  `balance()` spelling remains source-compatible and returns the typed rate-
+  limit response's retained raw envelope (VC-43).
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   payment_required/rate_limited/invalid_arg/cancelled, each carrying status +
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 19/49 operations implemented. One retired operation is
-  explicitly unsupported and the other 29 are assigned to family issues and
+- OpenAPI coverage: 25/49 operations implemented. One retired operation is
+  explicitly unsupported and the other 23 are assigned to family issues and
   checked in `cmake/openapi_manifest.json` (VC-35). Characters
   and Models are both 3/3 on operations, and since VC-39 the `Model` metadata
   half is done too. Music and ASR remain deliberately raw rather than keeping
@@ -101,6 +106,37 @@ a single-family run.
    speculatively.
 4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-43 (#70) is implemented for v0.22.0.** Six previously absent API-key
+operations now join the typed rate-limit view: list/detail/create/update/delete
+and the last-50 exceeded-limit log. Listing entries tolerate odd fields without
+discarding siblings, while their envelopes remain loud and every nesting level
+retains `raw`. Configured limits preserve absent versus zero as optional JSON
+numbers; usage accounting remains the decimal strings Venice publishes.
+
+Create and update requests emit only engaged fields and preserve an additive
+`extra` escape hatch with modeled-wins precedence. An engaged empty expiration
+string explicitly clears it, while raw null remains reachable through `extra`.
+The only local policy is structural or representability-based: empty IDs and
+non-finite modeled limits fail before transport; types, periods, lengths and
+ranges still reach the server.
+
+Complete key material exists only on `ApiKeyCreated::api_key`, the one-time
+create result. Its retained raw tree and create-error bodies redact nested
+`apiKey` values. No display helper, diagnostic or committed smoke leg prints it.
+`venice-cpp --api-keys` is deliberately read-only: it reports list/detail/rate-
+limit/log envelopes and reconciles raw versus typed shapes without creating,
+updating or deleting account state. The two public Web3 token/sign/mint
+operations remain under #45 as a separate wallet-protocol ticket.
+
+The manifest now records 25/49 operations implemented. The release keeps
+`balance()` at its existing `expected<json, Error>` signature; internally it
+uses `api_key_rate_limits()` and returns that response's exact raw envelope.
+Deliberate breaks proved the new tests fail when PATCH becomes POST, delete IDs
+skip component encoding, create-limit finiteness validation is removed, or the
+one-time secret is copied into the retained raw tree.
+The read-only live leg was not run in the implementing environment because no
+`VENICE_API_KEY` was configured; no mutating live call was attempted.
 
 **VC-26 (#41) is implemented for v0.18.0.** `EmbeddingRequest::input` remains
 raw JSON, with builders for text, text batches, token arrays and token-array
