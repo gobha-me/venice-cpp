@@ -63,6 +63,10 @@ right bridge.
   envelope or byte-exact JPEG/PNG/WebP selected from the actual response media
   type; the client never decodes or writes an image. Public `/image/styles`
   discovers the current style strings without a credential.
+- **Image transformations** — upscale, single/multi-image edit and background
+  removal accept explicit inline, URL or owned-file inputs as each endpoint
+  permits. JSON versus multipart is selected from that input, and successful
+  image bytes retain their actual media type and response metadata.
 - **Explicit authentication** — Public, Bearer, pre-signed SIWX and pre-built
   x402 payment payloads are distinct modes, selectable per client or per call.
   The client never owns wallet private keys or constructs signatures.
@@ -76,12 +80,16 @@ right bridge.
   auth / payment-required / rate-limit / invalid-arg / cancelled. Response
   failures carry status, raw body and response metadata, including x402 headers.
 
-Later phases (fed by real use): image editing/upscale, audio/video, TTS,
-retries/backoff, async.
+Later phases (fed by real use): audio/video, TTS, retries/backoff, async.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 12/49 operations implemented.
+OpenAPI coverage: 16/49 operations implemented.
+
+One additional published operation is explicitly unsupported:
+`GET /billing/usage` already returns 410 for every request and points callers
+to `/billing/usage-history`. Keeping the retired method in the inventory makes
+that decision visible without adding a public method that can never succeed.
 
 The checked inventory is [`cmake/openapi_manifest.json`](cmake/openapi_manifest.json),
 keyed by HTTP method + path rather than `operationId` (the published
@@ -286,6 +294,33 @@ are different. Both requests serialize only engaged options and retain an
 qualities, dimensions and ranges pass through to Venice; `models("image")`
 provides the typed constraints callers can use to choose them. `image_styles()`
 is public and returns its complete envelope in `ImageStyles::raw`.
+
+### Image transformations
+
+Transformation inputs are explicit so a caller's file bytes are never guessed
+from a string prefix. Inline base64 and data URLs use `image_input::base64()` /
+`data_url()`, remote images use `url()`, and multipart uploads use `file()` with
+owned bytes, filename and media type:
+
+```cpp
+venice::ImageUpscaleRequest upscale;
+upscale.image = venice::image_input::base64("AAEC");  // caller's complete base64 value
+upscale.scale = 2;
+
+const auto upscaled = client.upscale_image(upscale);
+if (!upscaled) return;  // inspect upscaled.error()
+std::cout << upscaled->media_type << ": " << upscaled->bytes.size() << " bytes\n";
+```
+
+`ImageEditRequest`, `MultiImageEditRequest` and
+`ImageBackgroundRemovalRequest` feed `edit_image()`, `multi_edit_image()` and
+`remove_image_background()` respectively. Multi-edit preserves caller order
+and accepts either an all-file multipart list or a JSON list of inline/URL
+values; mixing the two media forms is an `InvalidArg` before a socket. The
+per-model input maximum is available through `models("inpaint")` — current
+models report as many as six — and is not duplicated as a stale client guard.
+All four results are `GeneratedImageMedia`; the library preserves bytes and
+metadata but never decodes, saves or displays an image.
 
 **`response_format` is raw JSON, not an enum.** The API accepts both
 `{"type":"json_object"}` and a full `{"type":"json_schema", …}` block, and no
@@ -915,7 +950,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.19.0)
+  GIT_TAG        v0.20.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -1075,6 +1110,7 @@ VENICE_API_KEY=... venice-cpp --character SLUG # v0.14.0: detail + v0.15.0: revi
 VENICE_API_KEY=... venice-cpp --usage [model]  # v0.12.0: usage + cost + envelope
 VENICE_API_KEY=... venice-cpp --embeddings [model] # v0.18.0: float + base64
 VENICE_API_KEY=... venice-cpp --image [model]      # v0.19.0: JSON + media
+VENICE_API_KEY=... venice-cpp --image-transform [model] # v0.20.0: four transforms
 
 venice-cpp --traits [type]                     # v0.16.0: no key needed
 venice-cpp --compat [type]                     # v0.16.0: no key needed

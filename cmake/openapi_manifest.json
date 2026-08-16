@@ -2,10 +2,10 @@
   "schema_version": 1,
   "source": {
     "url": "https://api.venice.ai/doc/api/swagger.yaml",
-    "repository_url": "https://github.com/veniceai/api-docs/blob/476df95b1f8230c4b4046a545301b3a5907114a3/swagger.yaml",
-    "version": "20260811.214155",
-    "sha256": "784fe23e888b77e355dcb65ddd12ca55f87a790f4b37cb19b94e880407187841",
-    "audited_on": "2026-08-13"
+    "repository_url": "https://github.com/veniceai/api-docs/blob/f84efe1225895436403aa527f282ffdada4245b5/swagger.yaml",
+    "version": "20260814.194349",
+    "sha256": "9fe43a1a93cb3eb4189f9d53924a873258dd63bc59d0b66647eb2a90e850a174",
+    "audited_on": "2026-08-16"
   },
   "operations": [
     {
@@ -692,32 +692,14 @@
       "method": "GET",
       "path": "/billing/usage",
       "family": "billing",
-      "state": "planned",
+      "state": "unsupported",
       "tracking_issue": 46,
       "security": [
-        [
-          "BearerAuth"
-        ]
+        []
       ],
       "request_media": [],
       "response_media": {
-        "200": [
-          "application/json",
-          "text/csv"
-        ],
-        "400": [
-          "application/json"
-        ],
-        "401": [
-          "application/json"
-        ],
         "410": [
-          "application/json"
-        ],
-        "429": [
-          "application/json"
-        ],
-        "500": [
           "application/json"
         ]
       }
@@ -1024,8 +1006,10 @@
       "method": "POST",
       "path": "/image/background-remove",
       "family": "images",
-      "state": "planned",
-      "tracking_issue": 10,
+      "state": "implemented",
+      "public_api": [
+        "Client::remove_image_background"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -1069,8 +1053,10 @@
       "method": "POST",
       "path": "/image/edit",
       "family": "images",
-      "state": "planned",
-      "tracking_issue": 10,
+      "state": "implemented",
+      "public_api": [
+        "Client::edit_image"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -1165,8 +1151,10 @@
       "method": "POST",
       "path": "/image/multi-edit",
       "family": "images",
-      "state": "planned",
-      "tracking_issue": 10,
+      "state": "implemented",
+      "public_api": [
+        "Client::multi_edit_image"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -1239,8 +1227,10 @@
       "method": "POST",
       "path": "/image/upscale",
       "family": "images",
-      "state": "planned",
-      "tracking_issue": 10,
+      "state": "implemented",
+      "public_api": [
+        "Client::upscale_image"
+      ],
       "security": [
         [
           "BearerAuth"

@@ -14,6 +14,10 @@
 //   * generate_image(req)           -> expected<ImageGenerationResult>
 //   * generate_image_openai(req)    -> expected<OpenAIImageGenerationResponse>
 //   * image_styles()                -> expected<ImageStyles>
+//   * upscale_image(req)            -> expected<GeneratedImageMedia>
+//   * edit_image(req)               -> expected<GeneratedImageMedia>
+//   * multi_edit_image(req)         -> expected<GeneratedImageMedia>
+//   * remove_image_background(req)  -> expected<GeneratedImageMedia>
 //   * models()                      -> expected<vector<Model>>
 //   * model_traits(type)            -> expected<ModelTraits>
 //   * model_compatibility_mapping(type)
@@ -216,6 +220,95 @@ struct MultipartBody {
 };
 
 using BufferedBody = std::variant<std::monostate, ByteBody, MultipartBody>;
+
+inline void append_form_field(MultipartBody& body, std::string name, std::string value) {
+  body.parts.push_back({.name = std::move(name), .bytes = std::move(value)});
+}
+
+inline void append_form_field(MultipartBody& body, std::string name, bool value) {
+  append_form_field(body, std::move(name), std::string{value ? "true" : "false"});
+}
+
+inline void append_form_field(MultipartBody& body, std::string name, double value) {
+  append_form_field(body, std::move(name), nlohmann::json(value).dump());
+}
+
+inline void append_image_file(MultipartBody& body, std::string name,
+                              const ImageFile& image) {
+  body.parts.push_back({.name = std::move(name),
+                        .bytes = image.bytes,
+                        .filename = image.filename,
+                        .content_type = image.media_type});
+}
+
+[[nodiscard]] inline auto image_upscale_body(const ImageUpscaleRequest& request)
+    -> BufferedBody {
+  const auto* file = std::get_if<ImageFile>(&request.image);
+  if (file == nullptr)
+    return ByteBody{request.to_json_body().dump(), "application/json"};
+
+  MultipartBody body;
+  append_image_file(body, "image", *file);
+  if (request.creativity) append_form_field(body, "creativity", *request.creativity);
+  if (request.scale) append_form_field(body, "scale", *request.scale);
+  return body;
+}
+
+[[nodiscard]] inline auto image_edit_body(const ImageEditRequest& request) -> BufferedBody {
+  const auto* file = std::get_if<ImageFile>(&request.image);
+  if (file == nullptr)
+    return ByteBody{request.to_json_body().dump(), "application/json"};
+
+  MultipartBody body;
+  append_image_file(body, "image", *file);
+  append_form_field(body, "prompt", request.prompt);
+  if (request.model) append_form_field(body, "model", *request.model);
+  if (request.aspect_ratio) append_form_field(body, "aspect_ratio", *request.aspect_ratio);
+  if (request.disable_prompt_optimization_thinking)
+    append_form_field(body, "disable_prompt_optimization_thinking",
+                      *request.disable_prompt_optimization_thinking);
+  if (request.enhance_prompt)
+    append_form_field(body, "enhance_prompt", *request.enhance_prompt);
+  if (request.resolution) append_form_field(body, "resolution", *request.resolution);
+  if (request.output_format) append_form_field(body, "output_format", *request.output_format);
+  if (request.safe_mode) append_form_field(body, "safe_mode", *request.safe_mode);
+  return body;
+}
+
+[[nodiscard]] inline auto multi_image_edit_body(const MultiImageEditRequest& request)
+    -> BufferedBody {
+  if (!request.images.empty() &&
+      std::get_if<ImageFile>(&request.images.front()) == nullptr)
+    return ByteBody{request.to_json_body().dump(), "application/json"};
+
+  MultipartBody body;
+  for (const auto& input : request.images)
+    append_image_file(body, "images", std::get<ImageFile>(input));
+  append_form_field(body, "prompt", request.prompt);
+  if (request.model) append_form_field(body, "modelId", *request.model);
+  if (request.aspect_ratio) append_form_field(body, "aspect_ratio", *request.aspect_ratio);
+  if (request.output_format) append_form_field(body, "output_format", *request.output_format);
+  if (request.quality) append_form_field(body, "quality", *request.quality);
+  if (request.resolution) append_form_field(body, "resolution", *request.resolution);
+  if (request.safe_mode) append_form_field(body, "safe_mode", *request.safe_mode);
+  if (request.disable_prompt_optimization_thinking)
+    append_form_field(body, "disable_prompt_optimization_thinking",
+                      *request.disable_prompt_optimization_thinking);
+  if (request.enhance_prompt)
+    append_form_field(body, "enhance_prompt", *request.enhance_prompt);
+  return body;
+}
+
+[[nodiscard]] inline auto image_background_removal_body(
+    const ImageBackgroundRemovalRequest& request) -> BufferedBody {
+  const auto* file = std::get_if<ImageFile>(&request.image);
+  if (file == nullptr)
+    return ByteBody{request.to_json_body().dump(), "application/json"};
+
+  MultipartBody body;
+  append_image_file(body, "image", *file);
+  return body;
+}
 
 struct BufferedRequest {
   HttpMethod method = HttpMethod::Get;
@@ -770,6 +863,50 @@ class Client {
     }
   }
 
+  // ── image transformations ────────────────────────────────────────────
+  // Input representation selects JSON or multipart. Output representation is
+  // never inferred from a request field: these operations return media, and
+  // the actual successful Content-Type remains authoritative.
+  [[nodiscard]] auto upscale_image(const ImageUpscaleRequest& req,
+                                   const RequestOptions& opts = {}) const
+      -> std::expected<GeneratedImageMedia, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    static constexpr std::array<std::string_view, 1> kAllowed{"image/png"};
+    return post_image_media_response("/image/upscale", detail::image_upscale_body(req),
+                                     kAllowed, opts);
+  }
+
+  [[nodiscard]] auto edit_image(const ImageEditRequest& req,
+                                const RequestOptions& opts = {}) const
+      -> std::expected<GeneratedImageMedia, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    static constexpr std::array<std::string_view, 3> kAllowed{
+        "image/jpeg", "image/png", "image/webp"};
+    return post_image_media_response("/image/edit", detail::image_edit_body(req),
+                                     kAllowed, opts);
+  }
+
+  [[nodiscard]] auto multi_edit_image(const MultiImageEditRequest& req,
+                                      const RequestOptions& opts = {}) const
+      -> std::expected<GeneratedImageMedia, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    static constexpr std::array<std::string_view, 3> kAllowed{
+        "image/jpeg", "image/png", "image/webp"};
+    return post_image_media_response("/image/multi-edit",
+                                     detail::multi_image_edit_body(req), kAllowed, opts);
+  }
+
+  [[nodiscard]] auto remove_image_background(
+      const ImageBackgroundRemovalRequest& req,
+      const RequestOptions& opts = {}) const
+      -> std::expected<GeneratedImageMedia, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    static constexpr std::array<std::string_view, 1> kAllowed{"image/png"};
+    return post_image_media_response("/image/background-remove",
+                                     detail::image_background_removal_body(req),
+                                     kAllowed, opts);
+  }
+
   // ── models ────────────────────────────────────────────────────────────
   //
   // Only the shape of the *response* can fail here; individual entries degrade
@@ -1167,6 +1304,105 @@ class Client {
     return {};
   }
 
+  [[nodiscard]] static auto validate_image_input(const ImageInput& input)
+      -> std::expected<void, Error> {
+    if (const auto* encoded = std::get_if<InlineImage>(&input)) {
+      if (encoded->value.empty())
+        return std::unexpected{Error{ErrorKind::InvalidArg, 0, "image is empty", {}}};
+      return {};
+    }
+    if (const auto* url = std::get_if<ImageUrl>(&input)) {
+      if (url->value.empty())
+        return std::unexpected{Error{ErrorKind::InvalidArg, 0, "image is empty", {}}};
+      return {};
+    }
+
+    const auto& file = std::get<ImageFile>(input);
+    if (file.bytes.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "image file bytes are empty", {}}};
+    if (file.filename.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "image file name is empty", {}}};
+    if (file.media_type.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "image file media type is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto multipart_extra_is_invalid(const ImageInput& input,
+                                                        const nlohmann::json& extra)
+      -> bool {
+    return std::holds_alternative<ImageFile>(input) && extra.is_object() && !extra.empty();
+  }
+
+  [[nodiscard]] static auto validate(const ImageUpscaleRequest& req)
+      -> std::expected<void, Error> {
+    if (req.creativity && !std::isfinite(*req.creativity))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "creativity is not finite", {}}};
+    if (req.scale && !std::isfinite(*req.scale))
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "scale is not finite", {}}};
+    if (auto ok = validate_image_input(req.image); !ok) return ok;
+    if (std::holds_alternative<ImageUrl>(req.image))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "upscale image cannot be a URL", {}}};
+    if (multipart_extra_is_invalid(req.image, req.extra))
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0,
+                                   "JSON extra fields cannot be used with multipart image input",
+                                   {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const ImageEditRequest& req)
+      -> std::expected<void, Error> {
+    if (auto ok = validate_image_input(req.image); !ok) return ok;
+    if (req.prompt.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "prompt is empty", {}}};
+    if (multipart_extra_is_invalid(req.image, req.extra))
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0,
+                                   "JSON extra fields cannot be used with multipart image input",
+                                   {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const MultiImageEditRequest& req)
+      -> std::expected<void, Error> {
+    if (req.images.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "images are empty", {}}};
+
+    bool has_files = false;
+    bool has_values = false;
+    for (const auto& image : req.images) {
+      if (auto ok = validate_image_input(image); !ok) return ok;
+      if (std::holds_alternative<ImageFile>(image))
+        has_files = true;
+      else
+        has_values = true;
+    }
+    if (has_files && has_values)
+      return std::unexpected{Error{
+          ErrorKind::InvalidArg, 0,
+          "multi-edit images must be all files or all inline/URL values", {}}};
+    if (req.prompt.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "prompt is empty", {}}};
+    if (has_files && req.extra.is_object() && !req.extra.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0,
+                                   "JSON extra fields cannot be used with multipart image input",
+                                   {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const ImageBackgroundRemovalRequest& req)
+      -> std::expected<void, Error> {
+    if (auto ok = validate_image_input(req.image); !ok) return ok;
+    if (multipart_extra_is_invalid(req.image, req.extra))
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0,
+                                   "JSON extra fields cannot be used with multipart image input",
+                                   {}}};
+    return {};
+  }
+
   [[nodiscard]] auto request_headers(detail::AuthPolicy policy,
                                      const RequestOptions& opts) const
       -> std::expected<httplib::Headers, Error> {
@@ -1231,6 +1467,30 @@ class Client {
                                 .headers = std::move(*headers),
                                 .body = detail::ByteBody{body.dump(), "application/json"}},
         opts);
+  }
+
+  [[nodiscard]] auto post_image_media_response(
+      std::string_view endpoint, detail::BufferedBody body,
+      std::span<const std::string_view> allowed_media,
+      const RequestOptions& opts) const
+      -> std::expected<GeneratedImageMedia, Error> {
+    auto headers = request_headers(detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!headers) return std::unexpected{std::move(headers.error())};
+    auto response = detail::send_buffered(
+        m_base_url,
+        detail::BufferedRequest{.method = detail::HttpMethod::Post,
+                                .endpoint = std::string{endpoint},
+                                .headers = std::move(*headers),
+                                .body = std::move(body)},
+        opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    if (auto media = detail::require_media_type(*response, allowed_media); !media)
+      return std::unexpected{std::move(media.error())};
+    return GeneratedImageMedia{
+        .bytes = std::move(response->body),
+        .media_type = std::move(response->content_type),
+        .metadata = detail::metadata_from_headers(response->headers),
+    };
   }
 
   // SSE framing used to live here as a private static plus a "\n\n" loop inside

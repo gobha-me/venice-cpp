@@ -162,11 +162,23 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   from `return_binary` or the requested format. Non-2xx classification still
   happens before media validation. The client preserves bytes and metadata but
   never decodes, saves, displays or silently base64-expands an image.
+- **Image transformations choose their media form from an explicit input.**
+  `ImageInput` distinguishes inline encoded text, a URL and owned file bytes;
+  no prefix heuristic decides whether a string becomes multipart. Upscale,
+  edit, multi-edit and background removal keep distinct request types and
+  literal wire spellings (`model` is not derived into multi-edit's `modelId`).
+  A file selects multipart and JSON `extra` is then rejected rather than
+  silently lost. Multi-edit accepts an ordered all-file list or an ordered JSON
+  list of inline/URL values, never a mixed request. Its maximum is model-owned:
+  the 2026-08-16 catalogue reports six on several inpaint models, so the old
+  three-image limit is not a client guard. All four results are actual media
+  bytes plus normalized content type and metadata; no decode or filesystem I/O.
 - **Image request policy comes from the catalogue, not duplicated guards.**
   Formats, qualities, resolutions, aspect ratios, steps, dimensions and style
   limits remain caller-supplied values. The client rejects only empty required
   structure and non-finite modeled doubles; `Model::image` carries the live
-  constraints a caller can consult. `style_references` is optional so omitted
+  constraints a caller can consult, while `Model::inpaint` carries edit and
+  multi-edit constraints. `style_references` is optional so omitted
   and explicitly empty remain distinguishable, and its elements use the same
   modeled-wins `extra` merge as the containing request.
 - **Braces build arrays, parentheses build scalars.** `nlohmann::json{"auto"}` is
