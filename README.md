@@ -71,11 +71,16 @@ right bridge.
   `/billing/usage-history`) — typed balance and aggregate views plus ordered,
   cursor-paged ledger history. History can return typed JSON or byte-exact CSV,
   selected from the response's actual media type.
+- **API-key administration** — typed list/detail/create/update/delete, current
+  rate limits and the account's last 50 exceeded-limit records. Returned key
+  material is available exactly once to the successful create caller and is
+  never printed by the library or its read-only smoke command.
 - **Explicit authentication** — Public, Bearer, pre-signed SIWX and pre-built
   x402 payment payloads are distinct modes, selectable per client or per call.
   The client never owns wallet private keys or constructs signatures.
-- **API-key rate limits** (`/api_keys/rate_limits`) through the historical
-  `balance()` compatibility spelling, kept distinct from account billing.
+- **API-key rate limits** (`/api_keys/rate_limits`) through typed
+  `api_key_rate_limits()` and the historical raw `balance()` compatibility
+  spelling, kept distinct from account billing.
 - **Per-request timeouts and cancellation** — every call takes an optional
   `RequestOptions` with connect/read/write timeout overrides and a
   `CancelToken` that aborts an in-flight request from another thread, including
@@ -89,7 +94,7 @@ Later phases (fed by real use): audio/video, TTS, retries/backoff, async.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 19/49 operations implemented.
+OpenAPI coverage: 25/49 operations implemented.
 
 One additional published operation is explicitly unsupported:
 `GET /billing/usage` already returns 410 for every request and points callers
@@ -544,6 +549,64 @@ than becoming zero. Analytics is Beta and currently sends four dynamic daily
 chart maps (`byModelDaily`, `byModelDailyUsd`, `byKeyDaily`, `byKeyDailyUsd`);
 their objects remain raw JSON because their keys are account-defined display
 names rather than a stable schema.
+
+### API-key administration
+
+API-key administration is Bearer-only. Value sets such as `api_key_type`,
+`limit_period` and rate-limit types stay strings because Venice owns them;
+response structs retain both typed optionals and their verbatim `raw` objects.
+Usage totals remain decimal strings, while configured limits are the JSON
+numbers the server publishes. Missing and explicit zero never collapse.
+The one exception is `ApiKeyCreated::raw`: every nested `apiKey` value is
+replaced with `[REDACTED]`, so the complete one-time secret exists only in
+`ApiKeyCreated::api_key`. Create-error bodies receive the same redaction.
+
+```cpp
+const auto keys = client.api_keys();
+if (!keys) return;  // inspect keys.error()
+for (const auto& key : keys->entries) {
+  if (!key.id) continue;
+  const auto detail = client.api_key(*key.id);
+  if (!detail) return;
+}
+
+venice::ApiKeyCreateRequest create;
+create.api_key_type = "INFERENCE";
+create.description = "short-lived worker";
+create.limit_period = "MONTH";
+create.consumption_limit = venice::ApiKeyConsumptionLimitRequest{.usd = 10.0};
+auto created = client.create_api_key(create);
+if (!created) return;
+
+// created->api_key is complete secret material shown by Venice once. Move it
+// directly into the application's secret store; never print or log it.
+std::string secret = std::move(created->api_key);
+(void)secret;  // hand to the application's secret-store API
+
+venice::ApiKeyUpdateRequest update;
+update.id = created->id;
+update.description = "renamed worker";
+update.expires_at = "";  // engaged empty string explicitly clears expiration
+const auto updated = client.update_api_key(update);
+if (!updated) return;
+
+const auto deleted = client.delete_api_key(created->id);
+if (!deleted || !deleted->success) return;
+```
+
+Create and update bodies serialize only engaged fields. Both carry additive
+`extra` JSON for future request keys, with modeled fields winning on collision.
+An omitted update field remains untouched; an engaged empty `expires_at`
+clears expiration, while `extra["expiresAt"] = nullptr` exposes the wire's
+equivalent null spelling. The client rejects only an empty ID and non-finite
+modeled limit values before transport; server-owned ranges and strings are sent
+verbatim so the server's error body can name current policy.
+
+`api_key_rate_limits()` returns the typed current view.
+`api_key_rate_limit_logs()` returns the ordered last-50 list the server exposes;
+it is not presented as pageable. Existing source using `balance()` keeps its
+`std::expected<nlohmann::json, Error>` return type and receives the typed rate-
+limit parser's retained raw envelope.
 
 ### What a call cost
 
@@ -1007,7 +1070,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.21.0)
+  GIT_TAG        v0.22.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -1169,6 +1232,7 @@ VENICE_API_KEY=... venice-cpp --embeddings [model] # v0.18.0: float + base64
 VENICE_API_KEY=... venice-cpp --image [model]      # v0.19.0: JSON + media
 VENICE_API_KEY=... venice-cpp --image-transform [model] # v0.20.0: four transforms
 VENICE_API_KEY=... venice-cpp --billing [lookback] # v0.21.0: balance + analytics + history
+VENICE_API_KEY=... venice-cpp --api-keys          # v0.22.0: read-only keys + rate limits
 
 venice-cpp --traits [type]                     # v0.16.0: no key needed
 venice-cpp --compat [type]                     # v0.16.0: no key needed

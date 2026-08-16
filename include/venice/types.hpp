@@ -3445,4 +3445,438 @@ using BillingUsageHistoryResult =
   return response;
 }
 
+// ── API-key lifecycle and rate limits (VC-43, #70) ──────────────────────
+//
+// API-key listings are account inventories: one odd field must not discard the
+// other keys. Their fields therefore use the tolerant optional readers above
+// and every level retains the verbatim object. Envelopes are still structural
+// contracts and fail loudly when `data` has the wrong container type.
+
+struct ApiKeyConsumptionLimits {
+  std::optional<double> usd{};
+  std::optional<double> diem{};
+  std::optional<double> vcu{};
+  nlohmann::json raw{};
+};
+
+struct ApiKeyUsageAmounts {
+  // Venice publishes usage as decimal strings. Keeping the strings exact
+  // avoids promising binary-floating ledger equality.
+  std::optional<std::string> usd{};
+  std::optional<std::string> diem{};
+  std::optional<std::string> vcu{};
+  nlohmann::json raw{};
+};
+
+struct ApiKeyUsage {
+  std::optional<ApiKeyUsageAmounts> trailing_seven_days{};
+  nlohmann::json raw{};
+};
+
+struct ApiKey {
+  std::optional<std::string> api_key_type{};
+  std::optional<ApiKeyConsumptionLimits> consumption_limits{};
+  std::optional<std::string> limit_period{};
+  std::optional<std::string> created_at{};
+  std::optional<std::string> description{};
+  std::optional<std::string> expires_at{};
+  std::optional<std::string> id{};
+  std::optional<std::string> last_six_chars{};
+  std::optional<std::string> last_used_at{};
+  std::optional<ApiKeyUsage> usage{};
+  std::optional<ApiKeyUsageAmounts> current_period_usage{};
+  // `raw` is always the key object. A direct detail call additionally retains
+  // its surrounding response so an unmodeled envelope sibling is not lost.
+  nlohmann::json envelope_raw{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+namespace detail {
+
+inline void redact_api_key_material(nlohmann::json& value) {
+  if (value.is_object()) {
+    for (auto& [key, child] : value.items()) {
+      if (key == "apiKey")
+        child = "[REDACTED]";
+      else
+        redact_api_key_material(child);
+    }
+    return;
+  }
+  if (value.is_array())
+    for (auto& child : value) redact_api_key_material(child);
+}
+
+[[nodiscard]] inline auto redacted_api_key_json(nlohmann::json value)
+    -> nlohmann::json {
+  redact_api_key_material(value);
+  return value;
+}
+
+[[nodiscard]] inline auto redacted_api_key_body(std::string_view body) -> std::string {
+  auto parsed = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+  if (parsed.is_discarded()) return std::string{body};
+  redact_api_key_material(parsed);
+  return parsed.dump();
+}
+
+[[nodiscard]] inline auto api_key_consumption_limits_from_json(const nlohmann::json& j)
+    -> ApiKeyConsumptionLimits {
+  ApiKeyConsumptionLimits limits;
+  limits.raw = j;
+  if (j.is_object()) {
+    limits.usd = opt_double(j, "usd");
+    limits.diem = opt_double(j, "diem");
+    limits.vcu = opt_double(j, "vcu");
+  }
+  return limits;
+}
+
+[[nodiscard]] inline auto api_key_usage_amounts_from_json(const nlohmann::json& j)
+    -> ApiKeyUsageAmounts {
+  ApiKeyUsageAmounts amounts;
+  amounts.raw = j;
+  if (j.is_object()) {
+    amounts.usd = opt_string(j, "usd");
+    amounts.diem = opt_string(j, "diem");
+    amounts.vcu = opt_string(j, "vcu");
+  }
+  return amounts;
+}
+
+[[nodiscard]] inline auto api_key_from_json(const nlohmann::json& j) -> ApiKey {
+  ApiKey key;
+  key.raw = j;
+  if (!j.is_object()) return key;
+
+  key.api_key_type = opt_string(j, "apiKeyType");
+  if (const auto* limits = opt_object(j, "consumptionLimits"))
+    key.consumption_limits = api_key_consumption_limits_from_json(*limits);
+  key.limit_period = opt_string(j, "limitPeriod");
+  key.created_at = opt_string(j, "createdAt");
+  key.description = opt_string(j, "description");
+  key.expires_at = opt_string(j, "expiresAt");
+  key.id = opt_string(j, "id");
+  key.last_six_chars = opt_string(j, "last6Chars");
+  key.last_used_at = opt_string(j, "lastUsedAt");
+
+  if (const auto* usage = opt_object(j, "usage")) {
+    ApiKeyUsage parsed;
+    parsed.raw = *usage;
+    if (const auto* trailing = opt_object(*usage, "trailingSevenDays"))
+      parsed.trailing_seven_days = api_key_usage_amounts_from_json(*trailing);
+    key.usage = std::move(parsed);
+  }
+  if (const auto* current = opt_object(j, "currentPeriodUsage"))
+    key.current_period_usage = api_key_usage_amounts_from_json(*current);
+  return key;
+}
+
+}  // namespace detail
+
+struct ApiKeyList {
+  std::vector<ApiKey> entries{};
+  std::size_t returned{0};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+[[nodiscard]] inline auto api_keys_from_json_body(const nlohmann::json& j) -> ApiKeyList {
+  if (!j.is_object()) throw std::runtime_error{"API keys: response must be an object"};
+  const auto* values = detail::opt_array(j, "data");
+  if (values == nullptr) throw std::runtime_error{"API keys: response has no data array"};
+
+  ApiKeyList response;
+  response.raw = j;
+  response.returned = values->size();
+  response.entries.reserve(values->size());
+  for (const auto& value : *values)
+    response.entries.push_back(detail::api_key_from_json(value));
+  return response;
+}
+
+[[nodiscard]] inline auto api_key_from_json_body(const nlohmann::json& j) -> ApiKey {
+  if (!j.is_object()) throw std::runtime_error{"API key: response must be an object"};
+  const auto* data = detail::opt_object(j, "data");
+  if (data == nullptr) throw std::runtime_error{"API key: response has no data object"};
+  auto response = detail::api_key_from_json(*data);
+  response.envelope_raw = j;
+  return response;
+}
+
+struct ApiKeyConsumptionLimitRequest {
+  std::optional<double> usd{};
+  std::optional<double> diem{};
+  std::optional<double> vcu{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    if (usd) j["usd"] = *usd;
+    if (diem) j["diem"] = *diem;
+    if (vcu) j["vcu"] = *vcu;
+    return j;
+  }
+};
+
+struct ApiKeyCreateRequest {
+  std::string api_key_type{};
+  std::string description{};
+  std::optional<ApiKeyConsumptionLimitRequest> consumption_limit{};
+  std::optional<std::string> limit_period{};
+  std::optional<std::string> expires_at{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["apiKeyType"] = api_key_type;
+    j["description"] = description;
+    if (consumption_limit) j["consumptionLimit"] = consumption_limit->to_json_body();
+    if (limit_period) j["limitPeriod"] = *limit_period;
+    if (expires_at) j["expiresAt"] = *expires_at;
+    return j;
+  }
+};
+
+struct ApiKeyUpdateRequest {
+  std::string id{};
+  std::optional<ApiKeyConsumptionLimitRequest> consumption_limit{};
+  std::optional<std::string> limit_period{};
+  std::optional<std::string> description{};
+  // An engaged empty string is the typed spelling for clearing expiration.
+  // `extra["expiresAt"] = nullptr` remains available for callers that need the
+  // wire's equivalent null spelling.
+  std::optional<std::string> expires_at{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["id"] = id;
+    if (consumption_limit) j["consumptionLimit"] = consumption_limit->to_json_body();
+    if (limit_period) j["limitPeriod"] = *limit_period;
+    if (description) j["description"] = *description;
+    if (expires_at) j["expiresAt"] = *expires_at;
+    return j;
+  }
+};
+
+struct ApiKeyCreated {
+  // The only field in this library intentionally holding complete API-key
+  // material. No display helper or CLI path serializes it.
+  std::string api_key{};
+  std::string id{};
+  bool success{false};
+  std::optional<std::string> api_key_type{};
+  std::optional<ApiKeyConsumptionLimits> consumption_limit{};
+  std::optional<std::string> limit_period{};
+  std::optional<std::string> description{};
+  std::optional<std::string> expires_at{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+[[nodiscard]] inline auto api_key_created_from_json_body(const nlohmann::json& j)
+    -> ApiKeyCreated {
+  if (!j.is_object())
+    throw std::runtime_error{"API key create: response must be an object"};
+  const auto& success = j.at("success");
+  const auto& data = j.at("data");
+  if (!success.is_boolean())
+    throw std::runtime_error{"API key create: success must be a boolean"};
+  if (!data.is_object()) throw std::runtime_error{"API key create: data must be an object"};
+  const auto& secret = data.at("apiKey");
+  const auto& id = data.at("id");
+  if (!secret.is_string()) throw std::runtime_error{"API key create: apiKey must be a string"};
+  if (!id.is_string()) throw std::runtime_error{"API key create: id must be a string"};
+
+  ApiKeyCreated response;
+  // The caller receives the complete value once through `api_key`; duplicating
+  // it into a diagnostic-friendly raw tree would create a second accidental
+  // exfiltration path.
+  response.raw = detail::redacted_api_key_json(j);
+  response.success = success.get<bool>();
+  response.api_key = secret.get<std::string>();
+  response.id = id.get<std::string>();
+  response.api_key_type = detail::opt_string(data, "apiKeyType");
+  if (const auto* limits = detail::opt_object(data, "consumptionLimit"))
+    response.consumption_limit = detail::api_key_consumption_limits_from_json(*limits);
+  response.limit_period = detail::opt_string(data, "limitPeriod");
+  response.description = detail::opt_string(data, "description");
+  response.expires_at = detail::opt_string(data, "expiresAt");
+  return response;
+}
+
+struct ApiKeyUpdateResult {
+  ApiKey key{};
+  bool success{false};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+[[nodiscard]] inline auto api_key_update_from_json_body(const nlohmann::json& j)
+    -> ApiKeyUpdateResult {
+  if (!j.is_object())
+    throw std::runtime_error{"API key update: response must be an object"};
+  const auto& success = j.at("success");
+  const auto& data = j.at("data");
+  if (!success.is_boolean())
+    throw std::runtime_error{"API key update: success must be a boolean"};
+  if (!data.is_object()) throw std::runtime_error{"API key update: data must be an object"};
+  return ApiKeyUpdateResult{
+      .key = detail::api_key_from_json(data),
+      .success = success.get<bool>(),
+      .raw = j,
+  };
+}
+
+struct ApiKeyDeleteResult {
+  bool success{false};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+[[nodiscard]] inline auto api_key_delete_from_json_body(const nlohmann::json& j)
+    -> ApiKeyDeleteResult {
+  if (!j.is_object())
+    throw std::runtime_error{"API key delete: response must be an object"};
+  const auto& success = j.at("success");
+  if (!success.is_boolean())
+    throw std::runtime_error{"API key delete: success must be a boolean"};
+  return ApiKeyDeleteResult{.success = success.get<bool>(), .raw = j};
+}
+
+struct ApiKeyTier {
+  std::optional<std::string> id{};
+  std::optional<bool> is_charged{};
+  nlohmann::json raw{};
+};
+
+struct ApiKeyBalances {
+  std::optional<double> usd{};
+  std::optional<double> diem{};
+  nlohmann::json raw{};
+};
+
+struct ApiKeyRateLimit {
+  std::optional<double> amount{};
+  std::optional<std::string> type{};
+  nlohmann::json raw{};
+};
+
+struct ApiKeyModelRateLimits {
+  std::optional<std::string> api_model_id{};
+  std::optional<std::vector<ApiKeyRateLimit>> rate_limits{};
+  nlohmann::json raw{};
+};
+
+struct ApiKeyRateLimits {
+  std::optional<bool> access_permitted{};
+  std::optional<ApiKeyTier> api_tier{};
+  std::optional<ApiKeyBalances> balances{};
+  std::optional<std::string> key_expiration{};
+  std::optional<std::string> next_epoch_begins{};
+  std::optional<std::vector<ApiKeyModelRateLimits>> rate_limits{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+[[nodiscard]] inline auto api_key_rate_limits_from_json_body(const nlohmann::json& j)
+    -> ApiKeyRateLimits {
+  if (!j.is_object())
+    throw std::runtime_error{"API-key rate limits: response must be an object"};
+  const auto* data = detail::opt_object(j, "data");
+  if (data == nullptr)
+    throw std::runtime_error{"API-key rate limits: response has no data object"};
+
+  ApiKeyRateLimits response;
+  response.raw = j;
+  response.access_permitted = detail::opt_bool(*data, "accessPermitted");
+  if (const auto* tier = detail::opt_object(*data, "apiTier")) {
+    response.api_tier = ApiKeyTier{
+        .id = detail::opt_string(*tier, "id"),
+        .is_charged = detail::opt_bool(*tier, "isCharged"),
+        .raw = *tier,
+    };
+  }
+  if (const auto* balances = detail::opt_object(*data, "balances")) {
+    response.balances = ApiKeyBalances{
+        .usd = detail::opt_double(*balances, "USD"),
+        .diem = detail::opt_double(*balances, "DIEM"),
+        .raw = *balances,
+    };
+  }
+  response.key_expiration = detail::opt_string(*data, "keyExpiration");
+  response.next_epoch_begins = detail::opt_string(*data, "nextEpochBegins");
+  if (const auto* groups = detail::opt_array(*data, "rateLimits")) {
+    response.rate_limits.emplace();
+    response.rate_limits->reserve(groups->size());
+    for (const auto& group : *groups) {
+      ApiKeyModelRateLimits parsed;
+      parsed.raw = group;
+      if (group.is_object()) {
+        parsed.api_model_id = detail::opt_string(group, "apiModelId");
+        if (const auto* limits = detail::opt_array(group, "rateLimits")) {
+          parsed.rate_limits.emplace();
+          parsed.rate_limits->reserve(limits->size());
+          for (const auto& limit : *limits) {
+            ApiKeyRateLimit item;
+            item.raw = limit;
+            if (limit.is_object()) {
+              item.amount = detail::opt_double(limit, "amount");
+              item.type = detail::opt_string(limit, "type");
+            }
+            parsed.rate_limits->push_back(std::move(item));
+          }
+        }
+      }
+      response.rate_limits->push_back(std::move(parsed));
+    }
+  }
+  return response;
+}
+
+struct ApiKeyRateLimitLogEntry {
+  std::optional<std::string> api_key_id{};
+  std::optional<std::string> model_id{};
+  std::optional<std::string> rate_limit_tier{};
+  std::optional<std::string> rate_limit_type{};
+  std::optional<std::string> timestamp{};
+  nlohmann::json raw{};
+};
+
+struct ApiKeyRateLimitLogPage {
+  std::vector<ApiKeyRateLimitLogEntry> entries{};
+  std::size_t returned{0};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+[[nodiscard]] inline auto api_key_rate_limit_logs_from_json_body(const nlohmann::json& j)
+    -> ApiKeyRateLimitLogPage {
+  if (!j.is_object())
+    throw std::runtime_error{"API-key rate-limit logs: response must be an object"};
+  const auto* values = detail::opt_array(j, "data");
+  if (values == nullptr)
+    throw std::runtime_error{"API-key rate-limit logs: response has no data array"};
+
+  ApiKeyRateLimitLogPage response;
+  response.raw = j;
+  response.returned = values->size();
+  response.entries.reserve(values->size());
+  for (const auto& value : *values) {
+    ApiKeyRateLimitLogEntry item;
+    item.raw = value;
+    if (value.is_object()) {
+      item.api_key_id = detail::opt_string(value, "apiKeyId");
+      item.model_id = detail::opt_string(value, "modelId");
+      item.rate_limit_tier = detail::opt_string(value, "rateLimitTier");
+      item.rate_limit_type = detail::opt_string(value, "rateLimitType");
+      item.timestamp = detail::opt_string(value, "timestamp");
+    }
+    response.entries.push_back(std::move(item));
+  }
+  return response;
+}
+
 }  // namespace venice
