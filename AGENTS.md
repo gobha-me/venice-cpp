@@ -377,6 +377,9 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   continuation and disposition headers. A cursor is an exclusive continuation
   input — never combine it with first-page filters — and actual successful
   `Content-Type`, not the requested format, selects the JSON/CSV result union
+  Analytics' four daily chart families stay raw objects because their keys are
+  account-defined display names; `byModelDailyUsd` and `byKeyDailyUsd` were
+  present live on 2026-08-16 but absent from that day's OpenAPI document
   (VC-42).
 - **KDE/Qt-readiness:** keep the library UI-free and Qt-linkable. No Qt types
   in the API client; a separate service layer owns D-Bus/KF concerns.

@@ -567,9 +567,10 @@ auto image_transform_report(const venice::Client& client, std::string_view model
 constexpr std::array<std::string_view, 4> kModeledBillingBalanceKeys{
     "canConsume", "consumptionCurrency", "balances", "diemEpochAllocation"};
 constexpr std::array<std::string_view, 2> kModeledBillingBucketKeys{"diem", "usd"};
-constexpr std::array<std::string_view, 8> kModeledBillingAnalyticsKeys{
-    "lookback", "byDate", "byModel", "byModelDaily", "topModels", "byKey",
-    "byKeyDaily", "topKeyNames"};
+constexpr std::array<std::string_view, 10> kModeledBillingAnalyticsKeys{
+    "lookback",       "byDate",       "byModel",    "byModelDaily",
+    "byModelDailyUsd", "topModels",    "byKey",      "byKeyDaily",
+    "byKeyDailyUsd",   "topKeyNames"};
 constexpr std::array<std::string_view, 3> kModeledBillingDateKeys{"date", "USD", "DIEM"};
 constexpr std::array<std::string_view, 7> kModeledBillingModelKeys{
     "modelName", "unitType", "modelType", "totalUsd", "totalDiem", "totalUnits",
@@ -638,6 +639,10 @@ auto billing_report(const venice::Client& client, std::string_view lookback) -> 
   check_count("byModelDaily", analytics->by_model_daily
                                   ? std::optional<std::size_t>{analytics->by_model_daily->size()}
                                   : std::nullopt);
+  check_count("byModelDailyUsd",
+              analytics->by_model_daily_usd
+                  ? std::optional<std::size_t>{analytics->by_model_daily_usd->size()}
+                  : std::nullopt);
   check_count("topModels", analytics->top_models
                               ? std::optional<std::size_t>{analytics->top_models->size()}
                               : std::nullopt);
@@ -647,6 +652,10 @@ auto billing_report(const venice::Client& client, std::string_view lookback) -> 
   check_count("byKeyDaily", analytics->by_key_daily
                                 ? std::optional<std::size_t>{analytics->by_key_daily->size()}
                                 : std::nullopt);
+  check_count("byKeyDailyUsd",
+              analytics->by_key_daily_usd
+                  ? std::optional<std::size_t>{analytics->by_key_daily_usd->size()}
+                  : std::nullopt);
   check_count("topKeyNames", analytics->top_key_names
                                 ? std::optional<std::size_t>{analytics->top_key_names->size()}
                                 : std::nullopt);
@@ -669,9 +678,9 @@ auto billing_report(const venice::Client& client, std::string_view lookback) -> 
     for (const auto& item : *analytics->by_key)
       report_unmodeled("unmodeled byKey keys: ", item.raw, kModeledBillingKeyKeys,
                        "BillingUsageByKey::raw");
-  // byModelDaily/byKeyDaily keys are response-generated display names. Their
-  // whole objects are the modeled value, so a per-key set difference there
-  // would print the payload rather than detect a parser gap.
+  // The four daily-map families' keys are response-generated display names.
+  // Their whole objects are the modeled value, so a per-key set difference
+  // there would print the payload rather than detect a parser gap.
 
   venice::BillingUsageHistoryRequest json_request;
   json_request.query.page_size = 10;

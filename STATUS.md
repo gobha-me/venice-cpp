@@ -42,10 +42,13 @@ AGENTS.md (which holds standing conventions, not state).
   (VC-41).
 - `billing_balance`, `billing_usage_analytics` and `billing_usage_history` —
   typed account balances and aggregates plus ordered cursor history in JSON or
-  byte-exact CSV, routed by actual response media type (VC-42). The available
-  inference key was live-checked on 2026-08-16: it remains valid for
-  `/api_keys/rate_limits` (200), while Billing returns 401 `Admin API key
-  required`; a successful admin-key capture is still the release gate.
+  byte-exact CSV, routed by actual response media type (VC-42). Verified with an
+  admin API key on 2026-08-16 in balance, analytics, JSON-history and CSV-history
+  forms: raw/typed counts agreed, no modeled nesting moved, and CSV carried both
+  continuation and disposition headers. The live wire added the undocumented
+  `byModelDailyUsd` and `byKeyDailyUsd` maps; both remain raw dynamic objects like
+  their DIEM siblings. A valid ordinary inference key was also measured and
+  returns 401 `Admin API key required`, while `/api_keys/rate_limits` stays 200.
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   payment_required/rate_limited/invalid_arg/cancelled, each carrying status +

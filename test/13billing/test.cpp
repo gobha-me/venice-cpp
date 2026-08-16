@@ -1,9 +1,8 @@
 // Billing response and query contracts (VC-42, #68).
 //
-// Fixtures are derived from Venice OpenAPI 20260814.194349. They remain a
-// hypothesis about the wire until the authenticated live leg replaces or
-// confirms them. Failure matrix first; loopback HTTP/media behavior lives in
-// test/06transport/.
+// Fixtures are synthetic from Venice OpenAPI 20260814.194349 and the structural
+// live capture of 2026-08-16. No account values are persisted here. Failure
+// matrix first; loopback HTTP/media behavior lives in test/06transport/.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -27,12 +26,14 @@ auto analytics_body() -> nlohmann::json {
       "breakdown":[{"type":"Input","usd":0.25,"diem":1,"units":100},7]
     }],
     "byModelDaily":[{"date":1786752000000,"Example Model":2.25}],
+    "byModelDailyUsd":[{"date":1786752000000,"Example Model":1.25}],
     "topModels":["Example Model"],
     "byKey":[{
       "apiKeyId":null,"description":"Web App","totalUsd":0,
       "totalDiem":2.25,"totalUnits":300
     }],
     "byKeyDaily":[{"date":1786752000000,"Web App":2.25}],
+    "byKeyDailyUsd":[{"date":1786752000000,"Web App":1.25}],
     "topKeyNames":["Web App"],
     "future":{"kept":true}
   })");
@@ -136,9 +137,13 @@ TEST_CASE("billing analytics keeps unknown states and dynamic maps",
 
   REQUIRE(analytics.by_model_daily);
   REQUIRE(analytics.by_model_daily->front()["Example Model"] == 2.25);
+  REQUIRE(analytics.by_model_daily_usd);
+  REQUIRE(analytics.by_model_daily_usd->front()["Example Model"] == 1.25);
   REQUIRE(analytics.by_key);
   REQUIRE_FALSE(analytics.by_key->front().api_key_id);
   REQUIRE(analytics.by_key_daily->front()["Web App"] == 2.25);
+  REQUIRE(analytics.by_key_daily_usd);
+  REQUIRE(analytics.by_key_daily_usd->front()["Web App"] == 1.25);
   REQUIRE(analytics.raw == body);
 
   const auto partial = venice::billing_usage_analytics_from_json_body(

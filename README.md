@@ -540,7 +540,10 @@ numbers rather than decimal strings. They are suitable for display and
 approximate arithmetic, not exact ledger equality; use the retained CSV bytes
 when the export representation must remain exact. All response structs also
 carry `raw`, and missing or malformed optional values remain disengaged rather
-than becoming zero.
+than becoming zero. Analytics is Beta and currently sends four dynamic daily
+chart maps (`byModelDaily`, `byModelDailyUsd`, `byKeyDaily`, `byKeyDailyUsd`);
+their objects remain raw JSON because their keys are account-defined display
+names rather than a stable schema.
 
 ### What a call cost
 

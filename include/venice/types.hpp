@@ -3223,9 +3223,13 @@ struct BillingUsageAnalytics {
   // Keys other than `date` are response-generated model/key display names.
   // Keeping each chart object whole avoids freezing those names into an API.
   std::optional<std::vector<nlohmann::json>> by_model_daily{};
+  // Undocumented on 20260814 OpenAPI, present live 2026-08-16. The shape is
+  // the same dynamic chart map in the account's USD view.
+  std::optional<std::vector<nlohmann::json>> by_model_daily_usd{};
   std::optional<std::vector<std::string>> top_models{};
   std::optional<std::vector<BillingUsageByKey>> by_key{};
   std::optional<std::vector<nlohmann::json>> by_key_daily{};
+  std::optional<std::vector<nlohmann::json>> by_key_daily_usd{};
   std::optional<std::vector<std::string>> top_key_names{};
   ResponseMetadata metadata{};
   nlohmann::json raw{};
@@ -3295,6 +3299,7 @@ struct BillingUsageAnalytics {
     return values->get<std::vector<nlohmann::json>>();
   };
   response.by_model_daily = copy_raw_array("byModelDaily");
+  response.by_model_daily_usd = copy_raw_array("byModelDailyUsd");
   response.top_models = detail::opt_string_array(j, "topModels");
 
   if (const auto* values = detail::opt_array(j, "byKey")) {
@@ -3314,6 +3319,7 @@ struct BillingUsageAnalytics {
     }
   }
   response.by_key_daily = copy_raw_array("byKeyDaily");
+  response.by_key_daily_usd = copy_raw_array("byKeyDailyUsd");
   response.top_key_names = detail::opt_string_array(j, "topKeyNames");
   return response;
 }
