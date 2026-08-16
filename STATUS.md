@@ -166,6 +166,15 @@ Every response was a non-empty PNG. Its first run also did useful work: three
 operations rejected a corrupt embedded PNG that background removal happened to
 accept, so the fixture was rebuilt with valid chunk CRCs before the passing run.
 
+The VC-41 deliberate-break matrix went red in all ten cases: a misspelled
+upscale route; an over-broad success-media allow-list; a removed non-finite
+guard; mixed multi-edit representations passing validation; `modelId` renamed
+to `model`; repeated file parts reversed; a file media type dropped; multipart
+silently discarding JSON `extra`; both background source keys emitted; and one
+byte removed from a successful image. Each failed at its owning request or
+loopback-transport assertion and the committed baseline was restored before the
+compiler matrix.
+
 The same audit moved the checked OpenAPI source to `20260814.194349` /
 `9fe43a1a…`. It found a non-image contract change: `GET /billing/usage` is now
 public and 410-only. A keyless live request on 2026-08-16 confirmed the 410 and
