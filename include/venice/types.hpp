@@ -1232,6 +1232,169 @@ struct ImageStyles {
   return response;
 }
 
+// ── image transformations ────────────────────────────────────────────────
+//
+// The same logical image reaches Venice in three materially different forms:
+// an inline encoded value, a remote URL, or an uploaded file. A bare string
+// cannot distinguish the first two from the third without guessing from its
+// contents, and guessing would make media selection depend on a prefix rather
+// than on the caller's choice. The small wrappers keep that choice explicit.
+
+struct InlineImage {
+  std::string value{};
+};
+
+struct ImageUrl {
+  std::string value{};
+};
+
+struct ImageFile {
+  // std::string is the byte container used by cpp-httplib. Embedded NUL bytes
+  // are data; bytes.size(), never a terminator, is authoritative.
+  std::string bytes{};
+  std::string filename{};
+  std::string media_type{};
+};
+
+using ImageInput = std::variant<InlineImage, ImageUrl, ImageFile>;
+
+namespace image_input {
+
+[[nodiscard]] inline auto base64(std::string value) -> ImageInput {
+  return InlineImage{std::move(value)};
+}
+
+// Kept distinct at the builder surface because it documents caller intent,
+// even though both spellings travel as one verbatim JSON string.
+[[nodiscard]] inline auto data_url(std::string value) -> ImageInput {
+  return InlineImage{std::move(value)};
+}
+
+[[nodiscard]] inline auto url(std::string value) -> ImageInput {
+  return ImageUrl{std::move(value)};
+}
+
+[[nodiscard]] inline auto file(std::string bytes, std::string filename,
+                               std::string media_type) -> ImageInput {
+  return ImageFile{std::move(bytes), std::move(filename), std::move(media_type)};
+}
+
+}  // namespace image_input
+
+namespace detail {
+
+[[nodiscard]] inline auto image_input_json_value(const ImageInput& input)
+    -> const std::string* {
+  if (const auto* encoded = std::get_if<InlineImage>(&input)) return &encoded->value;
+  if (const auto* url = std::get_if<ImageUrl>(&input)) return &url->value;
+  return nullptr;
+}
+
+[[nodiscard]] inline auto image_json_seed(const nlohmann::json& extra) -> nlohmann::json {
+  return extra.is_object() ? extra : nlohmann::json::object();
+}
+
+}  // namespace detail
+
+struct ImageUpscaleRequest {
+  ImageInput image{};
+  std::optional<double> creativity{};
+  std::optional<double> scale{};
+  // JSON-form passthrough only. A file selects multipart, where guessing how
+  // an arbitrary JSON value should become a form field would not be lossless;
+  // Client rejects that combination instead of silently dropping the object.
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    auto j = detail::image_json_seed(extra);
+    if (const auto* value = detail::image_input_json_value(image)) j["image"] = *value;
+    if (creativity) j["creativity"] = *creativity;
+    if (scale) j["scale"] = *scale;
+    return j;
+  }
+};
+
+struct ImageEditRequest {
+  ImageInput image{};
+  std::string prompt{};
+  std::optional<std::string> model{};
+  std::optional<std::string> aspect_ratio{};
+  std::optional<bool> disable_prompt_optimization_thinking{};
+  std::optional<bool> enhance_prompt{};
+  std::optional<std::string> resolution{};
+  std::optional<std::string> output_format{};
+  std::optional<bool> safe_mode{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    auto j = detail::image_json_seed(extra);
+    if (const auto* value = detail::image_input_json_value(image)) j["image"] = *value;
+    j["prompt"] = prompt;
+    if (model) j["model"] = *model;
+    if (aspect_ratio) j["aspect_ratio"] = *aspect_ratio;
+    if (disable_prompt_optimization_thinking)
+      j["disable_prompt_optimization_thinking"] = *disable_prompt_optimization_thinking;
+    if (enhance_prompt) j["enhance_prompt"] = *enhance_prompt;
+    if (resolution) j["resolution"] = *resolution;
+    if (output_format) j["output_format"] = *output_format;
+    if (safe_mode) j["safe_mode"] = *safe_mode;
+    return j;
+  }
+};
+
+struct MultiImageEditRequest {
+  std::vector<ImageInput> images{};
+  std::string prompt{};
+  // The C++ concept is a model id on both edit operations. The wire is not:
+  // this endpoint still spells it `modelId`, while /image/edit uses `model`.
+  std::optional<std::string> model{};
+  std::optional<std::string> aspect_ratio{};
+  std::optional<std::string> output_format{};
+  std::optional<std::string> quality{};
+  std::optional<std::string> resolution{};
+  std::optional<bool> safe_mode{};
+  std::optional<bool> disable_prompt_optimization_thinking{};
+  std::optional<bool> enhance_prompt{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    auto j = detail::image_json_seed(extra);
+    j["images"] = nlohmann::json::array();
+    for (const auto& image : images)
+      if (const auto* value = detail::image_input_json_value(image))
+        j["images"].push_back(*value);
+    j["prompt"] = prompt;
+    if (model) j["modelId"] = *model;
+    if (aspect_ratio) j["aspect_ratio"] = *aspect_ratio;
+    if (output_format) j["output_format"] = *output_format;
+    if (quality) j["quality"] = *quality;
+    if (resolution) j["resolution"] = *resolution;
+    if (safe_mode) j["safe_mode"] = *safe_mode;
+    if (disable_prompt_optimization_thinking)
+      j["disable_prompt_optimization_thinking"] = *disable_prompt_optimization_thinking;
+    if (enhance_prompt) j["enhance_prompt"] = *enhance_prompt;
+    return j;
+  }
+};
+
+struct ImageBackgroundRemovalRequest {
+  ImageInput image{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    auto j = detail::image_json_seed(extra);
+    // These are alternatives, not independent optional fields. Erasing both
+    // first prevents an extra seed from silently sending two source images.
+    j.erase("image");
+    j.erase("image_url");
+    if (const auto* encoded = std::get_if<InlineImage>(&image))
+      j["image"] = encoded->value;
+    else if (const auto* url = std::get_if<ImageUrl>(&image))
+      j["image_url"] = url->value;
+    return j;
+  }
+};
+
 // ── money ─────────────────────────────────────────────────────────────────
 //
 // Venice quotes every amount in two currencies at once: USD and `diem`, its

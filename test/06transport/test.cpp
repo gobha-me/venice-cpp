@@ -65,8 +65,12 @@ using venice::ChatRequest;
 using venice::Client;
 using venice::EmbeddingRequest;
 using venice::ErrorKind;
+using venice::ImageBackgroundRemovalRequest;
+using venice::ImageEditRequest;
 using venice::ImageGenerationRequest;
+using venice::ImageUpscaleRequest;
 using venice::Message;
+using venice::MultiImageEditRequest;
 using venice::OpenAIImageGenerationRequest;
 using venice::Authentication;
 
@@ -99,6 +103,22 @@ class Gate {
   std::mutex m_mu;
   std::condition_variable m_cv;
   bool m_open = false;
+};
+
+struct CapturedTransformPart {
+  std::string name{};
+  std::string filename{};
+  std::string content_type{};
+  std::string content{};
+};
+
+struct CapturedTransform {
+  std::string path{};
+  std::string content_type{};
+  std::string authorization{};
+  std::string siwx{};
+  std::string body{};
+  std::vector<CapturedTransformPart> parts{};
 };
 
 // A peer that can be made to stop answering.
@@ -481,6 +501,102 @@ class TestServer {
                     "application/json; charset=utf-8");
               });
 
+    const auto transform = [this](const httplib::Request& req,
+                                  httplib::Response& res,
+                                  std::string_view operation) {
+      ++m_image_transform_hits;
+      const auto bearer = req.get_header_value("Authorization");
+      const auto siwx = req.get_header_value("SIGN-IN-WITH-X");
+      if (bearer.empty() && siwx.empty()) {
+        res.status = 401;
+        res.set_content(R"({"error":"missing transform authentication"})",
+                        "application/json");
+        return;
+      }
+      if (siwx == "transform-needs-payment") {
+        res.status = 402;
+        res.set_header("PAYMENT-REQUIRED", "transform-payment-requirements");
+        res.set_content(R"({"code":"PAYMENT_REQUIRED"})", "application/json");
+        return;
+      }
+
+      CapturedTransform capture;
+      capture.path = req.path;
+      capture.content_type = req.get_header_value("Content-Type");
+      capture.authorization = bearer;
+      capture.siwx = siwx;
+      capture.body = req.body;
+      for (const auto& [name, part] : req.files)
+        capture.parts.push_back({name, part.filename, part.content_type, part.content});
+      {
+        const std::lock_guard<std::mutex> lock{m_transform_mu};
+        m_last_transform = std::move(capture);
+      }
+
+      std::string control;
+      std::string output_format;
+      if (req.is_multipart_form_data()) {
+        if (const auto it = req.files.find("prompt"); it != req.files.end())
+          control = it->second.content;
+        if (const auto it = req.files.find("output_format"); it != req.files.end())
+          output_format = it->second.content;
+      } else {
+        const auto body = nlohmann::json::parse(req.body);
+        control = body.value("prompt", std::string{});
+        output_format = body.value("output_format", std::string{});
+      }
+
+      if (control == "stall") {
+        ++m_image_transform_stall_hits;
+        m_gate.wait(kStallCap);
+        res.set_content("late", "image/png");
+        return;
+      }
+      const auto endpoint_error = [&](int status, const char* message) {
+        res.status = status;
+        res.set_header("X-Protocol-Trace", "transform-error");
+        res.set_content(nlohmann::json{{"error", message}}.dump(), "text/plain");
+      };
+      if (control == "bad-request") return endpoint_error(400, "bad transform request");
+      if (control == "unauthorized") return endpoint_error(401, "unauthorized");
+      if (control == "unsupported-media") return endpoint_error(415, "unsupported media");
+      if (control == "rate-limit") return endpoint_error(429, "slow down");
+      if (control == "server-error") return endpoint_error(500, "server error");
+      if (control == "capacity") return endpoint_error(503, "at capacity");
+      if (control == "wrong-media") {
+        res.set_header("X-Balance-Remaining", "5.500000");
+        res.set_content("not image data", "text/plain");
+        return;
+      }
+
+      res.set_header("X-Balance-Remaining", "5.500000");
+      res.set_header("PAYMENT-RESPONSE", "transform-payment-receipt");
+      res.set_header("X-Protocol-Trace", std::string{operation});
+      const std::array bytes{char{'I'}, char{'M'}, char{0},
+                             static_cast<char>(0xFF), char{'G'}};
+      const char* media_type = output_format == "jpeg" ? "Image/JPEG; fixture=true"
+                               : output_format == "webp" ? "Image/WebP; fixture=true"
+                                                           : "Image/PNG; fixture=true";
+      res.set_content(bytes.data(), bytes.size(), media_type);
+    };
+
+    m_svr.Post("/api/v1/image/upscale",
+               [transform](const httplib::Request& req, httplib::Response& res) {
+                 transform(req, res, "upscale-success");
+               });
+    m_svr.Post("/api/v1/image/edit",
+               [transform](const httplib::Request& req, httplib::Response& res) {
+                 transform(req, res, "edit-success");
+               });
+    m_svr.Post("/api/v1/image/multi-edit",
+               [transform](const httplib::Request& req, httplib::Response& res) {
+                 transform(req, res, "multi-edit-success");
+               });
+    m_svr.Post("/api/v1/image/background-remove",
+               [transform](const httplib::Request& req, httplib::Response& res) {
+                 transform(req, res, "background-remove-success");
+               });
+
     // Registered *before* the catch-all below, and that ordering is the whole
     // reason this route works: httplib matches handlers in registration order,
     // and `/api/v1/characters/(.*)` matches "alan-watts/reviews" perfectly
@@ -644,6 +760,16 @@ class TestServer {
   [[nodiscard]] auto openai_image_hits() const -> int { return m_openai_image_hits.load(); }
   [[nodiscard]] auto image_styles_hits() const -> int { return m_image_styles_hits.load(); }
   [[nodiscard]] auto image_stall_hits() const -> int { return m_image_stall_hits.load(); }
+  [[nodiscard]] auto image_transform_hits() const -> int {
+    return m_image_transform_hits.load();
+  }
+  [[nodiscard]] auto image_transform_stall_hits() const -> int {
+    return m_image_transform_stall_hits.load();
+  }
+  [[nodiscard]] auto last_transform() const -> CapturedTransform {
+    const std::lock_guard<std::mutex> lock{m_transform_mu};
+    return m_last_transform;
+  }
   [[nodiscard]] auto multipart_stall_hits() const -> int { return m_multipart_stall_hits.load(); }
 
   static constexpr int kFrames = 2;
@@ -668,7 +794,11 @@ class TestServer {
   std::atomic<int> m_openai_image_hits{0};
   std::atomic<int> m_image_styles_hits{0};
   std::atomic<int> m_image_stall_hits{0};
+  std::atomic<int> m_image_transform_hits{0};
+  std::atomic<int> m_image_transform_stall_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
+  mutable std::mutex m_transform_mu;
+  CapturedTransform m_last_transform{};
 };
 
 // What the catalogue fixture echoed under `key`, or a marker naming what was
@@ -707,6 +837,41 @@ auto minimal_openai_image() -> OpenAIImageGenerationRequest {
   OpenAIImageGenerationRequest request;
   request.prompt = "paint it";
   return request;
+}
+
+auto minimal_upscale() -> ImageUpscaleRequest {
+  ImageUpscaleRequest request;
+  request.image = venice::image_input::base64("AAEC");
+  return request;
+}
+
+auto minimal_image_edit() -> ImageEditRequest {
+  ImageEditRequest request;
+  request.image = venice::image_input::base64("AAEC");
+  request.prompt = "paint it";
+  return request;
+}
+
+auto minimal_multi_edit() -> MultiImageEditRequest {
+  MultiImageEditRequest request;
+  request.images = {venice::image_input::base64("BASE"),
+                    venice::image_input::url("https://example.test/layer.png")};
+  request.prompt = "combine them";
+  return request;
+}
+
+auto minimal_background_removal() -> ImageBackgroundRemovalRequest {
+  ImageBackgroundRemovalRequest request;
+  request.image = venice::image_input::url("https://example.test/source.png");
+  return request;
+}
+
+auto parts_named(const CapturedTransform& capture, std::string_view name)
+    -> std::vector<CapturedTransformPart> {
+  std::vector<CapturedTransformPart> result;
+  for (const auto& part : capture.parts)
+    if (part.name == name) result.push_back(part);
+  return result;
 }
 
 // Elapsed wall time around a call, for the one-sided bounds described above.
@@ -1122,6 +1287,207 @@ TEST_CASE("cancellation interrupts native image generation",
   REQUIRE(result.error().kind == ErrorKind::Cancelled);
   REQUIRE(elapsed < kPromptly);
   REQUIRE(server.image_stall_hits() == 1);
+}
+
+TEST_CASE("image transformations classify statuses before success media",
+          "[transport][images][transform][failure]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+
+  struct Case {
+    const char* prompt;
+    ErrorKind kind;
+    int status;
+  };
+  const std::array cases{
+      Case{"bad-request", ErrorKind::Http, 400},
+      Case{"unauthorized", ErrorKind::Auth, 401},
+      Case{"unsupported-media", ErrorKind::Http, 415},
+      Case{"rate-limit", ErrorKind::RateLimited, 429},
+      Case{"server-error", ErrorKind::Http, 500},
+      Case{"capacity", ErrorKind::Http, 503},
+  };
+  for (const auto& test : cases) {
+    auto request = minimal_image_edit();
+    request.prompt = test.prompt;
+    const auto result = client.edit_image(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == test.kind);
+    REQUIRE(result.error().status == test.status);
+    REQUIRE(result.error().metadata.header("x-protocol-trace") ==
+            "transform-error");
+  }
+
+  auto request = minimal_image_edit();
+  request.prompt = "wrong-media";
+  const auto wrong_media = client.edit_image(request);
+  REQUIRE_FALSE(wrong_media);
+  REQUIRE(wrong_media.error().kind == ErrorKind::Parse);
+  REQUIRE(wrong_media.error().status == 200);
+  REQUIRE(wrong_media.error().body == "not image data");
+  REQUIRE(wrong_media.error().metadata.x_balance_remaining == "5.500000");
+
+  const Client wallet{Authentication::sign_in_with_x("transform-needs-payment"),
+                      server.base_url()};
+  request.prompt = "paint it";
+  const auto payment = wallet.edit_image(request);
+  REQUIRE_FALSE(payment);
+  REQUIRE(payment.error().kind == ErrorKind::PaymentRequired);
+  REQUIRE(payment.error().status == 402);
+  REQUIRE(payment.error().metadata.payment_required ==
+          "transform-payment-requirements");
+}
+
+TEST_CASE("image transformations choose exact JSON endpoints and actual media",
+          "[transport][images][transform][json]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+  const std::string expected_bytes{{'I', 'M', char{0},
+                                    static_cast<char>(0xFF), 'G'}};
+
+  auto upscale = minimal_upscale();
+  upscale.creativity = 0.0125;
+  upscale.scale = 3.5;  // the server, not this client, owns its accepted set
+  const auto upscaled = client.upscale_image(upscale);
+  REQUIRE(upscaled);
+  REQUIRE(upscaled->bytes == expected_bytes);
+  REQUIRE(upscaled->media_type == "image/png");
+  REQUIRE(upscaled->metadata.payment_response == "transform-payment-receipt");
+  auto capture = server.last_transform();
+  REQUIRE(capture.path == "/api/v1/image/upscale");
+  REQUIRE(capture.content_type == "application/json");
+  REQUIRE(capture.authorization == "Bearer default-token");
+  REQUIRE(nlohmann::json::parse(capture.body) == upscale.to_json_body());
+
+  auto edit = minimal_image_edit();
+  edit.image = venice::image_input::url("https://example.test/source.png");
+  edit.model = "edit-model";
+  edit.output_format = "webp";
+  const auto edited = client.edit_image(
+      edit, {.authentication = Authentication::sign_in_with_x("signed-wallet")});
+  REQUIRE(edited);
+  REQUIRE(edited->media_type == "image/webp");
+  capture = server.last_transform();
+  REQUIRE(capture.path == "/api/v1/image/edit");
+  REQUIRE(capture.siwx == "signed-wallet");
+  REQUIRE(nlohmann::json::parse(capture.body) == edit.to_json_body());
+  REQUIRE(nlohmann::json::parse(capture.body).contains("model"));
+  REQUIRE_FALSE(nlohmann::json::parse(capture.body).contains("modelId"));
+
+  auto multi = minimal_multi_edit();
+  multi.model = "multi-model";
+  multi.output_format = "jpeg";
+  const auto combined = client.multi_edit_image(multi);
+  REQUIRE(combined);
+  REQUIRE(combined->media_type == "image/jpeg");
+  capture = server.last_transform();
+  REQUIRE(capture.path == "/api/v1/image/multi-edit");
+  const auto multi_body = nlohmann::json::parse(capture.body);
+  REQUIRE(multi_body == multi.to_json_body());
+  REQUIRE(multi_body["images"] == nlohmann::json::array(
+                                      {"BASE", "https://example.test/layer.png"}));
+  REQUIRE(multi_body["modelId"] == "multi-model");
+  REQUIRE_FALSE(multi_body.contains("model"));
+
+  auto background = minimal_background_removal();
+  const auto removed = client.remove_image_background(background);
+  REQUIRE(removed);
+  REQUIRE(removed->media_type == "image/png");
+  capture = server.last_transform();
+  REQUIRE(capture.path == "/api/v1/image/background-remove");
+  REQUIRE(nlohmann::json::parse(capture.body) == background.to_json_body());
+  REQUIRE(nlohmann::json::parse(capture.body).contains("image_url"));
+  REQUIRE(server.image_transform_hits() == 4);
+}
+
+TEST_CASE("image multipart forms keep owned bytes names types and repeated order",
+          "[transport][images][transform][multipart]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+  const std::string first{{'P', 'N', char{0}, 'G'}};
+  const std::string second{{'W', 'E', static_cast<char>(0xFF), 'B', 'P'}};
+
+  ImageUpscaleRequest upscale;
+  upscale.image = venice::image_input::file(first, "source.png", "image/png");
+  upscale.creativity = 0.01;
+  upscale.scale = 2.0;
+  REQUIRE(client.upscale_image(upscale));
+  auto capture = server.last_transform();
+  REQUIRE(capture.path == "/api/v1/image/upscale");
+  REQUIRE(capture.content_type.starts_with("multipart/form-data; boundary="));
+  auto images = parts_named(capture, "image");
+  REQUIRE(images.size() == 1);
+  REQUIRE(images[0].content == first);
+  REQUIRE(images[0].filename == "source.png");
+  REQUIRE(images[0].content_type == "image/png");
+  REQUIRE(parts_named(capture, "creativity")[0].content == "0.01");
+  REQUIRE(parts_named(capture, "scale")[0].content == "2.0");
+
+  ImageEditRequest edit;
+  edit.image = venice::image_input::file(first, "source.png", "image/png");
+  edit.prompt = "paint it";
+  edit.model = "edit-model";
+  edit.output_format = "webp";
+  const auto edited = client.edit_image(edit);
+  REQUIRE(edited);
+  REQUIRE(edited->media_type == "image/webp");
+  capture = server.last_transform();
+  REQUIRE(capture.path == "/api/v1/image/edit");
+  REQUIRE(parts_named(capture, "prompt")[0].content == "paint it");
+  REQUIRE(parts_named(capture, "model")[0].content == "edit-model");
+
+  MultiImageEditRequest multi;
+  multi.images = {venice::image_input::file(first, "first.png", "image/png"),
+                  venice::image_input::file(second, "second.webp", "image/webp")};
+  multi.prompt = "combine them";
+  multi.model = "multi-model";
+  REQUIRE(client.multi_edit_image(multi));
+  capture = server.last_transform();
+  REQUIRE(capture.path == "/api/v1/image/multi-edit");
+  images = parts_named(capture, "images");
+  REQUIRE(images.size() == 2);
+  REQUIRE(images[0].content == first);
+  REQUIRE(images[0].filename == "first.png");
+  REQUIRE(images[1].content == second);
+  REQUIRE(images[1].filename == "second.webp");
+  REQUIRE(parts_named(capture, "modelId")[0].content == "multi-model");
+  REQUIRE(parts_named(capture, "model").empty());
+
+  ImageBackgroundRemovalRequest background;
+  background.image =
+      venice::image_input::file(second, "subject.webp", "image/webp");
+  REQUIRE(client.remove_image_background(background));
+  capture = server.last_transform();
+  REQUIRE(capture.path == "/api/v1/image/background-remove");
+  images = parts_named(capture, "image");
+  REQUIRE(images.size() == 1);
+  REQUIRE(images[0].content == second);
+  REQUIRE(images[0].filename == "subject.webp");
+  REQUIRE(images[0].content_type == "image/webp");
+}
+
+TEST_CASE("cancellation interrupts multipart image transformation upload",
+          "[transport][images][transform][cancel][failure]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+  ImageEditRequest request;
+  request.image = venice::image_input::file("PNG", "source.png", "image/png");
+  request.prompt = "stall";
+  venice::CancelToken token;
+  std::thread canceller{[&] {
+    while (server.image_transform_stall_hits() == 0)
+      std::this_thread::sleep_for(5ms);
+    token.cancel();
+  }};
+
+  std::expected<venice::GeneratedImageMedia, venice::Error> result;
+  const auto elapsed = timed(
+      [&] { result = client.edit_image(request, {.cancel = &token}); });
+  canceller.join();
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().kind == ErrorKind::Cancelled);
+  REQUIRE(elapsed < kPromptly);
+  REQUIRE(server.image_transform_stall_hits() == 1);
 }
 
 TEST_CASE("character detail rejects an empty slug before auth or transport",

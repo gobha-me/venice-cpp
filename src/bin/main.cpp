@@ -113,6 +113,39 @@ auto pick_by_modality(const venice::Client& client, std::string_view type,
   return pick;
 }
 
+// Edit and multi-edit share the inpaint catalogue, but the latter needs a
+// model that says it combines images. Selecting on that typed constraint makes
+// the live leg exercise the exact metadata the request is meant to consult.
+auto pick_for_image_edit(const venice::Client& client,
+                         std::size_t max_alternates = 4)
+    -> std::optional<ModelPick> {
+  const auto models = client.models("inpaint");
+  if (!models) {
+    std::cerr << "models(inpaint) failed ["
+              << venice::to_string(models.error().kind) << "] "
+              << models.error().message << '\n';
+    return std::nullopt;
+  }
+
+  ModelPick pick;
+  for (const auto& model : *models) {
+    if (!model.inpaint || !model.inpaint->constraints ||
+        model.inpaint->constraints->combine_images != true || model.id.empty())
+      continue;
+    if (pick.chosen.empty())
+      pick.chosen = model.id;
+    else if (pick.alternates.size() < max_alternates)
+      pick.alternates.push_back(model.id);
+    else
+      break;
+  }
+  if (pick.chosen.empty()) {
+    std::cerr << "no inpaint model reported combineImages=true\n";
+    return std::nullopt;
+  }
+  return pick;
+}
+
 // `rerun` names the command that runs this same leg on a named model, because
 // a list of alternates nobody can act on is decoration. Prints nothing beyond
 // the model when the caller named one — there are no runners-up to a choice
@@ -435,6 +468,96 @@ auto image_report(const venice::Client& client, std::string_view model) -> int {
   }
 
   std::cerr << "\nNo image bytes were decoded or written to disk.\n";
+  return agrees ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+// ── image transformations (VC-41, #66) ──────────────────────────────────
+//
+// A valid 256x256 solid-colour PNG, kept as base64 so the smoke leg performs
+// no decode and no filesystem I/O. Every operation receives the same owned
+// in-memory value; only the request contract changes.
+constexpr std::string_view kTransformSourceBase64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAACAElEQVR42u3TQQ0AAAjEsJOCNKQijTcaaFIFS5bqgbciAQYA"
+    "A4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAM"
+    "AAYAA4ABwABgADAAGAAMAAYAA4ABMIAKGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAM"
+    "AAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAbAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwA"
+    "BgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAG"
+    "UAEDgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAY"
+    "AAwABgADgAHAAGAAMAAYAAwABgADgAHAABgADAAGAAOAAcAAYAAwABgADAAGAAOAAcAAYAAwABgADAAGAAOAAcAAYAAwABgA"
+    "DAAGAAOAAcAAYAAwABgADAAGAAOAAcAAYAAwABgADAAGAAOAAcAAYAAwAFwL/kMSwY/0go4AAAAASUVORK5CYII=";
+
+auto image_transform_report(const venice::Client& client, std::string_view model)
+    -> int {
+  ModelPick pick;
+  if (model.empty()) {
+    auto selected = pick_for_image_edit(client);
+    if (!selected) return EXIT_FAILURE;
+    pick = std::move(*selected);
+  } else {
+    pick.chosen = std::string{model};
+  }
+  report_pick(pick, "type=inpaint and combineImages=true",
+              "`venice-cpp --image-transform <id>`");
+
+  bool agrees = true;
+  const auto report = [&](std::string_view label,
+                          const std::expected<venice::GeneratedImageMedia,
+                                              venice::Error>& result,
+                          std::span<const std::string_view> allowed) {
+    if (!result) {
+      std::cerr << label << " failed ["
+                << venice::to_string(result.error().kind) << "] "
+                << result.error().message << '\n';
+      if (!result.error().body.empty()) std::cerr << result.error().body << '\n';
+      agrees = false;
+      return;
+    }
+    std::cerr << label << ": " << result->media_type << ", "
+              << result->bytes.size() << " bytes";
+    if (result->metadata.x_balance_remaining)
+      std::cerr << ", balance=" << *result->metadata.x_balance_remaining;
+    std::cerr << '\n';
+    if (result->bytes.empty() ||
+        std::find(allowed.begin(), allowed.end(), result->media_type) == allowed.end()) {
+      std::cerr << "  EMPTY OR UNEXPECTED IMAGE MEDIA\n";
+      agrees = false;
+    }
+  };
+
+  venice::ImageUpscaleRequest upscale;
+  upscale.image = venice::image_input::base64(std::string{kTransformSourceBase64});
+  upscale.creativity = 0.01;
+  upscale.scale = 2;
+  static constexpr std::array<std::string_view, 1> kPng{"image/png"};
+  report("upscale", client.upscale_image(upscale), kPng);
+
+  venice::ImageEditRequest edit;
+  edit.image = venice::image_input::base64(std::string{kTransformSourceBase64});
+  edit.prompt = "Make the image a warm orange colour";
+  edit.model = pick.chosen;
+  edit.output_format = "png";
+  edit.safe_mode = true;
+  static constexpr std::array<std::string_view, 3> kEdited{
+      "image/jpeg", "image/png", "image/webp"};
+  report("edit", client.edit_image(edit), kEdited);
+
+  venice::MultiImageEditRequest multi;
+  multi.images = {
+      venice::image_input::base64(std::string{kTransformSourceBase64}),
+      venice::image_input::base64(std::string{kTransformSourceBase64}),
+  };
+  multi.prompt = "Combine the two images into one blue square";
+  multi.model = pick.chosen;
+  multi.output_format = "png";
+  multi.safe_mode = true;
+  report("multi-edit", client.multi_edit_image(multi), kEdited);
+
+  venice::ImageBackgroundRemovalRequest background;
+  background.image =
+      venice::image_input::base64(std::string{kTransformSourceBase64});
+  report("background removal", client.remove_image_background(background), kPng);
+
+  std::cerr << "No source or result image was decoded or written to disk.\n";
   return agrees ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
@@ -1834,7 +1957,7 @@ auto main(int argc, char** argv) -> int {
   if (key == nullptr || *key == '\0') {
     std::cerr << "VENICE_API_KEY not set; nothing to call with a credential.\n"
                  "(--traits, --compat, --modality and --styles need no key;\n"
-                 " --embeddings and --image need a key.)\n";
+                 " --embeddings, --image and --image-transform need a key.)\n";
     return EXIT_SUCCESS;
   }
 
@@ -1854,6 +1977,7 @@ auto main(int argc, char** argv) -> int {
   if (leg == "--usage") return usage_report(client, arg);
   if (leg == "--embeddings") return embeddings_report(client, arg);
   if (leg == "--image") return image_report(client, arg);
+  if (leg == "--image-transform") return image_transform_report(client, arg);
 
   const std::string prompt = argc > 1 ? argv[1] : "Say hello in one short sentence.";
 

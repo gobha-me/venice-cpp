@@ -179,6 +179,165 @@ TEST_CASE("image request guards reject only unsendable local structure",
   }
 }
 
+TEST_CASE("image transformation guards reject structurally unsendable inputs first",
+          "[images][transform][guards][failure]") {
+  SECTION("upscale rejects non-finite doubles before its missing image") {
+    venice::ImageUpscaleRequest request;
+    request.creativity = std::numeric_limits<double>::infinity();
+    const auto result = kClient.upscale_image(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().is(venice::ErrorKind::InvalidArg));
+    REQUIRE(result.error().message == "creativity is not finite");
+  }
+  SECTION("upscale accepts inline data or a file, but not a URL") {
+    venice::ImageUpscaleRequest request;
+    request.image = venice::image_input::url("https://example.test/source.png");
+    const auto result = kClient.upscale_image(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().message == "upscale image cannot be a URL");
+  }
+  SECTION("a multipart file owns bytes, filename and media type") {
+    venice::ImageEditRequest request;
+    request.prompt = "paint it";
+    request.image = venice::image_input::file("", "source.png", "image/png");
+    const auto no_bytes = kClient.edit_image(request);
+    REQUIRE_FALSE(no_bytes);
+    REQUIRE(no_bytes.error().message == "image file bytes are empty");
+
+    request.image = venice::image_input::file("PNG", "", "image/png");
+    const auto no_name = kClient.edit_image(request);
+    REQUIRE_FALSE(no_name);
+    REQUIRE(no_name.error().message == "image file name is empty");
+
+    request.image = venice::image_input::file("PNG", "source.png", "");
+    const auto no_type = kClient.edit_image(request);
+    REQUIRE_FALSE(no_type);
+    REQUIRE(no_type.error().message == "image file media type is empty");
+  }
+  SECTION("edit requires its prompt after validating the image") {
+    venice::ImageEditRequest request;
+    request.image = venice::image_input::base64("AAEC");
+    const auto result = kClient.edit_image(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().message == "prompt is empty");
+  }
+  SECTION("multi-edit rejects empty and mixed input collections") {
+    venice::MultiImageEditRequest request;
+    request.prompt = "combine them";
+    const auto empty = kClient.multi_edit_image(request);
+    REQUIRE_FALSE(empty);
+    REQUIRE(empty.error().message == "images are empty");
+
+    request.images = {
+        venice::image_input::base64("AAEC"),
+        venice::image_input::file("PNG", "layer.png", "image/png"),
+    };
+    const auto mixed = kClient.multi_edit_image(request);
+    REQUIRE_FALSE(mixed);
+    REQUIRE(mixed.error().message ==
+            "multi-edit images must be all files or all inline/URL values");
+  }
+  SECTION("background removal requires one non-empty source") {
+    venice::ImageBackgroundRemovalRequest request;
+    const auto missing = kClient.remove_image_background(request);
+    REQUIRE_FALSE(missing);
+    REQUIRE(missing.error().message == "image is empty");
+  }
+  SECTION("JSON passthrough is not silently discarded by multipart selection") {
+    venice::ImageUpscaleRequest request;
+    request.image = venice::image_input::file("PNG", "source.png", "image/png");
+    request.extra = nlohmann::json{{"future", true}};
+    const auto result = kClient.upscale_image(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().message ==
+            "JSON extra fields cannot be used with multipart image input");
+  }
+}
+
+TEST_CASE("image input builders retain the caller's representation verbatim",
+          "[images][transform][request]") {
+  const auto encoded = venice::image_input::base64("AAEC");
+  REQUIRE(std::get<venice::InlineImage>(encoded).value == "AAEC");
+
+  const auto data_url = venice::image_input::data_url("data:image/png;base64,AAEC");
+  REQUIRE(std::get<venice::InlineImage>(data_url).value ==
+          "data:image/png;base64,AAEC");
+
+  const auto url = venice::image_input::url("https://example.test/source.png");
+  REQUIRE(std::get<venice::ImageUrl>(url).value ==
+          "https://example.test/source.png");
+
+  const auto file = venice::image_input::file(
+      std::string{{'P', 'N', char{0}, 'G'}}, "source.png", "image/png");
+  const auto& uploaded = std::get<venice::ImageFile>(file);
+  REQUIRE(uploaded.bytes == std::string{{'P', 'N', char{0}, 'G'}});
+  REQUIRE(uploaded.filename == "source.png");
+  REQUIRE(uploaded.media_type == "image/png");
+}
+
+TEST_CASE("image transformation JSON contracts keep endpoint wire spelling distinct",
+          "[images][transform][request]") {
+  SECTION("upscale") {
+    venice::ImageUpscaleRequest request;
+    request.image = venice::image_input::base64("AAEC");
+    request.creativity = -4.5;  // server-owned range passes through
+    request.scale = 9.25;
+    request.extra = nlohmann::json{{"scale", 2}, {"future", true}};
+    const auto body = request.to_json_body();
+    REQUIRE(body == nlohmann::json{{"image", "AAEC"},
+                                   {"creativity", -4.5},
+                                   {"scale", 9.25},
+                                   {"future", true}});
+  }
+  SECTION("single edit uses model, not the multi-edit modelId spelling") {
+    venice::ImageEditRequest request;
+    request.image = venice::image_input::url("https://example.test/source.png");
+    request.prompt = "paint it";
+    request.model = "future-edit-model";
+    request.safe_mode = false;
+    request.extra = nlohmann::json{{"model", "shadow"}, {"future", 7}};
+    const auto body = request.to_json_body();
+    REQUIRE(body["image"] == "https://example.test/source.png");
+    REQUIRE(body["prompt"] == "paint it");
+    REQUIRE(body["model"] == "future-edit-model");
+    REQUIRE_FALSE(body.contains("modelId"));
+    REQUIRE(body["safe_mode"] == false);
+    REQUIRE(body["future"] == 7);
+  }
+  SECTION("multi-edit preserves JSON ordering and literal modelId") {
+    venice::MultiImageEditRequest request;
+    request.images = {venice::image_input::url("https://example.test/base.png"),
+                      venice::image_input::base64("LAYER")};
+    request.prompt = "combine them";
+    request.model = "future-multi-model";
+    request.quality = "future-quality";
+    request.extra = nlohmann::json{{"modelId", "shadow"}, {"future", 8}};
+    const auto body = request.to_json_body();
+    REQUIRE(body["images"] == nlohmann::json::array(
+                                  {"https://example.test/base.png", "LAYER"}));
+    REQUIRE(body["modelId"] == "future-multi-model");
+    REQUIRE_FALSE(body.contains("model"));
+    REQUIRE(body["quality"] == "future-quality");
+    REQUIRE(body["future"] == 8);
+  }
+  SECTION("background removal emits exactly one source key") {
+    venice::ImageBackgroundRemovalRequest request;
+    request.image = venice::image_input::url("https://example.test/source.png");
+    request.extra = nlohmann::json{{"image", "shadow"},
+                                   {"image_url", "shadow"},
+                                   {"future", 9}};
+    auto body = request.to_json_body();
+    REQUIRE_FALSE(body.contains("image"));
+    REQUIRE(body["image_url"] == "https://example.test/source.png");
+    REQUIRE(body["future"] == 9);
+
+    request.image = venice::image_input::base64("AAEC");
+    body = request.to_json_body();
+    REQUIRE(body["image"] == "AAEC");
+    REQUIRE_FALSE(body.contains("image_url"));
+  }
+}
+
 TEST_CASE("native image request omits unset fields and modeled values win",
           "[images][request]") {
   auto request = minimal_native_request();

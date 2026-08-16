@@ -36,14 +36,19 @@ AGENTS.md (which holds standing conventions, not state).
   JPEG/PNG/WebP selected by actual response media type;
   `generate_image_openai(request)` for the distinct compatibility contract;
   and public `image_styles()` discovery (VC-40).
+- `upscale_image`, `edit_image`, `multi_edit_image` and
+  `remove_image_background` — JSON or multipart selected by explicit owned
+  input form, with byte-exact media results and no decode/write side effects
+  (VC-41).
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   payment_required/rate_limited/invalid_arg/cancelled, each carrying status +
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 12/49 operations implemented. The other 37 are assigned to
-  family issues and checked in `cmake/openapi_manifest.json` (VC-35). Characters
+- OpenAPI coverage: 16/49 operations implemented. One retired operation is
+  explicitly unsupported and the other 32 are assigned to family issues and
+  checked in `cmake/openapi_manifest.json` (VC-35). Characters
   and Models are both 3/3 on operations, and since VC-39 the `Model` metadata
   half is done too. Music and ASR remain deliberately raw rather than keeping
   the completed Models family open on shapes no current endpoint consumes.
@@ -82,7 +87,7 @@ a single-family run.
    case in `test/07stream/` whose deliberate inversion is the ticket's
    acceptance criterion. The hard half is streaming: a merge rule for arbitrary
    unmodeled keys across fragments has no wire evidence to choose it yet.
-3. Thicken endpoints as AIForge/KDE need them (image edit/upscale, audio/video, TTS,
+3. Thicken endpoints as AIForge/KDE need them (audio/video, TTS,
    retries/backoff, async). Driven by real use, not
    speculatively.
 4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
@@ -138,6 +143,34 @@ count was taken after skipping; literal `2x` pricing was renamed; public styles
 were forced through authenticated policy; and the non-finite `cfg_scale` guard
 was removed. Each break failed the assertion intended to own it and was
 reverted before the compiler matrix.
+
+**VC-41 (#66) is implemented for v0.20.0.** The four remaining image
+operations now share an explicit `ImageInput` vocabulary without flattening
+their request contracts: inline encoded values and URLs select JSON where the
+endpoint accepts them, while owned bytes plus filename/media type select
+multipart. Multi-edit preserves ordered repeated file parts and rejects a
+mixed file/reference collection before transport. Its input maximum remains a
+catalogue policy rather than a client guard; the 2026-08-16 live catalogue has
+models reporting six, disproving the older three-image ticket wording.
+
+All four successful calls return `GeneratedImageMedia`. Upscale and background
+removal require actual PNG success; edit and multi-edit accept actual JPEG,
+PNG or WebP. Non-2xx classification remains ahead of that media check, and
+bytes, response headers and x402 metadata stay exact. The smoke leg uses an
+in-memory source and never decodes or writes output.
+
+The live leg passed all four operations on 2026-08-16 with
+`firered-image-edit`, naming `qwen-edit-uncensored`, three Grok edit variants
+and the remaining qualifying catalogue entries as rerunnable alternatives.
+Every response was a non-empty PNG. Its first run also did useful work: three
+operations rejected a corrupt embedded PNG that background removal happened to
+accept, so the fixture was rebuilt with valid chunk CRCs before the passing run.
+
+The same audit moved the checked OpenAPI source to `20260814.194349` /
+`9fe43a1a…`. It found a non-image contract change: `GET /billing/usage` is now
+public and 410-only. A keyless live request on 2026-08-16 confirmed the 410 and
+the successor link to `/billing/usage-history`, so the manifest records that
+operation as unsupported rather than exposing a method that cannot succeed.
 
 **VC-39 (#60) is done** — see v0.17.0, and it is the ticket that pays for the
 "measure first" habit most visibly.
