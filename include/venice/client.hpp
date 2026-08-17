@@ -35,6 +35,8 @@
 //   * delete_api_key(id)            -> expected<ApiKeyDeleteResult>
 //   * api_key_rate_limits()         -> expected<ApiKeyRateLimits>
 //   * api_key_rate_limit_logs()     -> expected<ApiKeyRateLimitLogPage>
+//   * web3_api_key_challenge()      -> expected<Web3ApiKeyChallenge>
+//   * create_web3_api_key(request)  -> expected<ApiKeyCreated>
 //   * balance()                     -> expected<json>           (rate-limit/balance)
 //
 // A ChatResponse carries the whole assistant turn as a Message, so a reply can
@@ -343,7 +345,7 @@ struct JsonResponse {
   ResponseMetadata metadata = {};
 };
 
-enum class AuthPolicy { PublicOrBearer, BearerOnly, BearerOrSignInWithX };
+enum class AuthPolicy { PublicOnly, PublicOrBearer, BearerOnly, BearerOrSignInWithX };
 
 [[nodiscard]] inline auto authentication_headers(const Authentication& authentication)
     -> std::expected<httplib::Headers, Error> {
@@ -370,6 +372,7 @@ enum class AuthPolicy { PublicOrBearer, BearerOnly, BearerOrSignInWithX };
 [[nodiscard]] inline auto authentication_allowed(AuthenticationKind kind, AuthPolicy policy)
     -> bool {
   switch (policy) {
+    case AuthPolicy::PublicOnly: return kind == AuthenticationKind::Public;
     case AuthPolicy::PublicOrBearer:
       return kind == AuthenticationKind::Public || kind == AuthenticationKind::Bearer;
     case AuthPolicy::BearerOnly: return kind == AuthenticationKind::Bearer;
@@ -381,6 +384,7 @@ enum class AuthPolicy { PublicOrBearer, BearerOnly, BearerOrSignInWithX };
 
 [[nodiscard]] inline auto auth_policy_name(AuthPolicy policy) -> std::string_view {
   switch (policy) {
+    case AuthPolicy::PublicOnly: return "public";
     case AuthPolicy::PublicOrBearer: return "public or Bearer";
     case AuthPolicy::BearerOnly: return "Bearer";
     case AuthPolicy::BearerOrSignInWithX: return "Bearer or Sign-In-With-X";
@@ -1422,6 +1426,59 @@ class Client {
     }
   }
 
+  // The wallet proof in create_web3_api_key's JSON body is this operation's
+  // authentication. It is not SIWX and never becomes an Authorization,
+  // SIGN-IN-WITH-X or PAYMENT-SIGNATURE header. Requiring explicit Public
+  // transport state prevents an otherwise unrelated client credential from
+  // riding along to an endpoint whose audited security declaration is empty.
+  [[nodiscard]] auto web3_api_key_challenge(const RequestOptions& opts = {}) const
+      -> std::expected<Web3ApiKeyChallenge, Error> {
+    auto res = get_json_response("/api_keys/generate_web3_key",
+                                 detail::AuthPolicy::PublicOnly, opts);
+    if (!res) {
+      auto error = std::move(res.error());
+      if (!error.body.empty())
+        error.body = detail::redacted_web3_api_key_body(error.body);
+      return std::unexpected{std::move(error)};
+    }
+    try {
+      auto response = web3_api_key_challenge_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{
+          ErrorKind::Parse, res->status,
+          std::string{"Web3 API-key challenge parse: "} + e.what(),
+          detail::redacted_web3_api_key_body(res->raw_body), std::move(res->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto create_web3_api_key(
+      const Web3ApiKeyCreateRequest& request,
+      const RequestOptions& opts = {}) const -> std::expected<ApiKeyCreated, Error> {
+    if (auto ok = validate(request); !ok)
+      return std::unexpected{std::move(ok.error())};
+    auto res = post_json_response("/api_keys/generate_web3_key", request.to_json_body(),
+                                  detail::AuthPolicy::PublicOnly, opts);
+    if (!res) {
+      auto error = std::move(res.error());
+      if (!error.body.empty())
+        error.body = detail::redacted_web3_api_key_body(error.body);
+      return std::unexpected{std::move(error)};
+    }
+    try {
+      auto response = api_key_created_from_json_body(res->body);
+      response.raw = detail::redacted_web3_api_key_json(std::move(response.raw));
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{
+          ErrorKind::Parse, res->status,
+          std::string{"Web3 API-key create parse: "} + e.what(),
+          detail::redacted_web3_api_key_body(res->raw_body), std::move(res->metadata)}};
+    }
+  }
+
   // Historical API-key rate-limit spelling. This is not billing_balance().
   // The return type stays byte-for-byte source compatible; the implementation
   // now shares the typed parser and hands back its retained envelope.
@@ -1694,6 +1751,23 @@ class Client {
       return std::unexpected{
           Error{ErrorKind::InvalidArg, 0, "API key id must not be empty", {}}};
     return {};
+  }
+
+  [[nodiscard]] static auto validate(const Web3ApiKeyCreateRequest& req)
+      -> std::expected<void, Error> {
+    if (req.api_key_type.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "Web3 API key type must not be empty", {}}};
+    if (req.address.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "Web3 wallet address must not be empty", {}}};
+    if (req.signature.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "Web3 wallet signature must not be empty", {}}};
+    if (req.token.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "Web3 challenge token must not be empty", {}}};
+    return validate_api_key_limits(req.consumption_limit);
   }
 
   [[nodiscard]] auto request_headers(detail::AuthPolicy policy,

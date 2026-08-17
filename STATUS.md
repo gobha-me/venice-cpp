@@ -54,14 +54,17 @@ AGENTS.md (which holds standing conventions, not state).
   `api_key_rate_limits` and ordered `api_key_rate_limit_logs`. The historical
   `balance()` spelling remains source-compatible and returns the typed rate-
   limit response's retained raw envelope (VC-43).
+- `web3_api_key_challenge` and `create_web3_api_key` — public wallet-proof
+  token/sign/create flow with caller-owned proof material, explicit public-only
+  transport and redacted raw/error copies (VC-44).
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   payment_required/rate_limited/invalid_arg/cancelled, each carrying status +
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 25/49 operations implemented. One retired operation is
-  explicitly unsupported and the other 23 are assigned to family issues and
+- OpenAPI coverage: 27/49 operations implemented. One retired operation is
+  explicitly unsupported and the other 21 are assigned to family issues and
   checked in `cmake/openapi_manifest.json` (VC-35). Characters
   and Models are both 3/3 on operations, and since VC-39 the `Model` metadata
   half is done too. Music and ASR remain deliberately raw rather than keeping
@@ -107,6 +110,36 @@ a single-family run.
 4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
 
+**VC-44 (#72) is implemented for v0.23.0.** The two public
+`/api_keys/generate_web3_key` operations complete the API-key family. GET
+returns a typed wallet challenge; POST accepts the caller's address, signature
+and token plus the same optional key policy fields as administrative creation.
+Wallet value formats remain server-owned strings, while empty required proof
+fields and non-finite modeled limits fail before transport.
+
+The endpoint's audited empty security declaration is enforced as public-only
+transport state. A Bearer, SIWX or x402 client fails before a socket unless the
+call explicitly overrides authentication to Public, and successful fixtures
+prove no authentication header reaches the peer. The JSON signature is not
+`Authentication::sign_in_with_x`: the library neither owns a private key nor
+signs or verifies wallet proof.
+
+Challenge tokens, signatures and complete API keys are reachable only through
+their deliberate typed/request fields. Retained Web3 trees and valid-JSON error
+bodies recursively redact `token`, `signature` and `apiKey`; an unsafe non-JSON
+body becomes a redacted marker while status and metadata remain intact. There
+is no CLI flow because even the read operation returns proof material and the
+write operation creates a credential.
+
+The manifest now records 27/49 operations implemented. Offline failure matrices
+cover exact methods, path, JSON, absent headers, public override, structural and
+finiteness guards, 400/401/402/429/500, wrong media, malformed bodies, secret
+redaction and cancellation. A redacted live GET shape check agreed with the
+pinned OpenAPI document. During a deliberate guard break, one synthetic request
+with an empty token escaped the original socket-free fixture and Venice rejected
+it with 400; the fixture now points at loopback, no credential was created, and
+no successful live POST was attempted.
+
 **VC-43 (#70) is implemented for v0.22.0.** Six previously absent API-key
 operations now join the typed rate-limit view: list/detail/create/update/delete
 and the last-50 exceeded-limit log. Listing entries tolerate odd fields without
@@ -126,8 +159,8 @@ create result. Its retained raw tree and create-error bodies redact nested
 `apiKey` values. No display helper, diagnostic or committed smoke leg prints it.
 `venice-cpp --api-keys` is deliberately read-only: it reports list/detail/rate-
 limit/log envelopes and reconciles raw versus typed shapes without creating,
-updating or deleting account state. The two public Web3 token/sign/mint
-operations remain under #45 as a separate wallet-protocol ticket.
+updating or deleting account state. The public Web3 wallet-protocol operations
+were completed separately in VC-44.
 
 The manifest now records 25/49 operations implemented. The release keeps
 `balance()` at its existing `expected<json, Error>` signature; internally it

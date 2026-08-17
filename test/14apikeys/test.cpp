@@ -1,4 +1,4 @@
-// API-key request and response contracts (VC-43, #70).
+// API-key request and response contracts (VC-43/#70 and VC-44/#72).
 //
 // Fixtures are synthetic from Venice OpenAPI 20260814.194349. Complete key
 // material is represented by an unmistakable non-credential marker and is
@@ -32,7 +32,10 @@ auto key_object() -> nlohmann::json {
   };
 }
 
-const venice::Client kPublic{venice::Authentication::public_access()};
+const venice::Client kPublic{venice::Authentication::public_access(),
+                             "http://127.0.0.1:1/api/v1"};
+const venice::Client kBearer{venice::Authentication::bearer("synthetic-bearer"),
+                             "http://127.0.0.1:1/api/v1"};
 
 }  // namespace
 
@@ -45,6 +48,35 @@ TEST_CASE("API-key parsers reject malformed envelopes", "[api-keys][parse][failu
   REQUIRE_THROWS(venice::api_key_delete_from_json_body(nlohmann::json{{"success", 1}}));
   REQUIRE_THROWS(venice::api_key_rate_limits_from_json_body(nlohmann::json{{"data", nlohmann::json::array()}}));
   REQUIRE_THROWS(venice::api_key_rate_limit_logs_from_json_body(nlohmann::json{{"data", nlohmann::json::object()}}));
+  REQUIRE_THROWS(venice::web3_api_key_challenge_from_json_body(nlohmann::json::array()));
+  REQUIRE_THROWS(venice::web3_api_key_challenge_from_json_body(
+      nlohmann::json{{"success", true}, {"data", nlohmann::json::array()}}));
+  REQUIRE_THROWS(venice::web3_api_key_challenge_from_json_body(
+      nlohmann::json{{"success", "yes"}, {"data", {{"token", "secret"}}}}));
+  REQUIRE_THROWS(venice::web3_api_key_challenge_from_json_body(
+      nlohmann::json{{"success", true}, {"data", {{"token", 7}}}}));
+}
+
+TEST_CASE("Web3 challenge parsing exposes one secret field and redacts every raw copy",
+          "[api-keys][web3][parse][security]") {
+  const nlohmann::json body{
+      {"data", {{"token", "SYNTHETIC_CHALLENGE_SECRET"}, {"future", true}}},
+      {"success", true},
+      {"futureEnvelope",
+       {{"signature", "SYNTHETIC_SIGNATURE_SECRET"},
+        {"apiKey", "SYNTHETIC_API_KEY_SECRET"}}},
+  };
+  const auto challenge = venice::web3_api_key_challenge_from_json_body(body);
+  REQUIRE(challenge.success);
+  REQUIRE(challenge.token == "SYNTHETIC_CHALLENGE_SECRET");
+  REQUIRE(challenge.raw["data"]["token"] == "[REDACTED]");
+  REQUIRE(challenge.raw["data"]["future"] == true);
+  REQUIRE(challenge.raw["futureEnvelope"]["signature"] == "[REDACTED]");
+  REQUIRE(challenge.raw["futureEnvelope"]["apiKey"] == "[REDACTED]");
+  REQUIRE(challenge.raw.dump().find("SYNTHETIC_CHALLENGE_SECRET") ==
+          std::string::npos);
+  REQUIRE(venice::detail::redacted_web3_api_key_body("not-json") ==
+          "[REDACTED: non-JSON Web3 API-key response]");
 }
 
 TEST_CASE("API-key listings retain absent zero malformed and raw states", "[api-keys][parse]") {
@@ -122,6 +154,51 @@ TEST_CASE("API-key requests emit engaged fields and modeled fields win", "[api-k
   REQUIRE(guarded.is_object());
   REQUIRE_FALSE(guarded.contains("future"));
   REQUIRE(guarded["consumptionLimit"] == nlohmann::json{{"usd", 0.0}});
+}
+
+TEST_CASE("Web3 API-key requests keep wallet proof raw-shaped and modeled-wins",
+          "[api-keys][web3][request]") {
+  venice::Web3ApiKeyCreateRequest request{
+      .api_key_type = "FUTURE_TYPE",
+      .address = "synthetic-address",
+      .signature = "SYNTHETIC_SIGNATURE_SECRET",
+      .token = "SYNTHETIC_CHALLENGE_SECRET",
+      .consumption_limit = venice::ApiKeyConsumptionLimitRequest{
+          .usd = 0.0,
+          .extra = {{"usd", 999}, {"futureLimit", true}},
+      },
+      .limit_period = "FUTURE_PERIOD",
+      .description = "",
+      .expires_at = "",
+      .extra = {{"apiKeyType", "shadow"},
+                {"address", "shadow"},
+                {"signature", "shadow"},
+                {"token", "shadow"},
+                {"future", 1}},
+  };
+  const auto body = request.to_json_body();
+  REQUIRE(body["apiKeyType"] == "FUTURE_TYPE");
+  REQUIRE(body["address"] == "synthetic-address");
+  REQUIRE(body["signature"] == "SYNTHETIC_SIGNATURE_SECRET");
+  REQUIRE(body["token"] == "SYNTHETIC_CHALLENGE_SECRET");
+  REQUIRE(body["consumptionLimit"]["usd"] == 0.0);
+  REQUIRE(body["consumptionLimit"]["futureLimit"] == true);
+  REQUIRE(body["limitPeriod"] == "FUTURE_PERIOD");
+  REQUIRE(body["description"] == "");
+  REQUIRE(body["expiresAt"] == "");
+  REQUIRE(body["future"] == 1);
+
+  request.consumption_limit.reset();
+  request.limit_period.reset();
+  request.description.reset();
+  request.expires_at.reset();
+  request.extra = nlohmann::json::array({1});
+  const auto minimal = request.to_json_body();
+  REQUIRE(minimal.size() == 4);
+  REQUIRE_FALSE(minimal.contains("consumptionLimit"));
+  REQUIRE_FALSE(minimal.contains("limitPeriod"));
+  REQUIRE_FALSE(minimal.contains("description"));
+  REQUIRE_FALSE(minimal.contains("expiresAt"));
 }
 
 TEST_CASE("create update and delete results keep success and secret boundaries", "[api-keys][parse]") {
@@ -231,4 +308,50 @@ TEST_CASE("API-key guards reject structural and non-representable input only", "
   });
   REQUIRE_FALSE(pass);
   REQUIRE(pass.error().message == "endpoint requires Bearer authentication");
+}
+
+TEST_CASE("Web3 API-key guards reject missing proof and non-finite limits only",
+          "[api-keys][web3][guards][failure]") {
+  const venice::Web3ApiKeyCreateRequest valid{
+      .api_key_type = "FUTURE_TYPE",
+      .address = "synthetic-address",
+      .signature = "SYNTHETIC_SIGNATURE_SECRET",
+      .token = "SYNTHETIC_CHALLENGE_SECRET",
+  };
+
+  auto missing = valid;
+  missing.api_key_type.clear();
+  REQUIRE(kPublic.create_web3_api_key(missing).error().message ==
+          "Web3 API key type must not be empty");
+  missing = valid;
+  missing.address.clear();
+  REQUIRE(kPublic.create_web3_api_key(missing).error().message ==
+          "Web3 wallet address must not be empty");
+  missing = valid;
+  missing.signature.clear();
+  REQUIRE(kPublic.create_web3_api_key(missing).error().message ==
+          "Web3 wallet signature must not be empty");
+  missing = valid;
+  missing.token.clear();
+  REQUIRE(kPublic.create_web3_api_key(missing).error().message ==
+          "Web3 challenge token must not be empty");
+
+  auto non_finite = valid;
+  non_finite.consumption_limit = venice::ApiKeyConsumptionLimitRequest{
+      .diem = std::numeric_limits<double>::infinity()};
+  REQUIRE(kPublic.create_web3_api_key(non_finite).error().message ==
+          "consumption_limit.diem is not finite");
+
+  // No local enum, range, address, token or signature-format opinion: all
+  // finite caller values reach auth selection. A Bearer client proves that
+  // without putting the synthetic proof on a socket.
+  auto future = valid;
+  future.api_key_type = "FUTURE_TYPE";
+  future.address = "not-an-ethereum-address";
+  future.signature = "caller-owned-format";
+  future.token = "caller-owned-token";
+  future.consumption_limit = venice::ApiKeyConsumptionLimitRequest{.usd = -1.0};
+  const auto pass = kBearer.create_web3_api_key(future);
+  REQUIRE_FALSE(pass);
+  REQUIRE(pass.error().message == "endpoint requires public authentication");
 }

@@ -393,6 +393,17 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   server-owned strings. `balance()` keeps its historical `expected<json,
   Error>` source contract by returning `api_key_rate_limits()`'s retained raw
   envelope rather than preserving a second parser (VC-43).
+- **Web3 API-key proof is public body authentication, not SIWX.**
+  `web3_api_key_challenge()` requires Public transport state and returns its
+  token only through the typed field; `create_web3_api_key()` accepts a
+  caller-produced address, signature and token in JSON and reuses the one-time
+  `ApiKeyCreated` result. Bearer, SIWX and x402 modes fail before a socket unless
+  the call explicitly overrides to Public, so unrelated client credentials do
+  not ride along to an endpoint whose audited security declaration is empty.
+  The client never owns a wallet key, signs or verifies the proof, or adds a
+  crypto dependency. Retained Web3 trees and errors redact `token`, `signature`
+  and `apiKey`; unsafe non-JSON bodies become a redacted marker. There is no CLI
+  leg because GET returns proof material and POST creates a credential (VC-44).
 - **KDE/Qt-readiness:** keep the library UI-free and Qt-linkable. No Qt types
   in the API client; a separate service layer owns D-Bus/KF concerns.
 
