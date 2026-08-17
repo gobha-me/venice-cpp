@@ -3521,6 +3521,35 @@ inline void redact_api_key_material(nlohmann::json& value) {
   return parsed.dump();
 }
 
+inline void redact_web3_api_key_material(nlohmann::json& value) {
+  if (value.is_object()) {
+    for (auto& [key, child] : value.items()) {
+      if (key == "apiKey" || key == "token" || key == "signature")
+        child = "[REDACTED]";
+      else
+        redact_web3_api_key_material(child);
+    }
+    return;
+  }
+  if (value.is_array())
+    for (auto& child : value) redact_web3_api_key_material(child);
+}
+
+[[nodiscard]] inline auto redacted_web3_api_key_json(nlohmann::json value)
+    -> nlohmann::json {
+  redact_web3_api_key_material(value);
+  return value;
+}
+
+[[nodiscard]] inline auto redacted_web3_api_key_body(std::string_view body)
+    -> std::string {
+  auto parsed = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+  if (parsed.is_discarded())
+    return "[REDACTED: non-JSON Web3 API-key response]";
+  redact_web3_api_key_material(parsed);
+  return parsed.dump();
+}
+
 [[nodiscard]] inline auto api_key_consumption_limits_from_json(const nlohmann::json& j)
     -> ApiKeyConsumptionLimits {
   ApiKeyConsumptionLimits limits;
@@ -3574,6 +3603,36 @@ inline void redact_api_key_material(nlohmann::json& value) {
 }
 
 }  // namespace detail
+
+struct Web3ApiKeyChallenge {
+  // Caller-owned proof material: pass this value to the wallet signer and then
+  // to Web3ApiKeyCreateRequest::token. No raw tree duplicates it.
+  std::string token{};
+  bool success{false};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+[[nodiscard]] inline auto web3_api_key_challenge_from_json_body(
+    const nlohmann::json& j) -> Web3ApiKeyChallenge {
+  if (!j.is_object())
+    throw std::runtime_error{"Web3 API-key challenge: response must be an object"};
+  const auto& success = j.at("success");
+  const auto& data = j.at("data");
+  if (!success.is_boolean())
+    throw std::runtime_error{"Web3 API-key challenge: success must be a boolean"};
+  if (!data.is_object())
+    throw std::runtime_error{"Web3 API-key challenge: data must be an object"};
+  const auto& token = data.at("token");
+  if (!token.is_string())
+    throw std::runtime_error{"Web3 API-key challenge: token must be a string"};
+
+  return Web3ApiKeyChallenge{
+      .token = token.get<std::string>(),
+      .success = success.get<bool>(),
+      .raw = detail::redacted_web3_api_key_json(j),
+  };
+}
 
 struct ApiKeyList {
   std::vector<ApiKey> entries{};
@@ -3653,6 +3712,31 @@ struct ApiKeyUpdateRequest {
   [[nodiscard]] auto to_json_body() const -> nlohmann::json {
     nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
     j["id"] = id;
+    if (consumption_limit) j["consumptionLimit"] = consumption_limit->to_json_body();
+    if (limit_period) j["limitPeriod"] = *limit_period;
+    if (description) j["description"] = *description;
+    if (expires_at) j["expiresAt"] = *expires_at;
+    return j;
+  }
+};
+
+struct Web3ApiKeyCreateRequest {
+  std::string api_key_type{};
+  std::string address{};
+  std::string signature{};
+  std::string token{};
+  std::optional<ApiKeyConsumptionLimitRequest> consumption_limit{};
+  std::optional<std::string> limit_period{};
+  std::optional<std::string> description{};
+  std::optional<std::string> expires_at{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["apiKeyType"] = api_key_type;
+    j["address"] = address;
+    j["signature"] = signature;
+    j["token"] = token;
     if (consumption_limit) j["consumptionLimit"] = consumption_limit->to_json_body();
     if (limit_period) j["limitPeriod"] = *limit_period;
     if (description) j["description"] = *description;

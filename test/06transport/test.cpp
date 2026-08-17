@@ -121,6 +121,18 @@ struct CapturedTransform {
   std::vector<CapturedTransformPart> parts{};
 };
 
+enum class Web3ChallengeMode { Success, HttpError, WrongMedia, WrongShape, MalformedJson };
+
+struct CapturedWeb3Request {
+  std::string method{};
+  std::string path{};
+  std::string content_type{};
+  std::string authorization{};
+  std::string siwx{};
+  std::string payment{};
+  std::string body{};
+};
+
 // A peer that can be made to stop answering.
 //
 //   GET  /api/v1/api_keys/rate_limits — accepts, then never answers (until
@@ -144,7 +156,9 @@ struct CapturedTransform {
 // no clock reading can establish.
 class TestServer {
  public:
-  TestServer() {
+  explicit TestServer(Web3ChallengeMode web3_challenge_mode =
+                          Web3ChallengeMode::Success)
+      : m_web3_challenge_mode(web3_challenge_mode) {
     const auto echo = [](const httplib::Request& req, httplib::Response& res) {
       nlohmann::json body;
       body["method"] = req.method;
@@ -355,6 +369,107 @@ class TestServer {
                            .dump(),
                        "application/json");
                  });
+
+    m_svr.Get("/api/v1/api_keys/generate_web3_key",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                ++m_web3_api_key_hits;
+                capture_web3(req);
+                res.set_header("X-Test-Response", "web3-api-key-challenge");
+                switch (m_web3_challenge_mode) {
+                  case Web3ChallengeMode::HttpError:
+                    res.status = 401;
+                    res.set_header("X-Protocol-Trace", "web3-challenge-http");
+                    res.set_content(
+                        nlohmann::json{
+                            {"error", "denied"},
+                            {"data", {{"token", "SYNTHETIC_CHALLENGE_SECRET"}}},
+                            {"signature", "SYNTHETIC_SIGNATURE_SECRET"},
+                            {"apiKey", "SYNTHETIC_API_KEY_SECRET"}}
+                            .dump(),
+                        "application/json");
+                    return;
+                  case Web3ChallengeMode::WrongMedia:
+                    res.set_content("SYNTHETIC_CHALLENGE_SECRET", "text/plain");
+                    return;
+                  case Web3ChallengeMode::WrongShape:
+                    res.set_content(
+                        nlohmann::json{{"success", "yes"},
+                                       {"data", {{"token", "SYNTHETIC_CHALLENGE_SECRET"}}}}
+                            .dump(),
+                        "application/json");
+                    return;
+                  case Web3ChallengeMode::MalformedJson:
+                    res.set_content("{SYNTHETIC_CHALLENGE_SECRET", "application/json");
+                    return;
+                  case Web3ChallengeMode::Success:
+                    res.set_content(
+                        nlohmann::json{
+                            {"data",
+                             {{"token", "SYNTHETIC_CHALLENGE_SECRET"},
+                              {"future", true}}},
+                            {"success", true},
+                            {"futureEnvelope",
+                             {{"signature", "SYNTHETIC_SIGNATURE_SECRET"}}}}
+                            .dump(),
+                        "application/json");
+                    return;
+                }
+              });
+
+    m_svr.Post("/api/v1/api_keys/generate_web3_key",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_web3_api_key_hits;
+                 capture_web3(req);
+                 res.set_header("X-Test-Response", "web3-api-key-create");
+                 const auto body = nlohmann::json::parse(req.body);
+                 const auto secret_response = [&] {
+                   return nlohmann::json{
+                       {"data",
+                        {{"apiKey", "SYNTHETIC_WEB3_API_KEY_SECRET"},
+                         {"apiKeyType", body.at("apiKeyType")},
+                         {"consumptionLimit", body.value("consumptionLimit",
+                                                         nlohmann::json::object())},
+                         {"limitPeriod", body.value("limitPeriod", "EPOCH")},
+                         {"description", body.value("description", "Web3 API Key")},
+                         {"expiresAt", body.value("expiresAt", nlohmann::json(nullptr))},
+                         {"id", "fixture-web3-key-id"}}},
+                       {"success", true},
+                       {"seenBody", body},
+                   };
+                 };
+
+                 if (const auto status = body.value("forceStatus", 0); status != 0) {
+                   res.status = status;
+                   res.set_header("X-Protocol-Trace", "web3-create-http");
+                   res.set_content(
+                       nlohmann::json{{"error", "denied"},
+                                      {"token", body.at("token")},
+                                      {"signature", body.at("signature")},
+                                      {"apiKey", "SYNTHETIC_WEB3_API_KEY_SECRET"}}
+                           .dump(),
+                       "application/json");
+                   return;
+                 }
+                 if (body.value("forceWrongMedia", false)) {
+                   res.set_content("SYNTHETIC_CHALLENGE_SECRET", "text/plain");
+                   return;
+                 }
+                 if (body.value("forceMalformedJson", false)) {
+                   res.set_content("{SYNTHETIC_SIGNATURE_SECRET", "application/json");
+                   return;
+                 }
+                 if (body.value("forceWrongShape", false)) {
+                   res.set_content(
+                       nlohmann::json{{"data",
+                                       {{"token", body.at("token")},
+                                        {"signature", body.at("signature")},
+                                        {"apiKey", "SYNTHETIC_WEB3_API_KEY_SECRET"}}}}
+                           .dump(),
+                       "application/json");
+                   return;
+                 }
+                 res.set_content(secret_response().dump(), "application/json");
+               });
 
     // Registered after the exact rate-limit routes so a decoded path cannot
     // turn their suffix into an API-key id.
@@ -1020,6 +1135,9 @@ class TestServer {
   [[nodiscard]] auto review_hits() const -> int { return m_review_hits.load(); }
   [[nodiscard]] auto billing_hits() const -> int { return m_billing_hits.load(); }
   [[nodiscard]] auto api_key_hits() const -> int { return m_api_key_hits.load(); }
+  [[nodiscard]] auto web3_api_key_hits() const -> int {
+    return m_web3_api_key_hits.load();
+  }
   [[nodiscard]] auto traits_hits() const -> int { return m_traits_hits.load(); }
   [[nodiscard]] auto compat_hits() const -> int { return m_compat_hits.load(); }
   [[nodiscard]] auto embeddings_hits() const -> int { return m_embeddings_hits.load(); }
@@ -1037,12 +1155,29 @@ class TestServer {
     const std::lock_guard<std::mutex> lock{m_transform_mu};
     return m_last_transform;
   }
+  [[nodiscard]] auto last_web3() const -> CapturedWeb3Request {
+    const std::lock_guard<std::mutex> lock{m_web3_mu};
+    return m_last_web3;
+  }
   [[nodiscard]] auto multipart_stall_hits() const -> int { return m_multipart_stall_hits.load(); }
 
   static constexpr int kFrames = 2;
   static constexpr const char* kDelta[kFrames] = {"hel", "lo"};
 
  private:
+  void capture_web3(const httplib::Request& req) {
+    const std::lock_guard<std::mutex> lock{m_web3_mu};
+    m_last_web3 = CapturedWeb3Request{
+        .method = req.method,
+        .path = req.target,
+        .content_type = req.get_header_value("Content-Type"),
+        .authorization = req.get_header_value("Authorization"),
+        .siwx = req.get_header_value("SIGN-IN-WITH-X"),
+        .payment = req.get_header_value("PAYMENT-SIGNATURE"),
+        .body = req.body,
+    };
+  }
+
   static constexpr auto kStallCap = 10s;
 
   httplib::Server m_svr;
@@ -1056,6 +1191,7 @@ class TestServer {
   std::atomic<int> m_review_hits{0};
   std::atomic<int> m_billing_hits{0};
   std::atomic<int> m_api_key_hits{0};
+  std::atomic<int> m_web3_api_key_hits{0};
   std::atomic<int> m_traits_hits{0};
   std::atomic<int> m_compat_hits{0};
   std::atomic<int> m_embeddings_hits{0};
@@ -1068,6 +1204,9 @@ class TestServer {
   std::atomic<int> m_multipart_stall_hits{0};
   mutable std::mutex m_transform_mu;
   CapturedTransform m_last_transform{};
+  Web3ChallengeMode m_web3_challenge_mode;
+  mutable std::mutex m_web3_mu;
+  CapturedWeb3Request m_last_web3{};
 };
 
 // What the catalogue fixture echoed under `key`, or a marker naming what was
@@ -2241,6 +2380,236 @@ TEST_CASE("pre-cancelled API-key calls send no request",
   REQUIRE_FALSE(result);
   REQUIRE(result.error().kind == ErrorKind::Cancelled);
   REQUIRE(server.api_key_hits() == 0);
+}
+
+// ── public Web3 API-key proof flow (VC-44, #72) ────────────────────────
+
+TEST_CASE("Web3 API-key calls reject credential-bearing transport before the socket",
+          "[transport][api-keys][web3][auth][failure]") {
+  const TestServer server;
+  const venice::Web3ApiKeyCreateRequest request{
+      .api_key_type = "INFERENCE",
+      .address = "synthetic-address",
+      .signature = "SYNTHETIC_SIGNATURE_SECRET",
+      .token = "SYNTHETIC_CHALLENGE_SECRET",
+  };
+  for (const auto& authentication :
+       {Authentication::bearer("bearer-secret"),
+        Authentication::sign_in_with_x("signed-wallet"),
+        Authentication::x402_payment("payment-payload")}) {
+    const Client client{authentication, server.base_url()};
+    const auto challenge = client.web3_api_key_challenge();
+    REQUIRE_FALSE(challenge);
+    REQUIRE(challenge.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(challenge.error().message == "endpoint requires public authentication");
+    REQUIRE(challenge.error().body.empty());
+    const auto created = client.create_web3_api_key(request);
+    REQUIRE_FALSE(created);
+    REQUIRE(created.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(created.error().message == "endpoint requires public authentication");
+    REQUIRE(created.error().body.empty());
+  }
+  REQUIRE(server.web3_api_key_hits() == 0);
+}
+
+TEST_CASE("Web3 API-key calls send exact public wire contracts and retain metadata",
+          "[transport][api-keys][web3][security]") {
+  const TestServer server;
+  const Client client{Authentication::public_access(), server.base_url()};
+
+  const auto challenge = client.web3_api_key_challenge();
+  REQUIRE(challenge);
+  REQUIRE(challenge->success);
+  REQUIRE(challenge->token == "SYNTHETIC_CHALLENGE_SECRET");
+  REQUIRE(challenge->raw["data"]["token"] == "[REDACTED]");
+  REQUIRE(challenge->raw["futureEnvelope"]["signature"] == "[REDACTED]");
+  REQUIRE(challenge->metadata.header("x-test-response") ==
+          "web3-api-key-challenge");
+  auto captured = server.last_web3();
+  REQUIRE(captured.method == "GET");
+  REQUIRE(captured.path == "/api/v1/api_keys/generate_web3_key");
+  REQUIRE(captured.content_type.empty());
+  REQUIRE(captured.authorization.empty());
+  REQUIRE(captured.siwx.empty());
+  REQUIRE(captured.payment.empty());
+  REQUIRE(captured.body.empty());
+
+  const auto created = client.create_web3_api_key({
+      .api_key_type = "FUTURE_TYPE",
+      .address = "synthetic-address",
+      .signature = "SYNTHETIC_SIGNATURE_SECRET",
+      .token = "SYNTHETIC_CHALLENGE_SECRET",
+      .consumption_limit = venice::ApiKeyConsumptionLimitRequest{.usd = 0.0},
+      .limit_period = "FUTURE_PERIOD",
+      .description = "synthetic key",
+      .expires_at = "",
+      .extra = {{"future", true}},
+  });
+  REQUIRE(created);
+  REQUIRE(created->success);
+  REQUIRE(created->id == "fixture-web3-key-id");
+  REQUIRE(created->api_key == "SYNTHETIC_WEB3_API_KEY_SECRET");
+  REQUIRE(created->raw["data"]["apiKey"] == "[REDACTED]");
+  REQUIRE(created->raw["seenBody"]["token"] == "[REDACTED]");
+  REQUIRE(created->raw["seenBody"]["signature"] == "[REDACTED]");
+  REQUIRE(created->raw.dump().find("SYNTHETIC_CHALLENGE_SECRET") ==
+          std::string::npos);
+  REQUIRE(created->raw.dump().find("SYNTHETIC_SIGNATURE_SECRET") ==
+          std::string::npos);
+  REQUIRE(created->raw.dump().find("SYNTHETIC_WEB3_API_KEY_SECRET") ==
+          std::string::npos);
+  REQUIRE(created->metadata.header("x-test-response") == "web3-api-key-create");
+
+  captured = server.last_web3();
+  REQUIRE(captured.method == "POST");
+  REQUIRE(captured.path == "/api/v1/api_keys/generate_web3_key");
+  REQUIRE(captured.content_type == "application/json");
+  REQUIRE(captured.authorization.empty());
+  REQUIRE(captured.siwx.empty());
+  REQUIRE(captured.payment.empty());
+  const auto body = nlohmann::json::parse(captured.body);
+  REQUIRE(body["apiKeyType"] == "FUTURE_TYPE");
+  REQUIRE(body["address"] == "synthetic-address");
+  REQUIRE(body["signature"] == "SYNTHETIC_SIGNATURE_SECRET");
+  REQUIRE(body["token"] == "SYNTHETIC_CHALLENGE_SECRET");
+  REQUIRE(body["consumptionLimit"]["usd"] == 0.0);
+  REQUIRE(body["limitPeriod"] == "FUTURE_PERIOD");
+  REQUIRE(body["description"] == "synthetic key");
+  REQUIRE(body["expiresAt"] == "");
+  REQUIRE(body["future"] == true);
+  REQUIRE(server.web3_api_key_hits() == 2);
+}
+
+TEST_CASE("a per-call public override strips a Bearer client's credential",
+          "[transport][api-keys][web3][auth]") {
+  const TestServer server;
+  const Client client{"default-bearer-secret", server.base_url()};
+  const auto challenge = client.web3_api_key_challenge(
+      {.authentication = Authentication::public_access()});
+  REQUIRE(challenge);
+  const auto captured = server.last_web3();
+  REQUIRE(captured.authorization.empty());
+  REQUIRE(captured.siwx.empty());
+  REQUIRE(captured.payment.empty());
+  REQUIRE(server.web3_api_key_hits() == 1);
+}
+
+TEST_CASE("Web3 challenge failures redact secrets and preserve classification",
+          "[transport][api-keys][web3][security][failure]") {
+  {
+    const TestServer server{Web3ChallengeMode::HttpError};
+    const Client client{Authentication::public_access(), server.base_url()};
+    const auto result = client.web3_api_key_challenge();
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::Auth);
+    REQUIRE(result.error().status == 401);
+    REQUIRE(result.error().metadata.header("x-protocol-trace") ==
+            "web3-challenge-http");
+    REQUIRE(result.error().body.find("[REDACTED]") != std::string::npos);
+    REQUIRE(result.error().body.find("SYNTHETIC_") == std::string::npos);
+  }
+  {
+    const TestServer server{Web3ChallengeMode::WrongMedia};
+    const Client client{Authentication::public_access(), server.base_url()};
+    const auto result = client.web3_api_key_challenge();
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::Parse);
+    REQUIRE(result.error().body ==
+            "[REDACTED: non-JSON Web3 API-key response]");
+  }
+  {
+    const TestServer server{Web3ChallengeMode::WrongShape};
+    const Client client{Authentication::public_access(), server.base_url()};
+    const auto result = client.web3_api_key_challenge();
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::Parse);
+    REQUIRE(result.error().body.find("SYNTHETIC_CHALLENGE_SECRET") ==
+            std::string::npos);
+    REQUIRE(result.error().body.find("[REDACTED]") != std::string::npos);
+  }
+  {
+    const TestServer server{Web3ChallengeMode::MalformedJson};
+    const Client client{Authentication::public_access(), server.base_url()};
+    const auto result = client.web3_api_key_challenge();
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::Parse);
+    REQUIRE(result.error().body ==
+            "[REDACTED: non-JSON Web3 API-key response]");
+  }
+}
+
+TEST_CASE("Web3 creation failures classify before media and redact every proof",
+          "[transport][api-keys][web3][security][failure]") {
+  const TestServer server;
+  const Client client{Authentication::public_access(), server.base_url()};
+  const auto call = [&](nlohmann::json extra) {
+    return client.create_web3_api_key({
+        .api_key_type = "INFERENCE",
+        .address = "synthetic-address",
+        .signature = "SYNTHETIC_SIGNATURE_SECRET",
+        .token = "SYNTHETIC_CHALLENGE_SECRET",
+        .extra = std::move(extra),
+    });
+  };
+
+  struct ErrorCase {
+    int status;
+    ErrorKind kind;
+  };
+  for (const auto [status, kind] :
+       {ErrorCase{400, ErrorKind::Http}, ErrorCase{401, ErrorKind::Auth},
+        ErrorCase{402, ErrorKind::PaymentRequired},
+        ErrorCase{429, ErrorKind::RateLimited}, ErrorCase{500, ErrorKind::Http}}) {
+    const auto result = call({{"forceStatus", status}});
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == kind);
+    REQUIRE(result.error().status == status);
+    REQUIRE(result.error().metadata.header("x-protocol-trace") ==
+            "web3-create-http");
+    REQUIRE(result.error().body.find("[REDACTED]") != std::string::npos);
+    REQUIRE(result.error().body.find("SYNTHETIC_") == std::string::npos);
+  }
+
+  const auto wrong_media = call({{"forceWrongMedia", true}});
+  REQUIRE_FALSE(wrong_media);
+  REQUIRE(wrong_media.error().kind == ErrorKind::Parse);
+  REQUIRE(wrong_media.error().body ==
+          "[REDACTED: non-JSON Web3 API-key response]");
+
+  const auto malformed = call({{"forceMalformedJson", true}});
+  REQUIRE_FALSE(malformed);
+  REQUIRE(malformed.error().kind == ErrorKind::Parse);
+  REQUIRE(malformed.error().body ==
+          "[REDACTED: non-JSON Web3 API-key response]");
+
+  const auto wrong_shape = call({{"forceWrongShape", true}});
+  REQUIRE_FALSE(wrong_shape);
+  REQUIRE(wrong_shape.error().kind == ErrorKind::Parse);
+  REQUIRE(wrong_shape.error().body.find("SYNTHETIC_") == std::string::npos);
+  REQUIRE(wrong_shape.error().body.find("[REDACTED]") != std::string::npos);
+}
+
+TEST_CASE("pre-cancelled Web3 API-key calls send no request",
+          "[transport][api-keys][web3][cancel]") {
+  const TestServer server;
+  const Client client{Authentication::public_access(), server.base_url()};
+  venice::CancelToken token;
+  token.cancel();
+  const venice::RequestOptions opts{.cancel = &token};
+  const auto challenge = client.web3_api_key_challenge(opts);
+  REQUIRE_FALSE(challenge);
+  REQUIRE(challenge.error().kind == ErrorKind::Cancelled);
+  REQUIRE(challenge.error().body.empty());
+  const auto created = client.create_web3_api_key(
+      {.api_key_type = "INFERENCE",
+       .address = "synthetic-address",
+       .signature = "SYNTHETIC_SIGNATURE_SECRET",
+       .token = "SYNTHETIC_CHALLENGE_SECRET"},
+      opts);
+  REQUIRE_FALSE(created);
+  REQUIRE(created.error().kind == ErrorKind::Cancelled);
+  REQUIRE(created.error().body.empty());
+  REQUIRE(server.web3_api_key_hits() == 0);
 }
 
 // ── the catalogue sub-paths (VC-38, #59) ──────────────────────────────────

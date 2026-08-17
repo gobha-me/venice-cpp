@@ -136,8 +136,11 @@
       "method": "GET",
       "path": "/api_keys/generate_web3_key",
       "family": "api-keys",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 45,
+      "public_api": [
+        "Client::web3_api_key_challenge"
+      ],
       "security": [
         []
       ],
@@ -152,8 +155,11 @@
       "method": "POST",
       "path": "/api_keys/generate_web3_key",
       "family": "api-keys",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 45,
+      "public_api": [
+        "Client::create_web3_api_key"
+      ],
       "security": [
         []
       ],

@@ -71,10 +71,11 @@ right bridge.
   `/billing/usage-history`) — typed balance and aggregate views plus ordered,
   cursor-paged ledger history. History can return typed JSON or byte-exact CSV,
   selected from the response's actual media type.
-- **API-key administration** — typed list/detail/create/update/delete, current
-  rate limits and the account's last 50 exceeded-limit records. Returned key
-  material is available exactly once to the successful create caller and is
-  never printed by the library or its read-only smoke command.
+- **API-key administration and wallet proof** — typed list/detail/create/update/
+  delete, current rate limits and the account's last 50 exceeded-limit records,
+  plus a public challenge/sign/create flow for caller-owned wallets. Returned
+  tokens, signatures and key material are never duplicated into diagnostics or
+  printed by the library.
 - **Explicit authentication** — Public, Bearer, pre-signed SIWX and pre-built
   x402 payment payloads are distinct modes, selectable per client or per call.
   The client never owns wallet private keys or constructs signatures.
@@ -94,7 +95,7 @@ Later phases (fed by real use): audio/video, TTS, retries/backoff, async.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 25/49 operations implemented.
+OpenAPI coverage: 27/49 operations implemented.
 
 One additional published operation is explicitly unsupported:
 `GET /billing/usage` already returns 410 for every request and points callers
@@ -552,9 +553,10 @@ names rather than a stable schema.
 
 ### API-key administration
 
-API-key administration is Bearer-only. Value sets such as `api_key_type`,
-`limit_period` and rate-limit types stay strings because Venice owns them;
-response structs retain both typed optionals and their verbatim `raw` objects.
+Administrative API-key inventory and mutation calls are Bearer-only. Value sets
+such as `api_key_type`, `limit_period` and rate-limit types stay strings because
+Venice owns them; response structs retain both typed optionals and their
+verbatim `raw` objects.
 Usage totals remain decimal strings, while configured limits are the JSON
 numbers the server publishes. Missing and explicit zero never collapse.
 The one exception is `ApiKeyCreated::raw`: every nested `apiKey` value is
@@ -607,6 +609,38 @@ verbatim so the server's error body can name current policy.
 it is not presented as pageable. Existing source using `balance()` keeps its
 `std::expected<nlohmann::json, Error>` return type and receives the typed rate-
 limit parser's retained raw envelope.
+
+The Web3 creation flow is a separate public protocol. Construct a public client
+or use a per-call public authentication override: the wallet address, challenge
+token and caller-produced signature belong in JSON, never in Bearer, SIWX or
+x402 headers. This library does not own a wallet key, sign or verify the proof,
+or add a crypto dependency.
+
+```cpp
+venice::Client web3{venice::Authentication::public_access()};
+const auto challenge = web3.web3_api_key_challenge();
+if (!challenge) return;
+
+venice::Web3ApiKeyCreateRequest web3_request;
+web3_request.api_key_type = "INFERENCE";
+web3_request.address = "caller-wallet-address";
+web3_request.signature = "caller-produced-signature";
+web3_request.token = challenge->token;
+web3_request.description = "wallet-created worker";
+
+auto web3_created = web3.create_web3_api_key(web3_request);
+if (!web3_created) return;
+std::string web3_secret = std::move(web3_created->api_key);
+(void)web3_secret;  // hand directly to the application's secret-store API
+```
+
+The challenge token is reachable only as `Web3ApiKeyChallenge::token`; its
+retained `raw` tree is redacted. The POST result reuses `ApiKeyCreated`, with the
+same one-time-secret boundary as Bearer creation. Web3 errors preserve status
+and response metadata while recursively redacting `token`, `signature` and
+`apiKey`; a non-JSON body is replaced by a redacted marker because it cannot be
+safely inspected. No CLI leg performs this flow: GET returns proof material and
+POST creates a credential.
 
 ### What a call cost
 
@@ -1070,7 +1104,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.22.0)
+  GIT_TAG        v0.23.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
