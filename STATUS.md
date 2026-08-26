@@ -40,6 +40,10 @@ AGENTS.md (which holds standing conventions, not state).
   `remove_image_background` — JSON or multipart selected by explicit owned
   input form, with byte-exact media results and no decode/write side effects
   (VC-41).
+- `generate_speech` / `generate_speech_stream`, `transcribe_audio`,
+  `clone_voice`, `quote_audio`, `queue_audio`, `retrieve_audio` and
+  `cleanup_audio` — the complete Audio family, with actual-media routing,
+  byte-exact results and explicit async lifecycle (VC-28).
 - `billing_balance`, `billing_usage_analytics` and `billing_usage_history` —
   typed account balances and aggregates plus ordered cursor history in JSON or
   byte-exact CSV, routed by actual response media type (VC-42). Verified with an
@@ -63,12 +67,12 @@ AGENTS.md (which holds standing conventions, not state).
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 27/49 operations implemented. One retired operation is
-  explicitly unsupported and the other 21 are assigned to family issues and
+- OpenAPI coverage: 34/49 operations implemented. One retired operation is
+  explicitly unsupported and the other 14 are assigned to family issues and
   checked in `cmake/openapi_manifest.json` (VC-35). Characters
   and Models are both 3/3 on operations, and since VC-39 the `Model` metadata
-  half is done too. Music and ASR remain deliberately raw rather than keeping
-  the completed Models family open on shapes no current endpoint consumes.
+  half is done too. Audio now consumes a typed music policy view; ASR carries
+  no modality-specific fields beyond the common model/pricing surface.
 
 **Build system synced with cpp-template, tagged v0.1.0 — the first release.**
 The repo was scaffolded before upstream's fix rounds landed, so it was running a
@@ -95,20 +99,51 @@ in full: a leg that auto-picks one model settles nothing about a shape that
 varies by model family, and two tickets have now been filed on the strength of
 a single-family run.
 
-1. **AIForge chat-TUI MVP** — see issue #1. Composes venice-cpp + termforge.
-   Both foundations are proven, and now measured rather than assumed.
-2. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
+1. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
    m.raw` is overwritten for `tool_calls` because that key is modeled, and
    `ToolCall` has `raw` but no `extra`, so an unmodeled tool-call key is
    unrecoverable. VC-18 was exactly that failure. The limit is pinned by a §0
    case in `test/07stream/` whose deliberate inversion is the ticket's
    acceptance criterion. The hard half is streaming: a merge rule for arbitrary
-   unmodeled keys across fragments has no wire evidence to choose it yet.
-3. Thicken endpoints as AIForge/KDE need them (audio/video, TTS,
-   retries/backoff, async). Driven by real use, not
-   speculatively.
-4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
+   unmodeled keys across fragments has no wire evidence to choose it yet, so it
+   stays deferred until a capture can settle the rule.
+2. Thicken endpoints as AIForge/KDE need them (video, chat parity,
+   retries/backoff, high-level async). Driven by real use, not speculatively.
+3. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-28 (#43) is implemented for v0.24.0.** All seven Audio operations are
+typed: buffered and callback-streamed speech, multipart transcription and voice
+cloning, and explicit quote/queue/retrieve/cleanup for asynchronous generation.
+Speech's `streaming` bit is method-owned like ChatRequest's `stream` bit;
+buffered and streamed calls serialize from the same const request without a
+second source of truth. Successful media is always selected by actual normalized
+Content-Type and remains byte-exact; the library never decodes, plays or writes
+it.
+
+Transcription JSON carries typed text, duration and word/segment/character
+timestamps while text/plain stays exact. Retrieval distinguishes processing
+JSON from FLAC/MP3/WAV media, and cleanup `success:false` remains a retryable
+value. The async endpoints remain individually callable: no hidden polling or
+automatic deletion policy was added.
+
+The live music catalogue policy is now typed because Audio consumes it:
+duration, prompt/lyrics, voice/language, speed and format fields reconcile with
+the retained raw model object. ASR still needs no empty modality struct because
+its live entries carry only the common fields and pricing.
+
+The OpenAPI pin moved to `20260826.105305` / `0daa64c8…`, repository commit
+`9b8bd5e…`; the drift audit found no operation, authentication, request-media or
+response-media changes. Coverage is now 34/49. Offline matrices cover every
+operation's guards, wire target/body/auth, documented status families,
+multipart bytes, success media, malformed bodies, cancellation and metadata.
+
+The safe live `--audio` leg passed on 2026-08-26. It named four runners-up for
+each auto-pick, then used `tts-kokoro` for both buffered and streamed MP3
+(16,845 bytes each), transcribed the in-memory result with
+`nvidia/parakeet-tdt-0.6b-v3`, and received a $0.03 quote for `ace-step-15`.
+The transcript and quote typed values agreed with their verbatim envelopes.
+The leg decoded, played and wrote no media, cloned no voice and queued no work.
 
 **VC-44 (#72) is implemented for v0.23.0.** The two public
 `/api_keys/generate_web3_key` operations complete the API-key family. GET
@@ -131,10 +166,10 @@ body becomes a redacted marker while status and metadata remain intact. There
 is no CLI flow because even the read operation returns proof material and the
 write operation creates a credential.
 
-The manifest now records 27/49 operations implemented. Offline failure matrices
-cover exact methods, path, JSON, absent headers, public override, structural and
-finiteness guards, 400/401/402/429/500, wrong media, malformed bodies, secret
-redaction and cancellation. A redacted live GET shape check agreed with the
+At v0.23.0 the manifest recorded 27/49 operations implemented. Offline failure
+matrices cover exact methods, path, JSON, absent headers, public override,
+structural and finiteness guards, 400/401/402/429/500, wrong media, malformed
+bodies, secret redaction and cancellation. A redacted live GET shape check agreed with the
 pinned OpenAPI document. During a deliberate guard break, one synthetic request
 with an empty token escaped the original socket-free fixture and Venice rejected
 it with 400; the fixture now points at loopback, no credential was created, and

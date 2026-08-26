@@ -107,11 +107,12 @@ auto spec_entry(std::string_view type, std::string_view spec_body) -> venice::Mo
              std::string{spec_body} + "}");
 }
 
-// How many of the six per-modality views are engaged.
+// How many of the seven per-modality views are engaged.
 auto views_engaged(const venice::Model& m) -> int {
   return static_cast<int>(m.image.has_value()) + static_cast<int>(m.inpaint.has_value()) +
          static_cast<int>(m.video.has_value()) + static_cast<int>(m.tts.has_value()) +
-         static_cast<int>(m.embedding.has_value()) + static_cast<int>(m.text_constraints.has_value());
+         static_cast<int>(m.music.has_value()) + static_cast<int>(m.embedding.has_value()) +
+         static_cast<int>(m.text_constraints.has_value());
 }
 
 // Every key a table names, for the §6 set differences. Collected from the
@@ -224,17 +225,6 @@ TEST_CASE("image-family pricing retains generation and both upscale factors",
 
 TEST_CASE("a type this client does not model engages nothing and keeps raw",
           "[modalities][failure]") {
-  // music and asr are out of VC-39's scope by decision, and a modality Venice
-  // adds tomorrow takes the same path. Neither is a parse failure.
-  const auto music = one(kMusic);
-  REQUIRE(music.type == "music");
-  REQUIRE(views_engaged(music) == 0);
-  REQUIRE(music.raw["model_spec"]["supports_lyrics"] == true);
-  REQUIRE(music.raw["model_spec"]["lyrics_character_limit"] == 4096);
-  // The fields Model has always modeled still parse for it.
-  REQUIRE(music.name == "ACE-Step 1.5");
-  REQUIRE(music.offline == false);
-
   const auto upscale = one(kUpscale);
   REQUIRE(views_engaged(upscale) == 0);
   REQUIRE(upscale.pricing.has_value());
@@ -510,6 +500,15 @@ TEST_CASE("the modeled spec-level keys cover what each capture carries", "[modal
   collect(venice::detail::kTtsSpecObjectFields, tts_spec);
   REQUIRE(missing_from(keys_of(one(kTtsCloning).raw["model_spec"]), covered(tts_spec)).empty());
 
+  std::set<std::string> music_spec;
+  collect(venice::detail::kMusicSpecBoolFields, music_spec);
+  collect(venice::detail::kMusicSpecIntFields, music_spec);
+  collect(venice::detail::kMusicSpecDoubleFields, music_spec);
+  collect(venice::detail::kMusicSpecStringFields, music_spec);
+  collect(venice::detail::kMusicSpecIntListFields, music_spec);
+  collect(venice::detail::kMusicSpecStringListFields, music_spec);
+  REQUIRE(missing_from(keys_of(one(kMusic).raw["model_spec"]), covered(music_spec)).empty());
+
   std::set<std::string> embedding_spec;
   collect(venice::detail::kEmbeddingSpecIntFields, embedding_spec);
   collect(venice::detail::kEmbeddingSpecBoolFields, embedding_spec);
@@ -669,6 +668,25 @@ TEST_CASE("a tts model states its voices and formats", "[modalities]") {
   REQUIRE(m.tts->supports_custom_voice_id == false);
   REQUIRE(m.tts->voices->size() == 3);
   REQUIRE(m.tts->voices->front() == "Aurora");
+}
+
+TEST_CASE("a music model states the request policy Audio consumes", "[modalities][audio]") {
+  const auto m = one(kMusic);
+  REQUIRE(m.type == "music");
+  REQUIRE(views_engaged(m) == 1);
+  REQUIRE(m.music.has_value());
+  REQUIRE(m.music->supports_lyrics == true);
+  REQUIRE(m.music->lyrics_required == false);
+  REQUIRE(m.music->supports_force_instrumental == false);
+  REQUIRE(m.music->default_duration == 60);
+  REQUIRE(m.music->duration_options == std::vector<int>{60, 90, 120});
+  REQUIRE(m.music->min_prompt_length == 10);
+  REQUIRE(m.music->prompt_character_limit == 512);
+  REQUIRE(m.music->lyrics_character_limit == 4096);
+  REQUIRE(m.music->default_format == "flac");
+  REQUIRE(m.music->supported_formats == std::vector<std::string>{"flac"});
+  REQUIRE(m.raw["model_spec"]["supports_lyrics"] == true);
+  REQUIRE(m.name == "ACE-Step 1.5");
 }
 
 TEST_CASE("an embedding model states its dimensions", "[modalities]") {

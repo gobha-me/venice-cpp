@@ -872,6 +872,242 @@ class TestServer {
                  transform(req, res, "background-remove-success");
                });
 
+    m_svr.Post("/api/v1/audio/speech",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_audio_hits;
+                 const auto bearer = req.get_header_value("Authorization");
+                 const auto siwx = req.get_header_value("SIGN-IN-WITH-X");
+                 if (bearer.empty() && siwx.empty()) {
+                   res.status = 401;
+                   res.set_content(R"({"error":"missing audio authentication"})",
+                                   "application/json");
+                   return;
+                 }
+                 if (siwx == "audio-needs-payment") {
+                   res.status = 402;
+                   res.set_header("PAYMENT-REQUIRED", "audio-payment-requirements");
+                   res.set_content(R"({"code":"PAYMENT_REQUIRED"})", "application/json");
+                   return;
+                 }
+                 const auto body = nlohmann::json::parse(req.body);
+                 const auto input = body.at("input").get<std::string>();
+                 if (input == "bad-request") {
+                   res.status = 400;
+                   res.set_content(R"({"error":"bad speech request"})", "text/plain");
+                   return;
+                 }
+                 if (input == "wrong-media") {
+                   res.set_content("not audio", "text/plain");
+                   return;
+                 }
+
+                 res.set_header("X-Balance-Remaining", "3.250000");
+                 res.set_header("PAYMENT-RESPONSE", "audio-payment-receipt");
+                 res.set_header("X-Protocol-Trace", "speech-success");
+                 const auto format = body.value("response_format", std::string{"mp3"});
+                 const auto media_type = [&] {
+                   if (format == "aac") return std::string{"audio/aac"};
+                   if (format == "flac") return std::string{"audio/flac"};
+                   if (format == "opus") return std::string{"audio/opus"};
+                   if (format == "pcm") return std::string{"audio/pcm"};
+                   if (format == "wav") return std::string{"audio/wav"};
+                   return std::string{"audio/mpeg"};
+                 }();
+                 if (!body.at("streaming").get<bool>()) {
+                   const std::array bytes{char{'A'}, char{0}, char{'U'}, char{'D'}};
+                   res.set_content(bytes.data(), bytes.size(), media_type + "; fixture=true");
+                   return;
+                 }
+
+                 auto sent = std::make_shared<int>(0);
+                 const bool stall = input == "stall";
+                 res.set_chunked_content_provider(
+                     media_type + "; fixture=true",
+                     [this, sent, stall](size_t, httplib::DataSink& sink) {
+                       static constexpr std::array<std::string_view, 2> kChunks{
+                           std::string_view{"S\0", 2}, std::string_view{"TR", 2}};
+                       if (*sent < static_cast<int>(kChunks.size())) {
+                         const auto chunk = kChunks[static_cast<std::size_t>(*sent)];
+                         ++*sent;
+                         return sink.write(chunk.data(), chunk.size());
+                       }
+                       if (stall) m_gate.wait(kStallCap);
+                       sink.done();
+                       return true;
+                     });
+               });
+
+    const auto form_value = [](const httplib::Request& req, const char* name) {
+      const auto it = req.files.find(name);
+      return it == req.files.end() ? std::string{} : it->second.content;
+    };
+
+    m_svr.Post("/api/v1/audio/transcriptions",
+               [this, form_value](const httplib::Request& req, httplib::Response& res) {
+                 ++m_audio_hits;
+                 const auto model = form_value(req, "model");
+                 if (model == "payload-too-large") {
+                   res.status = 413;
+                   res.set_content(R"({"error":"too large"})", "application/json");
+                   return;
+                 }
+                 if (model == "unsupported-media") {
+                   res.status = 415;
+                   res.set_content(R"({"error":"unsupported"})", "application/json");
+                   return;
+                 }
+                 if (model == "validation-error") {
+                   res.status = 422;
+                   res.set_content(R"({"error":"empty audio"})", "application/json");
+                   return;
+                 }
+                 if (model == "wrong-media") {
+                   res.set_content("wrong", "audio/mpeg");
+                   return;
+                 }
+                 if (model == "malformed") {
+                   res.set_content(R"({"text":7})", "application/json");
+                   return;
+                 }
+                 const auto file = req.files.find("file");
+                 const auto file_size = file == req.files.end() ? 0U : file->second.content.size();
+                 const auto response_format = form_value(req, "response_format");
+                 res.set_header("X-Balance-Remaining", "3.000000");
+                 if (response_format == "text") {
+                   res.set_content("fixture transcript", "text/plain; charset=utf-8");
+                   return;
+                 }
+                 res.set_content(
+                     nlohmann::json{
+                         {"text", "fixture transcript"},
+                         {"duration", 1.25},
+                         {"timestamps",
+                          {{"word", nlohmann::json::array(
+                                        {{{"word", "fixture"}, {"start", 0}, {"end", 1.25}}})}}},
+                         {"seen_file_size", file_size},
+                         {"seen_filename", file == req.files.end() ? "" : file->second.filename},
+                         {"seen_media_type",
+                          file == req.files.end() ? "" : file->second.content_type},
+                         {"seen_timestamps", form_value(req, "timestamps")},
+                         {"seen_language", form_value(req, "language")}}
+                         .dump(),
+                     "application/json; charset=utf-8");
+               });
+
+    m_svr.Post("/api/v1/audio/voices",
+               [this, form_value](const httplib::Request& req, httplib::Response& res) {
+                 ++m_audio_hits;
+                 const auto file = req.files.find("file");
+                 const auto model = form_value(req, "model");
+                 if (model == "wrong-media") {
+                   res.set_content("not json", "text/plain");
+                   return;
+                 }
+                 if (model == "malformed") {
+                   res.set_content(R"({"id":7,"model":"malformed"})",
+                                   "application/json");
+                   return;
+                 }
+                 res.set_header("X-Balance-Remaining", "2.750000");
+                 res.set_content(
+                     nlohmann::json{
+                         {"id", "vv_fixture"},
+                         {"model", model},
+                         {"seen_file_size", file == req.files.end() ? 0U : file->second.content.size()},
+                         {"seen_filename", file == req.files.end() ? "" : file->second.filename},
+                         {"seen_media_type",
+                          file == req.files.end() ? "" : file->second.content_type}}
+                         .dump(),
+                     "application/json");
+               });
+
+    m_svr.Post("/api/v1/audio/quote",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_audio_hits;
+                 const auto body = nlohmann::json::parse(req.body);
+                 if (body.at("model") == "malformed") {
+                   res.set_content(R"({"quote":"unknown"})", "application/json");
+                   return;
+                 }
+                 res.set_content(nlohmann::json{{"quote", 0.75},
+                                                {"seen_body", body},
+                                                {"seen_authorization",
+                                                 req.get_header_value("Authorization")},
+                                                {"seen_siwx",
+                                                 req.get_header_value("SIGN-IN-WITH-X")}}
+                                     .dump(),
+                                 "application/json");
+               });
+
+    m_svr.Post("/api/v1/audio/queue",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_audio_hits;
+                 const auto body = nlohmann::json::parse(req.body);
+                 if (body.at("model") == "malformed") {
+                   res.set_content(R"({"model":"malformed","queue_id":7,"status":"QUEUED"})",
+                                   "application/json");
+                   return;
+                 }
+                 res.set_content(nlohmann::json{{"model", body.at("model")},
+                                                {"queue_id", "queue-fixture"},
+                                                {"status", "QUEUED"},
+                                                {"seen_body", body},
+                                                {"seen_authorization",
+                                                 req.get_header_value("Authorization")},
+                                                {"seen_siwx",
+                                                 req.get_header_value("SIGN-IN-WITH-X")}}
+                                     .dump(),
+                                 "application/json");
+               });
+
+    m_svr.Post("/api/v1/audio/retrieve",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_audio_hits;
+                 const auto body = nlohmann::json::parse(req.body);
+                 const auto queue_id = body.at("queue_id").get<std::string>();
+                 if (queue_id == "missing") {
+                   res.status = 404;
+                   res.set_content(R"({"error":"not found"})", "application/json");
+                   return;
+                 }
+                 if (queue_id == "wrong-media") {
+                   res.set_content("wrong", "video/mp4");
+                   return;
+                 }
+                 if (queue_id == "malformed") {
+                   res.set_content(
+                       R"({"status":"PROCESSING","average_execution_time":"soon","execution_duration":1})",
+                       "application/json");
+                   return;
+                 }
+                 res.set_header("X-Balance-Remaining", "2.500000");
+                 if (queue_id == "media") {
+                   const std::array bytes{char{'M'}, char{0}, char{'P'}, char{'3'}};
+                   res.set_content(bytes.data(), bytes.size(), "audio/mpeg; fixture=true");
+                   return;
+                 }
+                 res.set_content(nlohmann::json{{"status", "PROCESSING"},
+                                                {"average_execution_time", 20000},
+                                                {"execution_duration", 5200},
+                                                {"seen_body", body}}
+                                     .dump(),
+                                 "application/json");
+               });
+
+    m_svr.Post("/api/v1/audio/complete",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_audio_hits;
+                 const auto body = nlohmann::json::parse(req.body);
+                 if (body.at("queue_id") == "malformed") {
+                   res.set_content(R"({"success":"yes"})", "application/json");
+                   return;
+                 }
+                 res.set_content(nlohmann::json{{"success", body.at("queue_id") != "retry"},
+                                                {"seen_body", body}}
+                                     .dump(),
+                                 "application/json");
+               });
+
     m_svr.Get("/api/v1/billing/balance",
               [this](const httplib::Request& req, httplib::Response& res) {
                 ++m_billing_hits;
@@ -1151,6 +1387,7 @@ class TestServer {
   [[nodiscard]] auto image_transform_stall_hits() const -> int {
     return m_image_transform_stall_hits.load();
   }
+  [[nodiscard]] auto audio_hits() const -> int { return m_audio_hits.load(); }
   [[nodiscard]] auto last_transform() const -> CapturedTransform {
     const std::lock_guard<std::mutex> lock{m_transform_mu};
     return m_last_transform;
@@ -1201,6 +1438,7 @@ class TestServer {
   std::atomic<int> m_image_stall_hits{0};
   std::atomic<int> m_image_transform_hits{0};
   std::atomic<int> m_image_transform_stall_hits{0};
+  std::atomic<int> m_audio_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
   mutable std::mutex m_transform_mu;
   CapturedTransform m_last_transform{};
@@ -3439,4 +3677,287 @@ TEST_CASE("buffered chat still sends bearer JSON and parses the typed reply", "[
   REQUIRE(res.has_value());
   REQUIRE(res->id == "buffered-chat");
   REQUIRE(res->content == "ok");
+}
+
+// ── §9 Audio: media, multipart and explicit async lifecycle (VC-28) ─────
+
+TEST_CASE("malformed Audio success bodies become Parse values at the client boundary",
+          "[transport][audio][failure][parse]") {
+  const TestServer server;
+  const Client client{"audio-key", server.base_url()};
+  const venice::AudioFile file{.bytes = std::string{"RIFF\0WAVE", 9},
+                               .filename = "sample.wav",
+                               .media_type = "audio/wav"};
+
+  const auto transcription = client.transcribe_audio(
+      {.file = file, .model = "malformed", .response_format = "json"});
+  REQUIRE_FALSE(transcription);
+  REQUIRE(transcription.error().is(ErrorKind::Parse));
+  REQUIRE(transcription.error().status == 200);
+
+  const auto voice = client.clone_voice({.file = file, .model = "malformed"});
+  REQUIRE_FALSE(voice);
+  REQUIRE(voice.error().is(ErrorKind::Parse));
+
+  const auto quote = client.quote_audio({.model = "malformed"});
+  REQUIRE_FALSE(quote);
+  REQUIRE(quote.error().is(ErrorKind::Parse));
+
+  const auto queue = client.queue_audio({.model = "malformed", .prompt = "fixture"});
+  REQUIRE_FALSE(queue);
+  REQUIRE(queue.error().is(ErrorKind::Parse));
+
+  const auto retrieve = client.retrieve_audio(
+      {.model = "music-fixture", .queue_id = "malformed"});
+  REQUIRE_FALSE(retrieve);
+  REQUIRE(retrieve.error().is(ErrorKind::Parse));
+
+  const auto cleanup = client.cleanup_audio(
+      {.model = "music-fixture", .queue_id = "malformed"});
+  REQUIRE_FALSE(cleanup);
+  REQUIRE(cleanup.error().is(ErrorKind::Parse));
+}
+
+TEST_CASE("speech classifies HTTP before media and preserves opaque bytes",
+          "[transport][audio][speech]") {
+  const TestServer server;
+  const Client client{"audio-key", server.base_url()};
+
+  venice::SpeechRequest request{.input = "hello"};
+  const auto media = client.generate_speech(request);
+  REQUIRE(media.has_value());
+  REQUIRE(media->bytes == std::string{"A\0UD", 4});
+  REQUIRE(media->media_type == "audio/mpeg");
+  REQUIRE(media->metadata.x_balance_remaining == "3.250000");
+  REQUIRE(media->metadata.payment_response == "audio-payment-receipt");
+
+  for (const auto& [format, media_type] :
+       std::array<std::pair<const char*, const char*>, 5>{{
+           {"aac", "audio/aac"},
+           {"flac", "audio/flac"},
+           {"opus", "audio/opus"},
+           {"pcm", "audio/pcm"},
+           {"wav", "audio/wav"},
+       }}) {
+    request.response_format = format;
+    const auto alternate = client.generate_speech(request);
+    REQUIRE(alternate.has_value());
+    REQUIRE(alternate->bytes == std::string{"A\0UD", 4});
+    REQUIRE(alternate->media_type == media_type);
+  }
+  request.response_format.reset();
+
+  request.input = "wrong-media";
+  const auto wrong = client.generate_speech(request);
+  REQUIRE_FALSE(wrong);
+  REQUIRE(wrong.error().is(ErrorKind::Parse));
+  REQUIRE(wrong.error().status == 200);
+  REQUIRE(wrong.error().body == "not audio");
+
+  request.input = "bad-request";
+  const auto bad = client.generate_speech(request);
+  REQUIRE_FALSE(bad);
+  REQUIRE(bad.error().is(ErrorKind::Http));
+  REQUIRE(bad.error().status == 400);
+  REQUIRE(bad.error().body == R"({"error":"bad speech request"})");
+
+  const Client wallet{Authentication::sign_in_with_x("audio-needs-payment"),
+                      server.base_url()};
+  request.input = "hello";
+  const auto payment = wallet.generate_speech(request);
+  REQUIRE_FALSE(payment);
+  REQUIRE(payment.error().is(ErrorKind::PaymentRequired));
+  REQUIRE(payment.error().metadata.payment_required ==
+          "audio-payment-requirements");
+}
+
+TEST_CASE("speech streaming distinguishes completion early stop cancellation and callback failure",
+          "[transport][audio][speech][stream][cancel]") {
+  const TestServer server;
+  const Client client{"audio-key", server.base_url()};
+  venice::SpeechRequest request{.input = "hello"};
+
+  request.input = "bad-request";
+  const auto bad = client.generate_speech_stream(request, {});
+  REQUIRE_FALSE(bad);
+  REQUIRE(bad.error().is(ErrorKind::Http));
+  REQUIRE(bad.error().status == 400);
+  REQUIRE(bad.error().body == R"({"error":"bad speech request"})");
+
+  request.input = "wrong-media";
+  const auto wrong = client.generate_speech_stream(request, {});
+  REQUIRE_FALSE(wrong);
+  REQUIRE(wrong.error().is(ErrorKind::Parse));
+  REQUIRE(wrong.error().status == 200);
+  REQUIRE(wrong.error().body == "not audio");
+
+  request.input = "hello";
+
+  std::string bytes;
+  const auto complete = client.generate_speech_stream(
+      request, [&](std::string_view chunk) {
+        bytes.append(chunk);
+        return true;
+      });
+  REQUIRE(complete.has_value());
+  REQUIRE(complete->completed);
+  REQUIRE(complete->media_type == "audio/mpeg");
+  REQUIRE(complete->metadata.x_balance_remaining == "3.250000");
+  REQUIRE(complete->metadata.payment_response == "audio-payment-receipt");
+  REQUIRE(bytes == std::string{"S\0TR", 4});
+
+  bytes.clear();
+  const auto stopped = client.generate_speech_stream(
+      request, [&](std::string_view chunk) {
+        bytes.append(chunk);
+        return false;
+      });
+  REQUIRE(stopped.has_value());
+  REQUIRE_FALSE(stopped->completed);
+  REQUIRE(bytes == std::string{"S\0", 2});
+
+  venice::CancelToken token;
+  request.input = "stall";
+  const auto cancelled = client.generate_speech_stream(
+      request,
+      [&](std::string_view) {
+        token.cancel();
+        return true;
+      },
+      {.cancel = &token});
+  REQUIRE_FALSE(cancelled);
+  REQUIRE(cancelled.error().is(ErrorKind::Cancelled));
+
+  request.input = "hello";
+  const auto callback_failure = client.generate_speech_stream(
+      request, [](std::string_view) -> bool { throw std::runtime_error{"fixture"}; });
+  REQUIRE_FALSE(callback_failure);
+  REQUIRE(callback_failure.error().is(ErrorKind::InvalidArg));
+  REQUIRE(callback_failure.error().message == "speech callback: fixture");
+
+  const auto empty_callback_failure = client.generate_speech_stream(
+      request, [](std::string_view) -> bool { throw std::runtime_error{""}; });
+  REQUIRE_FALSE(empty_callback_failure);
+  REQUIRE(empty_callback_failure.error().is(ErrorKind::InvalidArg));
+  REQUIRE(empty_callback_failure.error().message == "speech callback: ");
+}
+
+TEST_CASE("audio multipart preserves NUL bytes filename type and form fields",
+          "[transport][audio][multipart]") {
+  const TestServer server;
+  const Client client{"audio-key", server.base_url()};
+  const venice::AudioFile file{.bytes = std::string{"RIFF\0WAVE", 9},
+                               .filename = "sample.wav",
+                               .media_type = "audio/wav"};
+
+  venice::AudioTranscriptionRequest request{
+      .file = file,
+      .model = "asr-fixture",
+      .response_format = "json",
+      .timestamps = false,
+      .language = "en",
+  };
+  const auto json = client.transcribe_audio(request);
+  REQUIRE(json.has_value());
+  const auto* parsed = std::get_if<venice::JsonAudioTranscription>(&*json);
+  REQUIRE(parsed != nullptr);
+  REQUIRE(parsed->text == "fixture transcript");
+  REQUIRE(parsed->raw["seen_file_size"] == 9);
+  REQUIRE(parsed->raw["seen_filename"] == "sample.wav");
+  REQUIRE(parsed->raw["seen_media_type"] == "audio/wav");
+  REQUIRE(parsed->raw["seen_timestamps"] == "false");
+  REQUIRE(parsed->raw["seen_language"] == "en");
+  REQUIRE(parsed->metadata.x_balance_remaining == "3.000000");
+
+  request.response_format = "text";
+  const auto text = client.transcribe_audio(request);
+  REQUIRE(text.has_value());
+  const auto* plain = std::get_if<venice::TextAudioTranscription>(&*text);
+  REQUIRE(plain != nullptr);
+  REQUIRE(plain->text == "fixture transcript");
+  REQUIRE(plain->media_type == "text/plain");
+
+  for (const auto& [model, status] :
+       std::array<std::pair<const char*, int>, 3>{{{"payload-too-large", 413},
+                                                   {"unsupported-media", 415},
+                                                   {"validation-error", 422}}}) {
+    request.model = model;
+    const auto result = client.transcribe_audio(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().status == status);
+  }
+  request.model = "wrong-media";
+  const auto wrong = client.transcribe_audio(request);
+  REQUIRE_FALSE(wrong);
+  REQUIRE(wrong.error().is(ErrorKind::Parse));
+
+  venice::AudioVoiceCloneRequest clone{.file = file, .model = "tts-fixture"};
+  const auto voice = client.clone_voice(clone);
+  REQUIRE(voice.has_value());
+  REQUIRE(voice->id == "vv_fixture");
+  REQUIRE(voice->model == "tts-fixture");
+  REQUIRE(voice->raw["seen_file_size"] == 9);
+  REQUIRE(voice->raw["seen_filename"] == "sample.wav");
+  REQUIRE(voice->raw["seen_media_type"] == "audio/wav");
+}
+
+TEST_CASE("audio async calls keep quote auth and status-media-cleanup states distinct",
+          "[transport][audio][async]") {
+  const TestServer server;
+  const Client bearer{"audio-key", server.base_url()};
+  const Client wallet{Authentication::sign_in_with_x("signed-audio-wallet"),
+                      server.base_url()};
+
+  const auto quote = bearer.quote_audio({.model = "music-fixture", .character_count = 100});
+  REQUIRE(quote.has_value());
+  REQUIRE(quote->quote == 0.75);
+  REQUIRE(quote->raw["seen_authorization"] == "Bearer audio-key");
+  REQUIRE(quote->raw["seen_siwx"] == "");
+  const auto quote_wrong_auth = wallet.quote_audio({.model = "music-fixture"});
+  REQUIRE_FALSE(quote_wrong_auth);
+  REQUIRE(quote_wrong_auth.error().is(ErrorKind::InvalidArg));
+
+  const auto queued = wallet.queue_audio({.model = "music-fixture",
+                                          .prompt = "fixture prompt",
+                                          .force_instrumental = false});
+  REQUIRE(queued.has_value());
+  REQUIRE(queued->queue_id == "queue-fixture");
+  REQUIRE(queued->raw["seen_siwx"] == "signed-audio-wallet");
+  REQUIRE(queued->raw["seen_body"]["force_instrumental"] == false);
+
+  const auto processing = bearer.retrieve_audio(
+      {.model = "music-fixture", .queue_id = "processing"});
+  REQUIRE(processing.has_value());
+  const auto* status = std::get_if<venice::AudioProcessing>(&*processing);
+  REQUIRE(status != nullptr);
+  REQUIRE(status->status == "PROCESSING");
+  REQUIRE(status->average_execution_time == 20000.0);
+
+  const auto media = bearer.retrieve_audio(
+      {.model = "music-fixture", .queue_id = "media"});
+  REQUIRE(media.has_value());
+  const auto* bytes = std::get_if<venice::AudioMedia>(&*media);
+  REQUIRE(bytes != nullptr);
+  REQUIRE(bytes->bytes == std::string{"M\0P3", 4});
+  REQUIRE(bytes->media_type == "audio/mpeg");
+
+  const auto missing = bearer.retrieve_audio(
+      {.model = "music-fixture", .queue_id = "missing"});
+  REQUIRE_FALSE(missing);
+  REQUIRE(missing.error().status == 404);
+  const auto wrong = bearer.retrieve_audio(
+      {.model = "music-fixture", .queue_id = "wrong-media"});
+  REQUIRE_FALSE(wrong);
+  REQUIRE(wrong.error().is(ErrorKind::Parse));
+
+  const auto retryable = bearer.cleanup_audio(
+      {.model = "music-fixture", .queue_id = "retry"});
+  REQUIRE(retryable.has_value());
+  REQUIRE_FALSE(retryable->success);
+  REQUIRE(retryable->raw["seen_body"]["queue_id"] == "retry");
+  const auto cleaned = bearer.cleanup_audio(
+      {.model = "music-fixture", .queue_id = "done"});
+  REQUIRE(cleaned.has_value());
+  REQUIRE(cleaned->success);
+  REQUIRE(server.audio_hits() >= 8);
 }
