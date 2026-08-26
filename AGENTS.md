@@ -181,6 +181,23 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   multi-edit constraints. `style_references` is optional so omitted
   and explicitly empty remain distinguishable, and its elements use the same
   modeled-wins `extra` merge as the containing request.
+- **Audio has three workflows, and none is a hint for another.** Speech is a
+  JSON request whose selected method owns buffered versus streamed delivery;
+  transcription and voice cloning are multipart uploads selected by an
+  explicit owned `AudioFile`; music generation is an explicit
+  quote/queue/retrieve/cleanup sequence. Successful response `Content-Type`
+  selects JSON, text or owned media bytes. Non-2xx status is classified before
+  media validation, and the client never decodes, plays or writes those bytes.
+  On streamed speech, callback `false` is deliberate early success while a
+  cancel token remains `ErrorKind::Cancelled` and wins a race between them.
+- **Audio policy belongs to the server and catalogue.** Formats, voices,
+  durations, speeds and language codes are caller-supplied values; local guards
+  reject only missing required structure and non-finite modeled doubles.
+  `MusicModelSpec` exposes the live music constraints, while ASR currently has
+  no distinct live metadata shape and therefore does not grow an empty typed
+  view. Retrieve returns a processing/media union from the actual response, a
+  cleanup body with `success: false` remains a successful retryable result, and
+  no method hides polling, cleanup or remote deletion from the caller.
 - **Braces build arrays, parentheses build scalars.** `nlohmann::json{"auto"}` is
   `["auto"]`; `nlohmann::json("auto")` is `"auto"`. Both compile, so only an
   `is_string()`-style assertion catches the wrong one. The *object* builders

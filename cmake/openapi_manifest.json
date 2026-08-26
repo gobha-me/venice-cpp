@@ -2,10 +2,10 @@
   "schema_version": 1,
   "source": {
     "url": "https://api.venice.ai/doc/api/swagger.yaml",
-    "repository_url": "https://github.com/veniceai/api-docs/blob/f84efe1225895436403aa527f282ffdada4245b5/swagger.yaml",
-    "version": "20260814.194349",
-    "sha256": "9fe43a1a93cb3eb4189f9d53924a873258dd63bc59d0b66647eb2a90e850a174",
-    "audited_on": "2026-08-16"
+    "repository_url": "https://github.com/veniceai/api-docs/blob/9b8bd5e5eca3fca2036404c7289aa916e0dceaea/swagger.yaml",
+    "version": "20260826.105305",
+    "sha256": "0daa64c8907430bfafc2aea862eaa161a6c77c9bb3a5b4edb2e517ae95532b33",
+    "audited_on": "2026-08-26"
   },
   "operations": [
     {
@@ -258,8 +258,11 @@
       "method": "POST",
       "path": "/audio/complete",
       "family": "audio",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 43,
+      "public_api": [
+        "Client::cleanup_audio"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -293,8 +296,11 @@
       "method": "POST",
       "path": "/audio/queue",
       "family": "audio",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 43,
+      "public_api": [
+        "Client::queue_audio"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -337,8 +343,11 @@
       "method": "POST",
       "path": "/audio/quote",
       "family": "audio",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 43,
+      "public_api": [
+        "Client::quote_audio"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -363,8 +372,11 @@
       "method": "POST",
       "path": "/audio/retrieve",
       "family": "audio",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 43,
+      "public_api": [
+        "Client::retrieve_audio"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -413,8 +425,12 @@
       "method": "POST",
       "path": "/audio/speech",
       "family": "audio",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 43,
+      "public_api": [
+        "Client::generate_speech",
+        "Client::generate_speech_stream"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -465,8 +481,11 @@
       "method": "POST",
       "path": "/audio/transcriptions",
       "family": "audio",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 43,
+      "public_api": [
+        "Client::transcribe_audio"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -519,8 +538,11 @@
       "method": "POST",
       "path": "/audio/voices",
       "family": "audio",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 43,
+      "public_api": [
+        "Client::clone_voice"
+      ],
       "security": [
         [
           "BearerAuth"

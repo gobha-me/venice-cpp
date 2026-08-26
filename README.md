@@ -40,8 +40,9 @@ right bridge.
   `models("all")` — since the endpoint's own default is text-only.
 - **Each modality's own shape**, not just text's — an image model's step and
   aspect-ratio constraints, a video model's durations and whether it takes an
-  image or a video as input, a TTS model's voices and voice-cloning terms, an
-  embedding model's dimensions, and deprecation dates with a replacement id.
+  image or a video as input, a TTS model's voices and voice-cloning terms, a
+  music model's duration/lyrics/voice policy, an embedding model's dimensions,
+  and deprecation dates with a replacement id.
   One optional view per modality, engaged by the model's `type`.
 - **The catalogue's own answer to "which model"** (`/models/traits`,
   `/models/compatibility_mapping`) — the model currently holding a capability
@@ -67,6 +68,11 @@ right bridge.
   removal accept explicit inline, URL or owned-file inputs as each endpoint
   permits. JSON versus multipart is selected from that input, and successful
   image bytes retain their actual media type and response metadata.
+- **Audio** — buffered and chunk-streamed text-to-speech, multipart
+  transcription in typed JSON or exact text, TTL-bound cloned-voice handles,
+  and explicit quote/queue/retrieve/cleanup calls for asynchronous audio.
+  Successful AAC/FLAC/MP3/Opus/PCM/WAV bytes are selected by actual media type
+  and are never decoded, played, or written by the client.
 - **Account billing** (`/billing/balance`, `/billing/usage-analytics`,
   `/billing/usage-history`) — typed balance and aggregate views plus ordered,
   cursor-paged ledger history. History can return typed JSON or byte-exact CSV,
@@ -91,11 +97,12 @@ right bridge.
   auth / payment-required / rate-limit / invalid-arg / cancelled. Response
   failures carry status, raw body and response metadata, including x402 headers.
 
-Later phases (fed by real use): audio/video, TTS, retries/backoff, async.
+Later phases (fed by real use): video, retries/backoff, and high-level async
+workflow helpers.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 27/49 operations implemented.
+OpenAPI coverage: 34/49 operations implemented.
 
 One additional published operation is explicitly unsupported:
 `GET /billing/usage` already returns 410 for every request and points callers
@@ -333,6 +340,64 @@ models report as many as six — and is not duplicated as a stale client guard.
 All four results are `GeneratedImageMedia`; the library preserves bytes and
 metadata but never decodes, saves or displays an image.
 
+### Audio
+
+Speech has buffered and chunk-callback forms. The selected method owns the
+`streaming` wire bit, so a reusable `SpeechRequest` has no second source of
+truth for it:
+
+```cpp
+venice::SpeechRequest speech;
+speech.input = "Hello from Venice.";
+speech.model = "tts-kokoro";       // server-owned string
+speech.response_format = "mp3";    // consult models("tts")
+
+const auto generated = client.generate_speech(speech);
+if (!generated) return;             // inspect generated.error()
+std::cout << generated->media_type << ": " << generated->bytes.size() << " bytes\n";
+
+std::string streamed_bytes;
+const auto streamed = client.generate_speech_stream(
+    speech, [&](std::string_view chunk) {
+      streamed_bytes.append(chunk);  // the view lives only for this callback
+      return true;                   // false is deliberate early success
+    });
+if (!streamed) return;
+```
+
+`CancelToken` abandonment returns `ErrorKind::Cancelled`; callback `false`
+returns `SpeechStreamResult{.completed=false}`. Both forms preserve the actual
+normalized AAC/FLAC/MP3/Opus/PCM/WAV media type and exact response metadata.
+
+Transcription and voice cloning upload owned bytes plus filename/media type.
+The actual successful media type selects typed JSON versus exact text:
+
+```cpp
+venice::AudioTranscriptionRequest transcription;
+transcription.file = {generated->bytes, "speech.mp3", generated->media_type};
+transcription.model = "openai/whisper-large-v3";
+transcription.timestamps = true;
+
+const auto transcript = client.transcribe_audio(transcription);
+if (!transcript) return;
+if (const auto* json = std::get_if<venice::JsonAudioTranscription>(&*transcript))
+  std::cout << json->text << '\n';
+else
+  std::cout << std::get<venice::TextAudioTranscription>(*transcript).text << '\n';
+```
+
+`clone_voice()` returns the server's typed voice handle and model while retaining
+the raw response. The handle remains bound to that model; consult the selected
+TTS model's `voice_cloning.retention_days` for its server-controlled lifetime
+(currently seven days on the measured cloning model).
+
+Asynchronous generation remains explicit: `quote_audio()`, `queue_audio()`,
+`retrieve_audio()` and `cleanup_audio()` expose each server operation. Retrieval
+returns `AudioProcessing` or `AudioMedia` from the actual response type;
+`cleanup_audio()` is named for its destructive meaning and a returned
+`success=false` remains a retryable value. The library deliberately does not
+poll or delete remote media automatically.
+
 **`response_format` is raw JSON, not an enum.** The API accepts both
 `{"type":"json_object"}` and a full `{"type":"json_schema", …}` block, and no
 enum can carry a schema — so the field is `std::optional<nlohmann::json>` and
@@ -439,8 +504,10 @@ specification:
 - **`voice_cloning` absent does not mean the model cannot clone.** Models whose
   cloning is behind a private alpha omit the field for non-staff callers while
   still appearing in the listing.
-- **Music and ASR are not typed yet** and stay reachable through `Model::raw`.
-  `venice-cpp --modality music` prints exactly what they carry.
+- **Music is typed where Audio needs policy; ASR has no separate live shape.**
+  Music exposes duration, prompt, lyrics, voice, language, speed and format
+  constraints. ASR entries currently carry only the common model/pricing fields
+  and remain fully available through those fields plus `Model::raw`.
 
 The wire spelling differs by modality in the same position — image sends
 `aspectRatios` and `promptCharacterLimit`, video sends `aspect_ratios` and
@@ -1104,7 +1171,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.23.0)
+  GIT_TAG        v0.24.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -1223,6 +1290,13 @@ opaque base64 string for the same input. Raw and typed shapes agreed, with no
 unmodeled envelope, usage or entry keys; four alternate embedding models were
 reported beside the pick.
 
+**Audio's safe live leg passed on 2026-08-26.** `--audio` named the alternate
+TTS, ASR and music models, generated the same 16,845-byte MP3 through buffered
+and streamed speech with `tts-kokoro`, transcribed the in-memory bytes with
+`nvidia/parakeet-tdt-0.6b-v3`, and quoted `ace-step-15` at $0.03. Transcript and
+quote typed values agreed with their verbatim envelopes. The leg deliberately
+does not clone a voice, enqueue work, poll, delete, play or write media.
+
 **#28 is settled in v0.11.1, and its premise was wrong.** Venice does send both
 detail objects, at exactly the nesting the library reads — but only on some
 model families. `--stream` had auto-picked `gemini-3-6-flash`, one of two
@@ -1265,6 +1339,7 @@ VENICE_API_KEY=... venice-cpp --usage [model]  # v0.12.0: usage + cost + envelop
 VENICE_API_KEY=... venice-cpp --embeddings [model] # v0.18.0: float + base64
 VENICE_API_KEY=... venice-cpp --image [model]      # v0.19.0: JSON + media
 VENICE_API_KEY=... venice-cpp --image-transform [model] # v0.20.0: four transforms
+VENICE_API_KEY=... venice-cpp --audio [tts] [asr] [music] # v0.24.0: speech + transcription + quote
 VENICE_API_KEY=... venice-cpp --billing [lookback] # v0.21.0: balance + analytics + history
 VENICE_API_KEY=... venice-cpp --api-keys          # v0.22.0: read-only keys + rate limits
 

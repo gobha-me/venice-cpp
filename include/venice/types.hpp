@@ -167,6 +167,22 @@ namespace detail {
   return out;
 }
 
+[[nodiscard]] inline auto opt_int_array(const nlohmann::json& j, const char* key)
+    -> std::optional<std::vector<int>> {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_array()) return std::nullopt;
+  std::vector<int> out;
+  out.reserve(it->size());
+  for (const auto& value : *it) {
+    if (!value.is_number_integer()) continue;
+    const auto wide = value.get<std::int64_t>();
+    if (wide < std::numeric_limits<int>::min() || wide > std::numeric_limits<int>::max())
+      continue;
+    out.push_back(static_cast<int>(wide));
+  }
+  return out;
+}
+
 // As opt_string_array, with absent and malformed both flattened onto empty.
 [[nodiscard]] inline auto string_array(const nlohmann::json& j, const char* key)
     -> std::vector<std::string> {
@@ -245,6 +261,12 @@ template <typename Struct, std::size_t N>
 inline void read_table(const nlohmann::json& j, Struct& s,
                        const std::array<VectorField<std::string, Struct>, N>& table) {
   for (const auto& [field, key] : table) s.*field = opt_string_array(j, key);
+}
+
+template <typename Struct, std::size_t N>
+inline void read_table(const nlohmann::json& j, Struct& s,
+                       const std::array<VectorField<int, Struct>, N>& table) {
+  for (const auto& [field, key] : table) s.*field = opt_int_array(j, key);
 }
 
 template <typename Struct, typename T, std::size_t N>
@@ -1395,6 +1417,382 @@ struct ImageBackgroundRemovalRequest {
   }
 };
 
+// ── audio ────────────────────────────────────────────────────────────────
+//
+// Audio uses three transport shapes: JSON speech and asynchronous generation,
+// multipart uploads for transcription/voice cloning, and successful media
+// bytes. Bytes stay in std::string for the same reason image bytes do:
+// cpp-httplib treats size(), not a terminating NUL, as authoritative.
+
+struct AudioFile {
+  std::string bytes{};
+  std::string filename{};
+  std::string media_type{};
+};
+
+struct AudioMedia {
+  std::string bytes{};
+  std::string media_type{};
+  ResponseMetadata metadata{};
+};
+
+namespace audio_duration {
+
+// Venice currently accepts either an integer or a decimal-free numeric
+// string. Keep the raw union open and make the two documented scalar shapes
+// difficult to misspell. Parentheses are intentional: braces build a JSON
+// array for a scalar string.
+[[nodiscard]] inline auto seconds(int value) -> nlohmann::json {
+  return nlohmann::json(value);
+}
+
+[[nodiscard]] inline auto numeric_string(std::string value) -> nlohmann::json {
+  return nlohmann::json(std::move(value));
+}
+
+}  // namespace audio_duration
+
+struct SpeechRequest {
+  std::string input{};
+  std::optional<std::string> language{};
+  std::optional<std::string> model{};
+  std::optional<std::string> prompt{};
+  std::optional<std::string> response_format{};
+  std::optional<double> speed{};
+  std::optional<double> temperature{};
+  std::optional<double> top_p{};
+  std::optional<std::string> voice{};
+  nlohmann::json extra{};
+
+  // Streaming belongs to the selected Client method, not to the reusable
+  // request value. No default: a caller constructing a wire body must decide
+  // which transport it is driving, exactly as ChatRequest does.
+  [[nodiscard]] auto to_json_body(bool streaming) const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["input"] = input;
+    j["streaming"] = streaming;
+    if (language) j["language"] = *language;
+    if (model) j["model"] = *model;
+    if (prompt) j["prompt"] = *prompt;
+    if (response_format) j["response_format"] = *response_format;
+    if (speed) j["speed"] = *speed;
+    if (temperature) j["temperature"] = *temperature;
+    if (top_p) j["top_p"] = *top_p;
+    if (voice) j["voice"] = *voice;
+    return j;
+  }
+};
+
+struct SpeechStreamResult {
+  std::string media_type{};
+  ResponseMetadata metadata{};
+  // false means the byte callback deliberately stopped delivery. Caller
+  // cancellation is an ErrorKind::Cancelled result instead.
+  bool completed{false};
+};
+
+struct AudioTranscriptionRequest {
+  AudioFile file{};
+  std::optional<std::string> model{};
+  std::optional<std::string> response_format{};
+  std::optional<bool> timestamps{};
+  std::optional<std::string> language{};
+};
+
+struct AudioWordTimestamp {
+  std::string word{};
+  double start{0.0};
+  double end{0.0};
+  nlohmann::json raw{};
+};
+
+struct AudioSegmentTimestamp {
+  std::string text{};
+  double start{0.0};
+  double end{0.0};
+  nlohmann::json raw{};
+};
+
+struct AudioCharacterTimestamp {
+  std::string character{};
+  double start{0.0};
+  double end{0.0};
+  nlohmann::json raw{};
+};
+
+struct AudioTimestamps {
+  std::optional<std::vector<AudioWordTimestamp>> words{};
+  std::optional<std::vector<AudioSegmentTimestamp>> segments{};
+  std::optional<std::vector<AudioCharacterTimestamp>> characters{};
+  nlohmann::json raw{};
+};
+
+struct JsonAudioTranscription {
+  std::string text{};
+  std::optional<double> duration{};
+  std::optional<AudioTimestamps> timestamps{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct TextAudioTranscription {
+  std::string text{};
+  std::string media_type{};
+  ResponseMetadata metadata{};
+};
+
+using AudioTranscriptionResult =
+    std::variant<JsonAudioTranscription, TextAudioTranscription>;
+
+struct AudioVoiceCloneRequest {
+  AudioFile file{};
+  std::optional<std::string> model{};
+};
+
+struct ClonedVoice {
+  std::string id{};
+  std::string model{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct AudioQuoteRequest {
+  std::string model{};
+  std::optional<nlohmann::json> duration_seconds{};
+  std::optional<int> character_count{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["model"] = model;
+    if (duration_seconds) j["duration_seconds"] = *duration_seconds;
+    if (character_count) j["character_count"] = *character_count;
+    return j;
+  }
+};
+
+struct AudioQuote {
+  double quote{0.0};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct AudioQueueRequest {
+  std::string model{};
+  std::string prompt{};
+  std::optional<std::string> lyrics_prompt{};
+  std::optional<nlohmann::json> duration_seconds{};
+  std::optional<bool> force_instrumental{};
+  std::optional<bool> lyrics_optimizer{};
+  std::optional<bool> loop{};
+  std::optional<std::string> voice{};
+  std::optional<std::string> language_code{};
+  std::optional<double> speed{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["model"] = model;
+    j["prompt"] = prompt;
+    if (lyrics_prompt) j["lyrics_prompt"] = *lyrics_prompt;
+    if (duration_seconds) j["duration_seconds"] = *duration_seconds;
+    if (force_instrumental) j["force_instrumental"] = *force_instrumental;
+    if (lyrics_optimizer) j["lyrics_optimizer"] = *lyrics_optimizer;
+    if (loop) j["loop"] = *loop;
+    if (voice) j["voice"] = *voice;
+    if (language_code) j["language_code"] = *language_code;
+    if (speed) j["speed"] = *speed;
+    return j;
+  }
+};
+
+struct AudioQueued {
+  std::string model{};
+  std::string queue_id{};
+  std::string status{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct AudioRetrieveRequest {
+  std::string model{};
+  std::string queue_id{};
+  std::optional<bool> delete_media_on_completion{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["model"] = model;
+    j["queue_id"] = queue_id;
+    if (delete_media_on_completion)
+      j["delete_media_on_completion"] = *delete_media_on_completion;
+    return j;
+  }
+};
+
+struct AudioProcessing {
+  std::string status{};
+  double average_execution_time{0.0};
+  double execution_duration{0.0};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+using AudioRetrieveResult = std::variant<AudioProcessing, AudioMedia>;
+
+struct AudioCleanupRequest {
+  std::string model{};
+  std::string queue_id{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["model"] = model;
+    j["queue_id"] = queue_id;
+    return j;
+  }
+};
+
+struct AudioCleanupResult {
+  bool success{false};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+namespace detail {
+
+[[nodiscard]] inline auto required_audio_string(const nlohmann::json& j, const char* key,
+                                                const char* where) -> std::string {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_string())
+    throw std::runtime_error{std::string{where} + ": " + key + " must be a string"};
+  return it->get<std::string>();
+}
+
+[[nodiscard]] inline auto required_audio_double(const nlohmann::json& j, const char* key,
+                                                const char* where) -> double {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_number())
+    throw std::runtime_error{std::string{where} + ": " + key + " must be a number"};
+  return it->get<double>();
+}
+
+}  // namespace detail
+
+[[nodiscard]] inline auto audio_transcription_from_json_body(const nlohmann::json& j)
+    -> JsonAudioTranscription {
+  if (!j.is_object())
+    throw std::runtime_error{"audio transcription: response must be an object"};
+
+  JsonAudioTranscription response;
+  response.raw = j;
+  response.text = detail::required_audio_string(j, "text", "audio transcription");
+  response.duration = detail::opt_double(j, "duration");
+
+  const auto* timestamps = detail::opt_object(j, "timestamps");
+  if (timestamps == nullptr) return response;
+
+  AudioTimestamps parsed;
+  parsed.raw = *timestamps;
+  if (const auto* words = detail::opt_array(*timestamps, "word")) {
+    parsed.words.emplace();
+    parsed.words->reserve(words->size());
+    for (const auto& item : *words) {
+      if (!item.is_object())
+        throw std::runtime_error{"audio transcription: word timestamp must be an object"};
+      parsed.words->push_back({
+          .word = detail::required_audio_string(item, "word", "audio word timestamp"),
+          .start = detail::required_audio_double(item, "start", "audio word timestamp"),
+          .end = detail::required_audio_double(item, "end", "audio word timestamp"),
+          .raw = item,
+      });
+    }
+  }
+  if (const auto* segments = detail::opt_array(*timestamps, "segment")) {
+    parsed.segments.emplace();
+    parsed.segments->reserve(segments->size());
+    for (const auto& item : *segments) {
+      if (!item.is_object())
+        throw std::runtime_error{"audio transcription: segment timestamp must be an object"};
+      parsed.segments->push_back({
+          .text = detail::required_audio_string(item, "text", "audio segment timestamp"),
+          .start = detail::required_audio_double(item, "start", "audio segment timestamp"),
+          .end = detail::required_audio_double(item, "end", "audio segment timestamp"),
+          .raw = item,
+      });
+    }
+  }
+  if (const auto* characters = detail::opt_array(*timestamps, "char")) {
+    parsed.characters.emplace();
+    parsed.characters->reserve(characters->size());
+    for (const auto& item : *characters) {
+      if (!item.is_object())
+        throw std::runtime_error{"audio transcription: character timestamp must be an object"};
+      parsed.characters->push_back({
+          .character =
+              detail::required_audio_string(item, "char", "audio character timestamp"),
+          .start = detail::required_audio_double(item, "start", "audio character timestamp"),
+          .end = detail::required_audio_double(item, "end", "audio character timestamp"),
+          .raw = item,
+      });
+    }
+  }
+  response.timestamps = std::move(parsed);
+  return response;
+}
+
+[[nodiscard]] inline auto cloned_voice_from_json_body(const nlohmann::json& j)
+    -> ClonedVoice {
+  if (!j.is_object()) throw std::runtime_error{"cloned voice: response must be an object"};
+  return ClonedVoice{
+      .id = detail::required_audio_string(j, "id", "cloned voice"),
+      .model = detail::required_audio_string(j, "model", "cloned voice"),
+      .raw = j,
+  };
+}
+
+[[nodiscard]] inline auto audio_quote_from_json_body(const nlohmann::json& j) -> AudioQuote {
+  if (!j.is_object()) throw std::runtime_error{"audio quote: response must be an object"};
+  return AudioQuote{
+      .quote = detail::required_audio_double(j, "quote", "audio quote"),
+      .raw = j,
+  };
+}
+
+[[nodiscard]] inline auto audio_queued_from_json_body(const nlohmann::json& j)
+    -> AudioQueued {
+  if (!j.is_object()) throw std::runtime_error{"audio queue: response must be an object"};
+  return AudioQueued{
+      .model = detail::required_audio_string(j, "model", "audio queue"),
+      .queue_id = detail::required_audio_string(j, "queue_id", "audio queue"),
+      .status = detail::required_audio_string(j, "status", "audio queue"),
+      .raw = j,
+  };
+}
+
+[[nodiscard]] inline auto audio_processing_from_json_body(const nlohmann::json& j)
+    -> AudioProcessing {
+  if (!j.is_object())
+    throw std::runtime_error{"audio retrieve: processing response must be an object"};
+  return AudioProcessing{
+      .status = detail::required_audio_string(j, "status", "audio retrieve"),
+      .average_execution_time =
+          detail::required_audio_double(j, "average_execution_time", "audio retrieve"),
+      .execution_duration =
+          detail::required_audio_double(j, "execution_duration", "audio retrieve"),
+      .raw = j,
+  };
+}
+
+[[nodiscard]] inline auto audio_cleanup_from_json_body(const nlohmann::json& j)
+    -> AudioCleanupResult {
+  if (!j.is_object()) throw std::runtime_error{"audio cleanup: response must be an object"};
+  const auto it = j.find("success");
+  if (it == j.end() || !it->is_boolean())
+    throw std::runtime_error{"audio cleanup: success must be a boolean"};
+  return AudioCleanupResult{.success = it->get<bool>(), .raw = j};
+}
+
 // ── money ─────────────────────────────────────────────────────────────────
 //
 // Venice quotes every amount in two currencies at once: USD and `diem`, its
@@ -1819,11 +2217,10 @@ inline void from_json(const nlohmann::json& j, ModelCapabilities& c) {
 //    Deprecation that is modeled anyway and cost one row each. The
 //    `--modality` leg reports what it has never observed without failing on
 //    it.
-//  * **Music and ASR are deliberately out of scope** (VC-39). Music carries
-//    nineteen model_spec keys of its own and no epic consumes them yet; ASR
-//    carries none beyond pricing. Both stay reachable through `Model::raw`,
-//    and `--modality music` prints their full key inventory so the follow-up
-//    ticket starts from a measurement rather than a guess.
+//  * **Music became typed when Audio began consuming it** (VC-28). Queue and
+//    quote requests need its duration, prompt, lyrics, voice, language and
+//    speed policy. ASR still carries nothing beyond the common fields and
+//    pricing, so no empty modality view is invented for it.
 //
 // Every string list here is optional<vector>, unlike Model::traits. In a
 // constraints block "the server said none" and "the server did not say" are
@@ -1972,6 +2369,32 @@ struct TtsModelSpec {
   std::optional<std::string> default_format;
   std::optional<bool> supports_custom_voice_id;
   std::optional<VoiceCloning> voice_cloning;  // absent is not a "no" — see above
+};
+
+struct MusicModelSpec {
+  std::optional<bool> lyrics_required;
+  std::optional<bool> supports_lyrics;
+  std::optional<bool> supports_force_instrumental;
+  std::optional<bool> supports_lyrics_optimizer;
+  std::optional<bool> supports_loop;
+  std::optional<bool> supports_custom_voice_id;
+  std::optional<bool> supports_language_code;
+  std::optional<bool> supports_speed;
+  std::optional<bool> uncensored;
+  std::optional<int> default_duration;
+  std::optional<int> min_duration;
+  std::optional<int> max_duration;
+  std::optional<int> min_prompt_length;
+  std::optional<int> prompt_character_limit;
+  std::optional<int> lyrics_character_limit;
+  std::optional<double> default_speed;
+  std::optional<double> min_speed;
+  std::optional<double> max_speed;
+  std::optional<std::string> default_format;
+  std::optional<std::string> default_voice;
+  std::optional<std::vector<int>> duration_options;
+  std::optional<std::vector<std::string>> supported_formats;
+  std::optional<std::vector<std::string>> voices;
 };
 
 struct EmbeddingModelSpec {
@@ -2131,6 +2554,43 @@ inline constexpr std::array<ObjectField<VoiceCloning, TtsModelSpec>, 1> kTtsSpec
     {&TtsModelSpec::voice_cloning, "voice_cloning"},
 }};
 
+inline constexpr std::array<Field<bool, MusicModelSpec>, 9> kMusicSpecBoolFields{{
+    {&MusicModelSpec::lyrics_required, "lyrics_required"},
+    {&MusicModelSpec::supports_lyrics, "supports_lyrics"},
+    {&MusicModelSpec::supports_force_instrumental, "supports_force_instrumental"},
+    {&MusicModelSpec::supports_lyrics_optimizer, "supports_lyrics_optimizer"},
+    {&MusicModelSpec::supports_loop, "supports_loop"},
+    {&MusicModelSpec::supports_custom_voice_id, "supports_custom_voice_id"},
+    {&MusicModelSpec::supports_language_code, "supports_language_code"},
+    {&MusicModelSpec::supports_speed, "supports_speed"},
+    {&MusicModelSpec::uncensored, "uncensored"},
+}};
+inline constexpr std::array<Field<int, MusicModelSpec>, 6> kMusicSpecIntFields{{
+    {&MusicModelSpec::default_duration, "default_duration"},
+    {&MusicModelSpec::min_duration, "min_duration"},
+    {&MusicModelSpec::max_duration, "max_duration"},
+    {&MusicModelSpec::min_prompt_length, "min_prompt_length"},
+    {&MusicModelSpec::prompt_character_limit, "prompt_character_limit"},
+    {&MusicModelSpec::lyrics_character_limit, "lyrics_character_limit"},
+}};
+inline constexpr std::array<Field<double, MusicModelSpec>, 3> kMusicSpecDoubleFields{{
+    {&MusicModelSpec::default_speed, "default_speed"},
+    {&MusicModelSpec::min_speed, "min_speed"},
+    {&MusicModelSpec::max_speed, "max_speed"},
+}};
+inline constexpr std::array<Field<std::string, MusicModelSpec>, 2> kMusicSpecStringFields{{
+    {&MusicModelSpec::default_format, "default_format"},
+    {&MusicModelSpec::default_voice, "default_voice"},
+}};
+inline constexpr std::array<VectorField<int, MusicModelSpec>, 1> kMusicSpecIntListFields{{
+    {&MusicModelSpec::duration_options, "duration_options"},
+}};
+inline constexpr std::array<VectorField<std::string, MusicModelSpec>, 2>
+    kMusicSpecStringListFields{{
+        {&MusicModelSpec::supported_formats, "supported_formats"},
+        {&MusicModelSpec::voices, "voices"},
+    }};
+
 inline constexpr std::array<Field<int, EmbeddingModelSpec>, 2> kEmbeddingSpecIntFields{{
     {&EmbeddingModelSpec::embedding_dimensions, "embeddingDimensions"},
     {&EmbeddingModelSpec::max_input_tokens, "maxInputTokens"},
@@ -2213,6 +2673,15 @@ inline void from_json(const nlohmann::json& j, TtsModelSpec& s) {
   detail::read_table(j, s, detail::kTtsSpecObjectFields);
 }
 
+inline void from_json(const nlohmann::json& j, MusicModelSpec& s) {
+  detail::read_table(j, s, detail::kMusicSpecBoolFields);
+  detail::read_table(j, s, detail::kMusicSpecIntFields);
+  detail::read_table(j, s, detail::kMusicSpecDoubleFields);
+  detail::read_table(j, s, detail::kMusicSpecStringFields);
+  detail::read_table(j, s, detail::kMusicSpecIntListFields);
+  detail::read_table(j, s, detail::kMusicSpecStringListFields);
+}
+
 inline void from_json(const nlohmann::json& j, EmbeddingModelSpec& s) {
   detail::read_table(j, s, detail::kEmbeddingSpecIntFields);
   detail::read_table(j, s, detail::kEmbeddingSpecBoolFields);
@@ -2224,7 +2693,8 @@ inline void from_json(const nlohmann::json& j, EmbeddingModelSpec& s) {
 // always sets and every caller needs, so they stay plain strings; everything
 // else is optional, because `model_spec` is polymorphic by model type. Text
 // models carry capabilities and a context window; image models carry
-// generation pricing and style-reference flags; tts carries a voice list.
+// generation pricing and style-reference flags; tts carries a voice list;
+// music carries the request policy consumed by the Audio API.
 //
 // Until VC-39 the typed surface here was the text shape alone and `raw` kept
 // the rest, which made this struct the one place that knew an image model's
@@ -2250,9 +2720,9 @@ inline void from_json(const nlohmann::json& j, EmbeddingModelSpec& s) {
 //    whole. A modality Venice adds tomorrow costs this header nothing and
 //    costs its callers a `raw` walk, which is where they are today for all of
 //    them.
-//  * **Scope is image, inpaint, video, text, tts and embedding.** Music and
-//    ASR are deliberately not modeled — see the block above `StepsConstraint`
-//    — and upscale carries nothing beyond pricing.
+//  * **Scope is image, inpaint, video, text, tts, music and embedding.** ASR
+//    needs no modality view beyond the common pricing fields, and upscale
+//    carries nothing beyond pricing.
 //
 // `deprecation` and `model_sets` sit on Model rather than inside a view
 // because they are cross-modality: deprecation was observed on video and is
@@ -2311,7 +2781,7 @@ struct Model {
   std::optional<ModelCapabilities> capabilities;
   std::optional<Pricing> pricing;
 
-  // At most one of these six is engaged, selected by `type`. See the note
+  // At most one of these seven is engaged, selected by `type`. See the note
   // above; `text_constraints` is spelled out rather than wrapped in a
   // TextModelSpec because text's other metadata has been flat on Model since
   // VC-03 and moving it would break every existing caller to buy symmetry.
@@ -2319,6 +2789,7 @@ struct Model {
   std::optional<InpaintModelSpec> inpaint;
   std::optional<VideoModelSpec> video;
   std::optional<TtsModelSpec> tts;
+  std::optional<MusicModelSpec> music;
   std::optional<EmbeddingModelSpec> embedding;
   std::optional<TextConstraints> text_constraints;  // 5 of 106 text models
 
@@ -2373,7 +2844,7 @@ struct Model {
     //
     // A type this client has never heard of falls off the end with every view
     // disengaged and `raw` intact, which is the correct answer and not a
-    // failure. "music", "asr" and "upscale" take that path deliberately.
+    // failure. "asr" and "upscale" take that path deliberately.
     if (m.type == "image")
       m.image = spec->get<ImageModelSpec>();
     else if (m.type == "inpaint")
@@ -2382,6 +2853,8 @@ struct Model {
       m.video = spec->get<VideoModelSpec>();
     else if (m.type == "tts")
       m.tts = spec->get<TtsModelSpec>();
+    else if (m.type == "music")
+      m.music = spec->get<MusicModelSpec>();
     else if (m.type == "embedding")
       m.embedding = spec->get<EmbeddingModelSpec>();
     else if (m.type == "text") {

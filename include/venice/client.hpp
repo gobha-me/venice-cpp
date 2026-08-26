@@ -18,6 +18,12 @@
 //   * edit_image(req)               -> expected<GeneratedImageMedia>
 //   * multi_edit_image(req)         -> expected<GeneratedImageMedia>
 //   * remove_image_background(req)  -> expected<GeneratedImageMedia>
+//   * generate_speech(req)          -> expected<AudioMedia>
+//   * generate_speech_stream(req, on_chunk)
+//                                   -> expected<SpeechStreamResult>
+//   * transcribe_audio(req)         -> expected<AudioTranscriptionResult>
+//   * clone_voice(req)              -> expected<ClonedVoice>
+//   * quote/queue/retrieve/cleanup_audio(req)
 //   * models()                      -> expected<vector<Model>>
 //   * model_traits(type)            -> expected<ModelTraits>
 //   * model_compatibility_mapping(type)
@@ -48,8 +54,8 @@
 // per-call timeouts, cancellation and authentication override — see
 // venice/options.hpp (VC-06/VC-23).
 //
-// Later phases, fed by real use: image edit/upscale, audio/video, TTS,
-// retries/backoff, async.
+// Later phases, fed by real use: video, retries/backoff, and high-level async
+// workflow helpers.
 
 #include <array>
 #include <cctype>
@@ -253,6 +259,34 @@ inline void append_image_file(MultipartBody& body, std::string name,
                         .content_type = image.media_type});
 }
 
+inline void append_audio_file(MultipartBody& body, std::string name,
+                              const AudioFile& audio) {
+  body.parts.push_back({.name = std::move(name),
+                        .bytes = audio.bytes,
+                        .filename = audio.filename,
+                        .content_type = audio.media_type});
+}
+
+[[nodiscard]] inline auto audio_transcription_body(
+    const AudioTranscriptionRequest& request) -> MultipartBody {
+  MultipartBody body;
+  append_audio_file(body, "file", request.file);
+  if (request.model) append_form_field(body, "model", *request.model);
+  if (request.response_format)
+    append_form_field(body, "response_format", *request.response_format);
+  if (request.timestamps) append_form_field(body, "timestamps", *request.timestamps);
+  if (request.language) append_form_field(body, "language", *request.language);
+  return body;
+}
+
+[[nodiscard]] inline auto audio_voice_clone_body(const AudioVoiceCloneRequest& request)
+    -> MultipartBody {
+  MultipartBody body;
+  append_audio_file(body, "file", request.file);
+  if (request.model) append_form_field(body, "model", *request.model);
+  return body;
+}
+
 [[nodiscard]] inline auto image_upscale_body(const ImageUpscaleRequest& request)
     -> BufferedBody {
   const auto* file = std::get_if<ImageFile>(&request.image);
@@ -440,6 +474,19 @@ enum class AuthPolicy { PublicOnly, PublicOrBearer, BearerOnly, BearerOrSignInWi
   for (const char c : value)
     normalized.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
   return normalized;
+}
+
+inline constexpr std::array<std::string_view, 6> kSpeechMediaTypes{
+    "audio/aac", "audio/flac", "audio/mpeg", "audio/opus", "audio/pcm", "audio/wav"};
+inline constexpr std::array<std::string_view, 3> kRetrievedAudioMediaTypes{
+    "audio/flac", "audio/mpeg", "audio/wav"};
+
+template <std::size_t N>
+[[nodiscard]] inline auto media_type_is(
+    std::string_view actual, const std::array<std::string_view, N>& allowed) -> bool {
+  for (const auto candidate : allowed)
+    if (actual == candidate) return true;
+  return false;
 }
 
 [[nodiscard]] inline auto response_from_httplib(httplib::Response response) -> BufferedResponse {
@@ -919,6 +966,275 @@ class Client {
     return post_image_media_response("/image/background-remove",
                                      detail::image_background_removal_body(req),
                                      kAllowed, opts);
+  }
+
+  // ── audio ────────────────────────────────────────────────────────────
+  [[nodiscard]] auto generate_speech(const SpeechRequest& req,
+                                     const RequestOptions& opts = {}) const
+      -> std::expected<AudioMedia, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto response = post_json_raw_response("/audio/speech", req.to_json_body(false),
+                                           detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    if (auto media = detail::require_media_type(*response, detail::kSpeechMediaTypes); !media)
+      return std::unexpected{std::move(media.error())};
+    return AudioMedia{
+        .bytes = std::move(response->body),
+        .media_type = std::move(response->content_type),
+        .metadata = detail::metadata_from_headers(response->headers),
+    };
+  }
+
+  // The callback's view is valid only for that invocation. Returning false is
+  // a deliberate early success; RequestOptions::cancel remains an error and
+  // wins a race with callback stop, matching chat_stream's semantics.
+  [[nodiscard]] auto generate_speech_stream(
+      const SpeechRequest& req,
+      const std::function<bool(std::string_view /*bytes*/)>& on_chunk,
+      const RequestOptions& opts = {}) const -> std::expected<SpeechStreamResult, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto headers = request_headers(detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!headers) return std::unexpected{std::move(headers.error())};
+
+    auto cli = detail::make_transport(m_base_url, opts);
+    const detail::CancelGuard guard{opts.cancel, cli};
+    if (guard.cancelled()) return std::unexpected{detail::cancel_error()};
+
+    bool response_is_success = false;
+    bool media_is_audio = false;
+    bool early_stop = false;
+    std::string response_media_type;
+    std::string error_body;
+    bool callback_failed = false;
+    std::string callback_error;
+
+    httplib::Request hreq;
+    hreq.method = "POST";
+    hreq.path = detail::request_path(m_base_url, "/audio/speech");
+    hreq.headers = std::move(*headers);
+    hreq.body = req.to_json_body(true).dump();
+    hreq.set_header("Content-Type", "application/json");
+    hreq.response_handler = [&](const httplib::Response& response) {
+      response_is_success = response.status >= 200 && response.status < 300;
+      if (const auto it = response.headers.find("Content-Type"); it != response.headers.end())
+        response_media_type = detail::normalize_media_type(it->second);
+      media_is_audio =
+          detail::media_type_is(response_media_type, detail::kSpeechMediaTypes);
+      return true;
+    };
+    hreq.content_receiver = [&](const char* data, size_t len, size_t, uint64_t) {
+      if (!response_is_success || !media_is_audio) {
+        error_body.append(data, len);
+        return true;
+      }
+      try {
+        if (on_chunk && !on_chunk(std::string_view{data, len})) {
+          early_stop = true;
+          return false;
+        }
+      } catch (const std::exception& e) {
+        callback_failed = true;
+        callback_error = e.what();
+        return false;
+      } catch (...) {
+        callback_failed = true;
+        callback_error = "unknown exception";
+        return false;
+      }
+      return true;
+    };
+
+    httplib::Response hres;
+    httplib::Error herr = httplib::Error::Success;
+    const bool sent = cli.send(hreq, hres, herr);
+    auto metadata = detail::metadata_from_headers(hres.headers);
+
+    if (guard.cancelled()) return std::unexpected{detail::cancel_error()};
+    if (callback_failed)
+      return std::unexpected{Error{ErrorKind::InvalidArg, hres.status,
+                                   "speech callback: " + callback_error, {},
+                                   std::move(metadata)}};
+    if (!sent && !early_stop) return std::unexpected{detail::transport_error(herr)};
+    if (hres.status < 200 || hres.status >= 300)
+      return std::unexpected{
+          detail::http_error(hres.status, error_body, std::move(metadata))};
+    if (!media_is_audio) {
+      const auto actual = response_media_type.empty() ? std::string{"<missing>"}
+                                                       : response_media_type;
+      return std::unexpected{Error{ErrorKind::Parse, hres.status,
+                                   "unexpected response content type: " + actual,
+                                   std::move(error_body), std::move(metadata)}};
+    }
+    return SpeechStreamResult{.media_type = std::move(response_media_type),
+                              .metadata = std::move(metadata),
+                              .completed = !early_stop};
+  }
+
+  [[nodiscard]] auto transcribe_audio(
+      const AudioTranscriptionRequest& req,
+      const RequestOptions& opts = {}) const -> std::expected<AudioTranscriptionResult, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto headers = request_headers(detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!headers) return std::unexpected{std::move(headers.error())};
+    auto response = detail::send_buffered(
+        m_base_url,
+        detail::BufferedRequest{.method = detail::HttpMethod::Post,
+                                .endpoint = "/audio/transcriptions",
+                                .headers = std::move(*headers),
+                                .body = detail::audio_transcription_body(req)},
+        opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    if (response->status < 200 || response->status >= 300)
+      return std::unexpected{detail::http_error(
+          response->status, response->body,
+          detail::metadata_from_headers(response->headers))};
+
+    auto metadata = detail::metadata_from_headers(response->headers);
+    if (response->content_type == "text/plain")
+      return AudioTranscriptionResult{TextAudioTranscription{
+          .text = std::move(response->body),
+          .media_type = std::move(response->content_type),
+          .metadata = std::move(metadata),
+      }};
+    if (!detail::is_json_media_type(response->content_type)) {
+      const auto actual = response->content_type.empty() ? std::string{"<missing>"}
+                                                          : response->content_type;
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   "unexpected response content type: " + actual,
+                                   response->body, std::move(metadata)}};
+    }
+
+    auto body = detail::decode_json(*response);
+    if (!body) return std::unexpected{std::move(body.error())};
+    try {
+      auto parsed = audio_transcription_from_json_body(*body);
+      parsed.metadata = std::move(metadata);
+      return AudioTranscriptionResult{std::move(parsed)};
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"audio transcription parse: "} + e.what(),
+                                   response->body, std::move(metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto clone_voice(const AudioVoiceCloneRequest& req,
+                                 const RequestOptions& opts = {}) const
+      -> std::expected<ClonedVoice, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto headers = request_headers(detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!headers) return std::unexpected{std::move(headers.error())};
+    auto response = detail::send_buffered(
+        m_base_url,
+        detail::BufferedRequest{.method = detail::HttpMethod::Post,
+                                .endpoint = "/audio/voices",
+                                .headers = std::move(*headers),
+                                .body = detail::audio_voice_clone_body(req)},
+        opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    auto decoded = detail::decode_json_response(*response);
+    if (!decoded) return std::unexpected{std::move(decoded.error())};
+    try {
+      auto parsed = cloned_voice_from_json_body(decoded->body);
+      parsed.metadata = std::move(decoded->metadata);
+      return parsed;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, decoded->status,
+                                   std::string{"cloned voice parse: "} + e.what(),
+                                   decoded->raw_body, std::move(decoded->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto quote_audio(const AudioQuoteRequest& req,
+                                 const RequestOptions& opts = {}) const
+      -> std::expected<AudioQuote, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto response = post_json_response("/audio/quote", req.to_json_body(),
+                                       detail::AuthPolicy::BearerOnly, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    try {
+      auto parsed = audio_quote_from_json_body(response->body);
+      parsed.metadata = std::move(response->metadata);
+      return parsed;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"audio quote parse: "} + e.what(),
+                                   response->raw_body, std::move(response->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto queue_audio(const AudioQueueRequest& req,
+                                 const RequestOptions& opts = {}) const
+      -> std::expected<AudioQueued, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto response = post_json_response("/audio/queue", req.to_json_body(),
+                                       detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    try {
+      auto parsed = audio_queued_from_json_body(response->body);
+      parsed.metadata = std::move(response->metadata);
+      return parsed;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"audio queue parse: "} + e.what(),
+                                   response->raw_body, std::move(response->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto retrieve_audio(const AudioRetrieveRequest& req,
+                                    const RequestOptions& opts = {}) const
+      -> std::expected<AudioRetrieveResult, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto response = post_json_raw_response("/audio/retrieve", req.to_json_body(),
+                                           detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    if (response->status < 200 || response->status >= 300)
+      return std::unexpected{detail::http_error(
+          response->status, response->body,
+          detail::metadata_from_headers(response->headers))};
+    auto metadata = detail::metadata_from_headers(response->headers);
+    if (detail::media_type_is(response->content_type,
+                              detail::kRetrievedAudioMediaTypes))
+      return AudioRetrieveResult{AudioMedia{
+          .bytes = std::move(response->body),
+          .media_type = std::move(response->content_type),
+          .metadata = std::move(metadata),
+      }};
+    if (!detail::is_json_media_type(response->content_type)) {
+      const auto actual = response->content_type.empty() ? std::string{"<missing>"}
+                                                          : response->content_type;
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   "unexpected response content type: " + actual,
+                                   response->body, std::move(metadata)}};
+    }
+    auto body = detail::decode_json(*response);
+    if (!body) return std::unexpected{std::move(body.error())};
+    try {
+      auto parsed = audio_processing_from_json_body(*body);
+      parsed.metadata = std::move(metadata);
+      return AudioRetrieveResult{std::move(parsed)};
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"audio retrieve parse: "} + e.what(),
+                                   response->body, std::move(metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto cleanup_audio(const AudioCleanupRequest& req,
+                                   const RequestOptions& opts = {}) const
+      -> std::expected<AudioCleanupResult, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto response = post_json_response("/audio/complete", req.to_json_body(),
+                                       detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    try {
+      auto parsed = audio_cleanup_from_json_body(response->body);
+      parsed.metadata = std::move(response->metadata);
+      return parsed;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"audio cleanup parse: "} + e.what(),
+                                   response->raw_body, std::move(response->metadata)}};
+    }
   }
 
   // ── models ────────────────────────────────────────────────────────────
@@ -1717,6 +2033,94 @@ class Client {
       return std::unexpected{Error{ErrorKind::InvalidArg, 0,
                                    "JSON extra fields cannot be used with multipart image input",
                                    {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate_audio_file(const AudioFile& file)
+      -> std::expected<void, Error> {
+    if (file.bytes.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "audio file bytes are empty", {}}};
+    if (file.filename.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "audio file name is empty", {}}};
+    if (file.media_type.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "audio file media type is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const SpeechRequest& req)
+      -> std::expected<void, Error> {
+    const auto finite = [](const std::optional<double>& value) {
+      return !value || std::isfinite(*value);
+    };
+    if (!finite(req.speed))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "speed is not finite", {}}};
+    if (!finite(req.temperature))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "temperature is not finite", {}}};
+    if (!finite(req.top_p))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "top_p is not finite", {}}};
+    if (req.input.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "speech input is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const AudioTranscriptionRequest& req)
+      -> std::expected<void, Error> {
+    return validate_audio_file(req.file);
+  }
+
+  [[nodiscard]] static auto validate(const AudioVoiceCloneRequest& req)
+      -> std::expected<void, Error> {
+    return validate_audio_file(req.file);
+  }
+
+  [[nodiscard]] static auto validate(const AudioQuoteRequest& req)
+      -> std::expected<void, Error> {
+    if (req.model.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "audio model is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const AudioQueueRequest& req)
+      -> std::expected<void, Error> {
+    if (req.speed && !std::isfinite(*req.speed))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "speed is not finite", {}}};
+    if (req.model.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "audio model is empty", {}}};
+    if (req.prompt.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "audio prompt is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const AudioRetrieveRequest& req)
+      -> std::expected<void, Error> {
+    if (req.model.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "audio model is empty", {}}};
+    if (req.queue_id.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "audio queue id is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const AudioCleanupRequest& req)
+      -> std::expected<void, Error> {
+    if (req.model.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "audio model is empty", {}}};
+    if (req.queue_id.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "audio queue id is empty", {}}};
     return {};
   }
 
