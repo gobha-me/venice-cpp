@@ -640,6 +640,79 @@ auto audio_report(const venice::Client& client, std::string_view tts_model,
   return EXIT_SUCCESS;
 }
 
+// `--video [model]` (VC-29, #44) is intentionally quote-only. Queueing video
+// creates paid asynchronous work and cleanup deletes remote state, so neither
+// belongs in a smoke command. The catalogue chooses only a model whose typed
+// policy supplies a duration; a named model must satisfy the same contract.
+auto video_report(const venice::Client& client, std::string_view named_model) -> int {
+  const auto models = client.models("video");
+  if (!models) {
+    std::cerr << "models(video) failed ["
+              << venice::to_string(models.error().kind) << "] "
+              << models.error().message << '\n';
+    return EXIT_FAILURE;
+  }
+
+  ModelPick pick;
+  const venice::VideoConstraints* constraints = nullptr;
+  for (const auto& model : *models) {
+    if (model.id.empty() || !model.video || !model.video->constraints ||
+        !model.video->constraints->durations ||
+        model.video->constraints->durations->empty())
+      continue;
+    if (!named_model.empty()) {
+      if (model.id == named_model) {
+        pick.chosen = model.id;
+        constraints = &*model.video->constraints;
+        break;
+      }
+      continue;
+    }
+    if (pick.chosen.empty()) {
+      pick.chosen = model.id;
+      constraints = &*model.video->constraints;
+    } else if (pick.alternates.size() < 4U) {
+      pick.alternates.push_back(model.id);
+    }
+  }
+  if (pick.chosen.empty() || constraints == nullptr) {
+    std::cerr << (named_model.empty()
+                      ? "no video model carried a usable id and non-empty duration policy\n"
+                      : "named model is absent or has no typed video duration policy: " +
+                            std::string{named_model} + "\n");
+    return EXIT_FAILURE;
+  }
+  report_pick(pick, "type=video and a non-empty duration policy",
+              "`venice-cpp --video <id>`");
+
+  venice::VideoQuoteRequest request;
+  request.model = pick.chosen;
+  request.duration = constraints->durations->front();
+  if (constraints->aspect_ratios && !constraints->aspect_ratios->empty())
+    request.aspect_ratio = constraints->aspect_ratios->front();
+  if (constraints->resolutions && !constraints->resolutions->empty())
+    request.resolution = constraints->resolutions->front();
+
+  std::cerr << "quote request: " << request.to_json_body().dump() << '\n';
+  const auto quote = client.quote_video(request);
+  if (!quote) {
+    std::cerr << "video quote failed [" << venice::to_string(quote.error().kind)
+              << "] " << quote.error().message << '\n';
+    if (!quote.error().body.empty()) std::cerr << quote.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+  std::cerr << "video quote, envelope verbatim:\n" << quote->raw.dump(2)
+            << "\ntyped quote: $" << quote->quote << '\n';
+  if (venice::detail::opt_double(quote->raw, "quote") !=
+      std::optional<double>{quote->quote}) {
+    std::cerr << "RAW/TYPED VIDEO QUOTE MISMATCH\n";
+    return EXIT_FAILURE;
+  }
+  std::cerr << "\nNo video work was queued or polled, no remote media was deleted, and\n"
+               "no media bytes were decoded, displayed or written to disk.\n";
+  return EXIT_SUCCESS;
+}
+
 // ── image transformations (VC-41, #66) ──────────────────────────────────
 //
 // A valid 256x256 solid-colour PNG, kept as base64 so the smoke leg performs
@@ -2456,7 +2529,7 @@ auto main(int argc, char** argv) -> int {
   if (key == nullptr || *key == '\0') {
     std::cerr << "VENICE_API_KEY not set; nothing to call with a credential.\n"
                  "(--traits, --compat, --modality and --styles need no key;\n"
-                 " --embeddings, --image, --image-transform, --audio, --billing and\n"
+                 " --embeddings, --image, --image-transform, --audio, --video, --billing and\n"
                  " --api-keys need a key.)\n";
     return EXIT_SUCCESS;
   }
@@ -2479,6 +2552,7 @@ auto main(int argc, char** argv) -> int {
   if (leg == "--image") return image_report(client, arg);
   if (leg == "--image-transform") return image_transform_report(client, arg);
   if (leg == "--audio") return audio_report(client, arg, arg2, arg3);
+  if (leg == "--video") return video_report(client, arg);
   if (leg == "--billing") return billing_report(client, arg);
   if (leg == "--api-keys") return api_keys_report(client);
 

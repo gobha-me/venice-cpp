@@ -198,6 +198,14 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   view. Retrieve returns a processing/media union from the actual response, a
   cleanup body with `success: false` remains a successful retryable result, and
   no method hides polling, cleanup or remote deletion from the caller.
+- **Video is an explicit paid-work lifecycle, never a convenience loop.** Quote,
+  queue, retrieve and cleanup remain separate calls; URL transcription is a
+  fifth independent operation. Queueing can spend funds and cleanup deletes
+  remote state, so no helper polls, queues or cleans up implicitly. Successful
+  retrieval is processing JSON or owned MP4 bytes selected from actual
+  normalized `Content-Type`; transcription is typed JSON or exact plain text.
+  Provider-shaped `elements`, keyframes and legal `consents` stay raw JSON, and
+  a smoke leg may consult the catalogue and quote but must never enqueue work.
 - **Braces build arrays, parentheses build scalars.** `nlohmann::json{"auto"}` is
   `["auto"]`; `nlohmann::json("auto")` is `"auto"`. Both compile, so only an
   `is_string()`-style assertion catches the wrong one. The *object* builders

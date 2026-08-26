@@ -1793,6 +1793,326 @@ namespace detail {
   return AudioCleanupResult{.success = it->get<bool>(), .raw = j};
 }
 
+// ── video ────────────────────────────────────────────────────────────────
+//
+// Video generation is an explicit quote/queue/retrieve/cleanup workflow.
+// Successful retrieval is either processing JSON or owned MP4 bytes; the
+// response's actual media type selects the result, never a request hint.
+
+struct VideoMedia {
+  std::string bytes{};
+  std::string media_type{};
+  ResponseMetadata metadata{};
+};
+
+namespace video_input {
+
+// Elements are provider/model-shaped and therefore remain raw JSON in the
+// containing request. These builders cover the currently documented shapes
+// without closing the vector to future element kinds.
+[[nodiscard]] inline auto element(
+    std::optional<std::string> frontal_image_url = {},
+    std::optional<std::vector<std::string>> reference_image_urls = {},
+    std::optional<std::string> video_url = {}) -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  if (frontal_image_url) j["frontal_image_url"] = std::move(*frontal_image_url);
+  if (reference_image_urls)
+    j["reference_image_urls"] = std::move(*reference_image_urls);
+  if (video_url) j["video_url"] = std::move(*video_url);
+  return j;
+}
+
+[[nodiscard]] inline auto keyframe(std::string image_url, int frame_index)
+    -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["image_url"] = std::move(image_url);
+  j["frame_index"] = frame_index;
+  return j;
+}
+
+}  // namespace video_input
+
+struct VideoQuoteRequest {
+  std::string model{};
+  std::string duration{};
+  std::optional<std::string> aspect_ratio{};
+  std::optional<std::string> resolution{};
+  std::optional<int> upscale_factor{};
+  std::optional<std::string> enhancement_model{};
+  std::optional<int> target_fps{};
+  std::optional<int> slowdown_factor{};
+  std::optional<bool> audio{};
+  std::optional<std::string> video_url{};
+  std::optional<double> reference_video_total_duration{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["model"] = model;
+    j["duration"] = duration;
+    if (aspect_ratio) j["aspect_ratio"] = *aspect_ratio;
+    if (resolution) j["resolution"] = *resolution;
+    if (upscale_factor) j["upscale_factor"] = *upscale_factor;
+    if (enhancement_model) j["enhancement_model"] = *enhancement_model;
+    if (target_fps) j["target_fps"] = *target_fps;
+    if (slowdown_factor) j["slowdown_factor"] = *slowdown_factor;
+    if (audio) j["audio"] = *audio;
+    if (video_url) j["video_url"] = *video_url;
+    if (reference_video_total_duration)
+      j["reference_video_total_duration"] = *reference_video_total_duration;
+    return j;
+  }
+};
+
+struct VideoQuote {
+  double quote{0.0};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct VideoQueueRequest {
+  std::string model{};
+  std::string prompt{};
+  std::string duration{};
+  // Provider-specific legal attestations stay caller-authored. A convenience
+  // builder must never silently confirm terms on a caller's behalf.
+  std::optional<nlohmann::json> consents{};
+  std::optional<std::string> negative_prompt{};
+  std::optional<std::string> aspect_ratio{};
+  std::optional<std::string> omni_reference_task_type{};
+  std::optional<std::string> resolution{};
+  std::optional<int> upscale_factor{};
+  std::optional<std::string> enhancement_model{};
+  std::optional<int> target_fps{};
+  std::optional<double> softness{};
+  std::optional<double> creativity{};
+  std::optional<double> realism{};
+  std::optional<double> sharp{};
+  std::optional<double> compression{};
+  std::optional<double> noise{};
+  std::optional<double> halo{};
+  std::optional<double> grain{};
+  std::optional<double> recover_detail{};
+  std::optional<bool> h264_output{};
+  std::optional<std::string> output_format{};
+  std::optional<int> slowdown_factor{};
+  std::optional<bool> audio{};
+  std::optional<std::string> image_url{};
+  std::optional<std::string> end_image_url{};
+  std::optional<std::string> audio_url{};
+  std::optional<std::string> video_url{};
+  std::optional<std::vector<std::string>> reference_image_urls{};
+  std::optional<std::vector<std::string>> reference_video_urls{};
+  std::optional<std::vector<std::string>> reference_audio_urls{};
+  std::optional<std::vector<std::string>> reference_document_urls{};
+  std::optional<std::vector<nlohmann::json>> elements{};
+  std::optional<std::vector<std::string>> scene_image_urls{};
+  std::optional<std::vector<nlohmann::json>> keyframes{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["model"] = model;
+    j["prompt"] = prompt;
+    j["duration"] = duration;
+    if (consents) j["consents"] = *consents;
+    if (negative_prompt) j["negative_prompt"] = *negative_prompt;
+    if (aspect_ratio) j["aspect_ratio"] = *aspect_ratio;
+    if (omni_reference_task_type)
+      j["omni_reference_task_type"] = *omni_reference_task_type;
+    if (resolution) j["resolution"] = *resolution;
+    if (upscale_factor) j["upscale_factor"] = *upscale_factor;
+    if (enhancement_model) j["enhancement_model"] = *enhancement_model;
+    if (target_fps) j["target_fps"] = *target_fps;
+    if (softness) j["softness"] = *softness;
+    if (creativity) j["creativity"] = *creativity;
+    if (realism) j["realism"] = *realism;
+    if (sharp) j["sharp"] = *sharp;
+    if (compression) j["compression"] = *compression;
+    if (noise) j["noise"] = *noise;
+    if (halo) j["halo"] = *halo;
+    if (grain) j["grain"] = *grain;
+    if (recover_detail) j["recover_detail"] = *recover_detail;
+    if (h264_output) j["h264_output"] = *h264_output;
+    if (output_format) j["output_format"] = *output_format;
+    if (slowdown_factor) j["slowdown_factor"] = *slowdown_factor;
+    if (audio) j["audio"] = *audio;
+    if (image_url) j["image_url"] = *image_url;
+    if (end_image_url) j["end_image_url"] = *end_image_url;
+    if (audio_url) j["audio_url"] = *audio_url;
+    if (video_url) j["video_url"] = *video_url;
+    if (reference_image_urls) j["reference_image_urls"] = *reference_image_urls;
+    if (reference_video_urls) j["reference_video_urls"] = *reference_video_urls;
+    if (reference_audio_urls) j["reference_audio_urls"] = *reference_audio_urls;
+    if (reference_document_urls)
+      j["reference_document_urls"] = *reference_document_urls;
+    if (elements) j["elements"] = *elements;
+    if (scene_image_urls) j["scene_image_urls"] = *scene_image_urls;
+    if (keyframes) j["keyframes"] = *keyframes;
+    return j;
+  }
+};
+
+struct VideoQueued {
+  std::string model{};
+  std::string queue_id{};
+  std::optional<std::string> download_url{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct VideoRetrieveRequest {
+  std::string model{};
+  std::string queue_id{};
+  std::optional<bool> delete_media_on_completion{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["model"] = model;
+    j["queue_id"] = queue_id;
+    if (delete_media_on_completion)
+      j["delete_media_on_completion"] = *delete_media_on_completion;
+    return j;
+  }
+};
+
+struct VideoProcessing {
+  std::string status{};
+  double average_execution_time{0.0};
+  double execution_duration{0.0};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+using VideoRetrieveResult = std::variant<VideoProcessing, VideoMedia>;
+
+struct VideoCleanupRequest {
+  std::string model{};
+  std::string queue_id{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["model"] = model;
+    j["queue_id"] = queue_id;
+    return j;
+  }
+};
+
+struct VideoCleanupResult {
+  bool success{false};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct VideoTranscriptionRequest {
+  std::string url{};
+  std::optional<std::string> response_format{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["url"] = url;
+    if (response_format) j["response_format"] = *response_format;
+    return j;
+  }
+};
+
+struct JsonVideoTranscription {
+  std::string transcript{};
+  std::optional<std::string> language{};  // wire: "lang"
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct TextVideoTranscription {
+  std::string text{};
+  std::string media_type{};
+  ResponseMetadata metadata{};
+};
+
+using VideoTranscriptionResult =
+    std::variant<JsonVideoTranscription, TextVideoTranscription>;
+
+namespace detail {
+
+[[nodiscard]] inline auto required_video_string(const nlohmann::json& j,
+                                                const char* key,
+                                                const char* where)
+    -> std::string {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_string())
+    throw std::runtime_error{std::string{where} + ": " + key + " must be a string"};
+  return it->get<std::string>();
+}
+
+[[nodiscard]] inline auto required_video_double(const nlohmann::json& j,
+                                                const char* key,
+                                                const char* where) -> double {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_number())
+    throw std::runtime_error{std::string{where} + ": " + key + " must be a number"};
+  return it->get<double>();
+}
+
+}  // namespace detail
+
+[[nodiscard]] inline auto video_quote_from_json_body(const nlohmann::json& j)
+    -> VideoQuote {
+  if (!j.is_object()) throw std::runtime_error{"video quote: response must be an object"};
+  return VideoQuote{
+      .quote = detail::required_video_double(j, "quote", "video quote"),
+      .raw = j,
+  };
+}
+
+[[nodiscard]] inline auto video_queued_from_json_body(const nlohmann::json& j)
+    -> VideoQueued {
+  if (!j.is_object()) throw std::runtime_error{"video queue: response must be an object"};
+  return VideoQueued{
+      .model = detail::required_video_string(j, "model", "video queue"),
+      .queue_id = detail::required_video_string(j, "queue_id", "video queue"),
+      .download_url = detail::opt_string(j, "download_url"),
+      .raw = j,
+  };
+}
+
+[[nodiscard]] inline auto video_processing_from_json_body(const nlohmann::json& j)
+    -> VideoProcessing {
+  if (!j.is_object())
+    throw std::runtime_error{"video retrieve: processing response must be an object"};
+  return VideoProcessing{
+      .status = detail::required_video_string(j, "status", "video retrieve"),
+      .average_execution_time =
+          detail::required_video_double(j, "average_execution_time", "video retrieve"),
+      .execution_duration =
+          detail::required_video_double(j, "execution_duration", "video retrieve"),
+      .raw = j,
+  };
+}
+
+[[nodiscard]] inline auto video_cleanup_from_json_body(const nlohmann::json& j)
+    -> VideoCleanupResult {
+  if (!j.is_object()) throw std::runtime_error{"video cleanup: response must be an object"};
+  const auto it = j.find("success");
+  if (it == j.end() || !it->is_boolean())
+    throw std::runtime_error{"video cleanup: success must be a boolean"};
+  return VideoCleanupResult{.success = it->get<bool>(), .raw = j};
+}
+
+[[nodiscard]] inline auto video_transcription_from_json_body(const nlohmann::json& j)
+    -> JsonVideoTranscription {
+  if (!j.is_object())
+    throw std::runtime_error{"video transcription: response must be an object"};
+  return JsonVideoTranscription{
+      .transcript =
+          detail::required_video_string(j, "transcript", "video transcription"),
+      .language = detail::opt_string(j, "lang"),
+      .raw = j,
+  };
+}
+
 // ── money ─────────────────────────────────────────────────────────────────
 //
 // Venice quotes every amount in two currencies at once: USD and `diem`, its

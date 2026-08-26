@@ -44,6 +44,10 @@ AGENTS.md (which holds standing conventions, not state).
   `clone_voice`, `quote_audio`, `queue_audio`, `retrieve_audio` and
   `cleanup_audio` — the complete Audio family, with actual-media routing,
   byte-exact results and explicit async lifecycle (VC-28).
+- `quote_video`, `queue_video`, `retrieve_video`, `cleanup_video` and
+  `transcribe_video` — the complete Video family, with explicit paid-work and
+  deletion boundaries, JSON/MP4 and JSON/text result unions, and no hidden
+  polling or media I/O (VC-29).
 - `billing_balance`, `billing_usage_analytics` and `billing_usage_history` —
   typed account balances and aggregates plus ordered cursor history in JSON or
   byte-exact CSV, routed by actual response media type (VC-42). Verified with an
@@ -67,8 +71,8 @@ AGENTS.md (which holds standing conventions, not state).
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 34/49 operations implemented. One retired operation is
-  explicitly unsupported and the other 14 are assigned to family issues and
+- OpenAPI coverage: 39/49 operations implemented. One retired operation is
+  explicitly unsupported and the other 9 are assigned to family issues and
   checked in `cmake/openapi_manifest.json` (VC-35). Characters
   and Models are both 3/3 on operations, and since VC-39 the `Model` metadata
   half is done too. Audio now consumes a typed music policy view; ASR carries
@@ -107,10 +111,37 @@ a single-family run.
    acceptance criterion. The hard half is streaming: a merge rule for arbitrary
    unmodeled keys across fragments has no wire evidence to choose it yet, so it
    stays deferred until a capture can settle the rule.
-2. Thicken endpoints as AIForge/KDE need them (video, chat parity,
+2. Thicken endpoints as AIForge/KDE need them (chat parity,
    retries/backoff, high-level async). Driven by real use, not speculatively.
 3. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-29 (#44) is implemented for v0.25.0.** All five Video operations are
+typed: Bearer-only quote, Bearer/SIWX queue/retrieve/cleanup, and URL
+transcription. Required structure and non-finite modeled doubles fail before a
+socket; model-owned duration, format, enhancement and quality policy remains
+caller-supplied. Provider-shaped elements, keyframes and legal consents stay raw
+JSON with small builders for the documented element and keyframe shapes.
+
+Retrieval selects processing JSON or byte-exact MP4 from actual normalized
+Content-Type. Transcription similarly selects typed JSON or exact plain text.
+Cleanup is explicit and `success:false` remains retryable; no method polls,
+deletes, decodes, displays or writes media implicitly. The safe `--video` leg
+uses the live typed catalogue to select a duration and requests a quote only—it
+never queues paid work.
+
+The OpenAPI content pin remains `20260826.105305` / `0daa64c8…`; provenance now
+points at the latest identical-content api-docs commit `f2f7217…`. Coverage is
+39/49. Offline matrices cover request guards and modeled-wins serialization,
+the five loopback targets, Bearer/SIWX boundaries, documented status families,
+wrong media, malformed success bodies, exact MP4 bytes, metadata, cancellation
+and retryable cleanup.
+
+The safe live `--video` leg passed on 2026-08-26. It selected
+`seedance-1-5-pro-text-to-video-basic`, named four eligible alternates, took
+`4s`, `21:9` and `1080p` from the selected model's typed constraints, and
+received a $0.69 quote whose typed value agreed with the verbatim envelope. No
+paid work was queued and no media lifecycle or local I/O operation ran.
 
 **VC-28 (#43) is implemented for v0.24.0.** All seven Audio operations are
 typed: buffered and callback-streamed speech, multipart transcription and voice
@@ -134,7 +165,7 @@ its live entries carry only the common fields and pricing.
 
 The OpenAPI pin moved to `20260826.105305` / `0daa64c8…`, repository commit
 `9b8bd5e…`; the drift audit found no operation, authentication, request-media or
-response-media changes. Coverage is now 34/49. Offline matrices cover every
+response-media changes. Coverage at v0.24.0 was 34/49. Offline matrices cover every
 operation's guards, wire target/body/auth, documented status families,
 multipart bytes, success media, malformed bodies, cancellation and metadata.
 

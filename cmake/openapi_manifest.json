@@ -2,7 +2,7 @@
   "schema_version": 1,
   "source": {
     "url": "https://api.venice.ai/doc/api/swagger.yaml",
-    "repository_url": "https://github.com/veniceai/api-docs/blob/9b8bd5e5eca3fca2036404c7289aa916e0dceaea/swagger.yaml",
+    "repository_url": "https://github.com/veniceai/api-docs/blob/f2f721727bbfc6db46fee2dc06588567e9e51e02/swagger.yaml",
     "version": "20260826.105305",
     "sha256": "0daa64c8907430bfafc2aea862eaa161a6c77c9bb3a5b4edb2e517ae95532b33",
     "audited_on": "2026-08-26"
@@ -1495,8 +1495,11 @@
       "method": "POST",
       "path": "/video/complete",
       "family": "video",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 44,
+      "public_api": [
+        "Client::cleanup_video"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -1530,8 +1533,11 @@
       "method": "POST",
       "path": "/video/queue",
       "family": "video",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 44,
+      "public_api": [
+        "Client::queue_video"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -1577,8 +1583,11 @@
       "method": "POST",
       "path": "/video/quote",
       "family": "video",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 44,
+      "public_api": [
+        "Client::quote_video"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -1603,8 +1612,11 @@
       "method": "POST",
       "path": "/video/retrieve",
       "family": "video",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 44,
+      "public_api": [
+        "Client::retrieve_video"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -1651,8 +1663,11 @@
       "method": "POST",
       "path": "/video/transcriptions",
       "family": "video",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 44,
+      "public_api": [
+        "Client::transcribe_video"
+      ],
       "security": [
         [
           "BearerAuth"
