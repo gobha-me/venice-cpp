@@ -24,6 +24,8 @@
 //   * transcribe_audio(req)         -> expected<AudioTranscriptionResult>
 //   * clone_voice(req)              -> expected<ClonedVoice>
 //   * quote/queue/retrieve/cleanup_audio(req)
+//   * quote/queue/retrieve/cleanup_video(req)
+//   * transcribe_video(req)         -> expected<VideoTranscriptionResult>
 //   * models()                      -> expected<vector<Model>>
 //   * model_traits(type)            -> expected<ModelTraits>
 //   * model_compatibility_mapping(type)
@@ -54,8 +56,8 @@
 // per-call timeouts, cancellation and authentication override — see
 // venice/options.hpp (VC-06/VC-23).
 //
-// Later phases, fed by real use: video, retries/backoff, and high-level async
-// workflow helpers.
+// Later phases, fed by real use: retries/backoff and high-level async workflow
+// helpers.
 
 #include <array>
 #include <cctype>
@@ -480,6 +482,8 @@ inline constexpr std::array<std::string_view, 6> kSpeechMediaTypes{
     "audio/aac", "audio/flac", "audio/mpeg", "audio/opus", "audio/pcm", "audio/wav"};
 inline constexpr std::array<std::string_view, 3> kRetrievedAudioMediaTypes{
     "audio/flac", "audio/mpeg", "audio/wav"};
+inline constexpr std::array<std::string_view, 1> kRetrievedVideoMediaTypes{
+    "video/mp4"};
 
 template <std::size_t N>
 [[nodiscard]] inline auto media_type_is(
@@ -1234,6 +1238,143 @@ class Client {
       return std::unexpected{Error{ErrorKind::Parse, response->status,
                                    std::string{"audio cleanup parse: "} + e.what(),
                                    response->raw_body, std::move(response->metadata)}};
+    }
+  }
+
+  // ── video ────────────────────────────────────────────────────────────
+  [[nodiscard]] auto quote_video(const VideoQuoteRequest& req,
+                                 const RequestOptions& opts = {}) const
+      -> std::expected<VideoQuote, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto response = post_json_response("/video/quote", req.to_json_body(),
+                                       detail::AuthPolicy::BearerOnly, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    try {
+      auto parsed = video_quote_from_json_body(response->body);
+      parsed.metadata = std::move(response->metadata);
+      return parsed;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"video quote parse: "} + e.what(),
+                                   response->raw_body, std::move(response->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto queue_video(const VideoQueueRequest& req,
+                                 const RequestOptions& opts = {}) const
+      -> std::expected<VideoQueued, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto response = post_json_response("/video/queue", req.to_json_body(),
+                                       detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    try {
+      auto parsed = video_queued_from_json_body(response->body);
+      parsed.metadata = std::move(response->metadata);
+      return parsed;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"video queue parse: "} + e.what(),
+                                   response->raw_body, std::move(response->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto retrieve_video(const VideoRetrieveRequest& req,
+                                    const RequestOptions& opts = {}) const
+      -> std::expected<VideoRetrieveResult, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto response = post_json_raw_response("/video/retrieve", req.to_json_body(),
+                                           detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    if (response->status < 200 || response->status >= 300)
+      return std::unexpected{detail::http_error(
+          response->status, response->body,
+          detail::metadata_from_headers(response->headers))};
+
+    auto metadata = detail::metadata_from_headers(response->headers);
+    if (detail::media_type_is(response->content_type,
+                              detail::kRetrievedVideoMediaTypes))
+      return VideoRetrieveResult{VideoMedia{
+          .bytes = std::move(response->body),
+          .media_type = std::move(response->content_type),
+          .metadata = std::move(metadata),
+      }};
+    if (!detail::is_json_media_type(response->content_type)) {
+      const auto actual = response->content_type.empty() ? std::string{"<missing>"}
+                                                          : response->content_type;
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   "unexpected response content type: " + actual,
+                                   response->body, std::move(metadata)}};
+    }
+
+    auto body = detail::decode_json(*response);
+    if (!body) return std::unexpected{std::move(body.error())};
+    try {
+      auto parsed = video_processing_from_json_body(*body);
+      parsed.metadata = std::move(metadata);
+      return VideoRetrieveResult{std::move(parsed)};
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"video retrieve parse: "} + e.what(),
+                                   response->body, std::move(metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto cleanup_video(const VideoCleanupRequest& req,
+                                   const RequestOptions& opts = {}) const
+      -> std::expected<VideoCleanupResult, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto response = post_json_response("/video/complete", req.to_json_body(),
+                                       detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    try {
+      auto parsed = video_cleanup_from_json_body(response->body);
+      parsed.metadata = std::move(response->metadata);
+      return parsed;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"video cleanup parse: "} + e.what(),
+                                   response->raw_body, std::move(response->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto transcribe_video(
+      const VideoTranscriptionRequest& req,
+      const RequestOptions& opts = {}) const
+      -> std::expected<VideoTranscriptionResult, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto response = post_json_raw_response("/video/transcriptions", req.to_json_body(),
+                                           detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    if (response->status < 200 || response->status >= 300)
+      return std::unexpected{detail::http_error(
+          response->status, response->body,
+          detail::metadata_from_headers(response->headers))};
+
+    auto metadata = detail::metadata_from_headers(response->headers);
+    if (response->content_type == "text/plain")
+      return VideoTranscriptionResult{TextVideoTranscription{
+          .text = std::move(response->body),
+          .media_type = std::move(response->content_type),
+          .metadata = std::move(metadata),
+      }};
+    if (!detail::is_json_media_type(response->content_type)) {
+      const auto actual = response->content_type.empty() ? std::string{"<missing>"}
+                                                          : response->content_type;
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   "unexpected response content type: " + actual,
+                                   response->body, std::move(metadata)}};
+    }
+
+    auto body = detail::decode_json(*response);
+    if (!body) return std::unexpected{std::move(body.error())};
+    try {
+      auto parsed = video_transcription_from_json_body(*body);
+      parsed.metadata = std::move(metadata);
+      return VideoTranscriptionResult{std::move(parsed)};
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"video transcription parse: "} + e.what(),
+                                   response->body, std::move(metadata)}};
     }
   }
 
@@ -2121,6 +2262,95 @@ class Client {
     if (req.queue_id.empty())
       return std::unexpected{
           Error{ErrorKind::InvalidArg, 0, "audio queue id is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const VideoQuoteRequest& req)
+      -> std::expected<void, Error> {
+    if (req.reference_video_total_duration &&
+        !std::isfinite(*req.reference_video_total_duration))
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0,
+                                   "reference_video_total_duration is not finite", {}}};
+    if (req.model.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "video model is empty", {}}};
+    if (req.duration.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "video duration is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const VideoQueueRequest& req)
+      -> std::expected<void, Error> {
+    const auto finite = [](const std::optional<double>& value) {
+      return !value || std::isfinite(*value);
+    };
+    if (!finite(req.softness))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "softness is not finite", {}}};
+    if (!finite(req.creativity))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "creativity is not finite", {}}};
+    if (!finite(req.realism))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "realism is not finite", {}}};
+    if (!finite(req.sharp))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "sharp is not finite", {}}};
+    if (!finite(req.compression))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "compression is not finite", {}}};
+    if (!finite(req.noise))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "noise is not finite", {}}};
+    if (!finite(req.halo))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "halo is not finite", {}}};
+    if (!finite(req.grain))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "grain is not finite", {}}};
+    if (!finite(req.recover_detail))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "recover_detail is not finite", {}}};
+    if (req.model.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "video model is empty", {}}};
+    if (req.prompt.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "video prompt is empty", {}}};
+    if (req.duration.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "video duration is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const VideoRetrieveRequest& req)
+      -> std::expected<void, Error> {
+    if (req.model.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "video model is empty", {}}};
+    if (req.queue_id.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "video queue id is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const VideoCleanupRequest& req)
+      -> std::expected<void, Error> {
+    if (req.model.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "video model is empty", {}}};
+    if (req.queue_id.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "video queue id is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const VideoTranscriptionRequest& req)
+      -> std::expected<void, Error> {
+    if (req.url.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "video transcription URL is empty", {}}};
     return {};
   }
 

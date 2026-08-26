@@ -1108,6 +1108,198 @@ class TestServer {
                                  "application/json");
                });
 
+    const auto video_error = [](httplib::Response& res, int status,
+                                std::string_view message) {
+      res.status = status;
+      res.set_content(nlohmann::json{{"error", message}}.dump(),
+                      "application/json");
+    };
+
+    m_svr.Post("/api/v1/video/quote",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_video_hits;
+                 const auto body = nlohmann::json::parse(req.body);
+                 if (body.at("model") == "bad-request") {
+                   res.status = 400;
+                   res.set_content(R"({"error":"bad quote"})", "application/json");
+                   return;
+                 }
+                 if (body.at("model") == "forbidden") {
+                   res.status = 403;
+                   res.set_content(R"({"error":"forbidden"})", "application/json");
+                   return;
+                 }
+                 if (body.at("model") == "invalid-json") {
+                   res.set_content("{not-json", "application/json");
+                   return;
+                 }
+                 if (body.at("model") == "malformed") {
+                   res.set_content(R"({"quote":"unknown"})", "application/json");
+                   return;
+                 }
+                 res.set_header("X-Balance-Remaining", "2.250000");
+                 res.set_content(nlohmann::json{{"quote", 1.25},
+                                                {"seen_body", body},
+                                                {"seen_authorization",
+                                                 req.get_header_value("Authorization")},
+                                                {"seen_siwx",
+                                                 req.get_header_value("SIGN-IN-WITH-X")}}
+                                     .dump(),
+                                 "application/json; charset=utf-8");
+               });
+
+    m_svr.Post("/api/v1/video/queue",
+               [this, video_error](const httplib::Request& req,
+                                   httplib::Response& res) {
+                 ++m_video_hits;
+                 const auto body = nlohmann::json::parse(req.body);
+                 const auto control = body.at("prompt").get<std::string>();
+                 if (body.at("model") == "invalid-json") {
+                   res.set_content("{not-json", "application/json");
+                   return;
+                 }
+                 if (control == "bad-request") return video_error(res, 400, "bad video request");
+                 if (control == "unauthorized") return video_error(res, 401, "unauthorized");
+                 if (control == "payment") {
+                   res.set_header("PAYMENT-REQUIRED", "video-payment-requirements");
+                   return video_error(res, 402, "payment required");
+                 }
+                 if (control == "forbidden") return video_error(res, 403, "forbidden");
+                 if (control == "conflict") return video_error(res, 409, "conflict");
+                 if (control == "too-large") return video_error(res, 413, "too large");
+                 if (control == "invalid") return video_error(res, 422, "invalid video request");
+                 if (control == "server-error") return video_error(res, 500, "server error");
+                 if (body.at("model") == "malformed") {
+                   res.set_content(R"({"model":"malformed","queue_id":7})",
+                                   "application/json");
+                   return;
+                 }
+                 auto response = nlohmann::json{{"model", body.at("model")},
+                                                 {"queue_id", "video-queue-fixture"},
+                                                 {"seen_body", body},
+                                                 {"seen_authorization",
+                                                  req.get_header_value("Authorization")},
+                                                 {"seen_siwx",
+                                                  req.get_header_value("SIGN-IN-WITH-X")}};
+                 if (control == "download")
+                   response["download_url"] = "https://example.test/video.mp4";
+                 res.set_header("PAYMENT-RESPONSE", "video-payment-receipt");
+                 res.set_content(response.dump(), "application/json");
+               });
+
+    m_svr.Post("/api/v1/video/retrieve",
+               [this, video_error](const httplib::Request& req,
+                                   httplib::Response& res) {
+                 ++m_video_hits;
+                 const auto body = nlohmann::json::parse(req.body);
+                 const auto queue_id = body.at("queue_id").get<std::string>();
+                 if (queue_id == "stall") {
+                   ++m_video_stall_hits;
+                   m_gate.wait(kStallCap);
+                 }
+                 if (queue_id == "missing") return video_error(res, 404, "not found");
+                 if (queue_id == "payment") {
+                   res.set_header("PAYMENT-REQUIRED", "video-retrieve-payment");
+                   return video_error(res, 402, "payment required");
+                 }
+                 if (queue_id == "invalid") return video_error(res, 422, "invalid queue");
+                 if (queue_id == "capacity") return video_error(res, 503, "capacity");
+                 if (queue_id == "wrong-media") {
+                   res.set_content("wrong", "audio/mpeg");
+                   return;
+                 }
+                 if (queue_id == "invalid-json") {
+                   res.set_content("{not-json", "application/json");
+                   return;
+                 }
+                 if (queue_id == "malformed") {
+                   res.set_content(
+                       R"({"status":"PROCESSING","average_execution_time":"soon","execution_duration":1})",
+                       "application/json");
+                   return;
+                 }
+                 res.set_header("X-Balance-Remaining", "2.000000");
+                 if (queue_id == "media") {
+                   const std::array bytes{char{'V'}, char{0}, char{'I'}, char{'D'}};
+                   res.set_content(bytes.data(), bytes.size(), "Video/MP4; fixture=true");
+                   return;
+                 }
+                 res.set_content(nlohmann::json{{"status", "PROCESSING"},
+                                                {"average_execution_time", 30000},
+                                                {"execution_duration", 6500},
+                                                {"seen_body", body}}
+                                     .dump(),
+                                 "application/json");
+               });
+
+    m_svr.Post("/api/v1/video/complete",
+               [this, video_error](const httplib::Request& req,
+                                   httplib::Response& res) {
+                 ++m_video_hits;
+                 const auto body = nlohmann::json::parse(req.body);
+                 const auto queue_id = body.at("queue_id").get<std::string>();
+                 if (queue_id == "bad-request") return video_error(res, 400, "bad cleanup");
+                 if (queue_id == "unauthorized") return video_error(res, 401, "unauthorized");
+                 if (queue_id == "payment") {
+                   res.set_header("PAYMENT-REQUIRED", "video-cleanup-payment");
+                   return video_error(res, 402, "payment required");
+                 }
+                 if (queue_id == "server-error") return video_error(res, 500, "server error");
+                 if (queue_id == "invalid-json") {
+                   res.set_content("{not-json", "application/json");
+                   return;
+                 }
+                 if (queue_id == "malformed") {
+                   res.set_content(R"({"success":"yes"})", "application/json");
+                   return;
+                 }
+                 res.set_content(nlohmann::json{{"success", queue_id != "retry"},
+                                                {"seen_body", body}}
+                                     .dump(),
+                                 "application/json");
+               });
+
+    m_svr.Post("/api/v1/video/transcriptions",
+               [this, video_error](const httplib::Request& req,
+                                   httplib::Response& res) {
+                 ++m_video_hits;
+                 const auto body = nlohmann::json::parse(req.body);
+                 const auto control = body.at("url").get<std::string>();
+                 if (control == "invalid-json") {
+                   res.set_content("{not-json", "application/json");
+                   return;
+                 }
+                 if (control == "bad-request") return video_error(res, 400, "bad URL");
+                 if (control == "unauthorized") return video_error(res, 401, "unauthorized");
+                 if (control == "payment") {
+                   res.set_header("PAYMENT-REQUIRED", "video-transcription-payment");
+                   return video_error(res, 402, "payment required");
+                 }
+                 if (control == "forbidden") return video_error(res, 403, "forbidden");
+                 if (control == "rate-limited") return video_error(res, 429, "rate limited");
+                 if (control == "server-error") return video_error(res, 500, "server error");
+                 if (control == "wrong-media") {
+                   res.set_content("wrong", "audio/mpeg");
+                   return;
+                 }
+                 if (control == "malformed") {
+                   res.set_content(R"({"transcript":7})", "application/json");
+                   return;
+                 }
+                 res.set_header("X-Balance-Remaining", "1.750000");
+                 if (body.value("response_format", std::string{}) == "text") {
+                   res.set_content("fixture video transcript", "text/plain; charset=utf-8");
+                   return;
+                 }
+                 res.set_content(nlohmann::json{{"transcript", "fixture video transcript"},
+                                                {"lang", "en"},
+                                                {"seen_body", body},
+                                                {"seen_siwx",
+                                                 req.get_header_value("SIGN-IN-WITH-X")}}
+                                     .dump(),
+                                 "application/json");
+               });
+
     m_svr.Get("/api/v1/billing/balance",
               [this](const httplib::Request& req, httplib::Response& res) {
                 ++m_billing_hits;
@@ -1388,6 +1580,10 @@ class TestServer {
     return m_image_transform_stall_hits.load();
   }
   [[nodiscard]] auto audio_hits() const -> int { return m_audio_hits.load(); }
+  [[nodiscard]] auto video_hits() const -> int { return m_video_hits.load(); }
+  [[nodiscard]] auto video_stall_hits() const -> int {
+    return m_video_stall_hits.load();
+  }
   [[nodiscard]] auto last_transform() const -> CapturedTransform {
     const std::lock_guard<std::mutex> lock{m_transform_mu};
     return m_last_transform;
@@ -1439,6 +1635,8 @@ class TestServer {
   std::atomic<int> m_image_transform_hits{0};
   std::atomic<int> m_image_transform_stall_hits{0};
   std::atomic<int> m_audio_hits{0};
+  std::atomic<int> m_video_hits{0};
+  std::atomic<int> m_video_stall_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
   mutable std::mutex m_transform_mu;
   CapturedTransform m_last_transform{};
@@ -3960,4 +4158,284 @@ TEST_CASE("audio async calls keep quote auth and status-media-cleanup states dis
   REQUIRE(cleaned.has_value());
   REQUIRE(cleaned->success);
   REQUIRE(server.audio_hits() >= 8);
+}
+
+// ── §10 Video: safe quote and explicit async media lifecycle (VC-29) ────
+
+TEST_CASE("malformed Video success bodies become Parse values at the client boundary",
+          "[transport][video][failure][parse]") {
+  const TestServer server;
+  const Client client{"video-key", server.base_url()};
+
+  const auto quote = client.quote_video({.model = "malformed", .duration = "5"});
+  REQUIRE_FALSE(quote);
+  REQUIRE(quote.error().is(ErrorKind::Parse));
+  REQUIRE(quote.error().status == 200);
+  const auto invalid_quote = client.quote_video(
+      {.model = "invalid-json", .duration = "5"});
+  REQUIRE_FALSE(invalid_quote);
+  REQUIRE(invalid_quote.error().is(ErrorKind::Parse));
+
+  const auto queue = client.queue_video(
+      {.model = "malformed", .prompt = "fixture", .duration = "5"});
+  REQUIRE_FALSE(queue);
+  REQUIRE(queue.error().is(ErrorKind::Parse));
+  const auto invalid_queue = client.queue_video(
+      {.model = "invalid-json", .prompt = "fixture", .duration = "5"});
+  REQUIRE_FALSE(invalid_queue);
+  REQUIRE(invalid_queue.error().is(ErrorKind::Parse));
+
+  const auto retrieve = client.retrieve_video(
+      {.model = "video-fixture", .queue_id = "malformed"});
+  REQUIRE_FALSE(retrieve);
+  REQUIRE(retrieve.error().is(ErrorKind::Parse));
+  const auto invalid_retrieve = client.retrieve_video(
+      {.model = "video-fixture", .queue_id = "invalid-json"});
+  REQUIRE_FALSE(invalid_retrieve);
+  REQUIRE(invalid_retrieve.error().is(ErrorKind::Parse));
+
+  const auto cleanup = client.cleanup_video(
+      {.model = "video-fixture", .queue_id = "malformed"});
+  REQUIRE_FALSE(cleanup);
+  REQUIRE(cleanup.error().is(ErrorKind::Parse));
+  const auto invalid_cleanup = client.cleanup_video(
+      {.model = "video-fixture", .queue_id = "invalid-json"});
+  REQUIRE_FALSE(invalid_cleanup);
+  REQUIRE(invalid_cleanup.error().is(ErrorKind::Parse));
+
+  const auto transcription = client.transcribe_video({.url = "malformed"});
+  REQUIRE_FALSE(transcription);
+  REQUIRE(transcription.error().is(ErrorKind::Parse));
+  const auto invalid_transcription = client.transcribe_video(
+      {.url = "invalid-json"});
+  REQUIRE_FALSE(invalid_transcription);
+  REQUIRE(invalid_transcription.error().is(ErrorKind::Parse));
+}
+
+TEST_CASE("video quote is Bearer-only and queue preserves caller-authored shapes",
+          "[transport][video][auth][queue]") {
+  const TestServer server;
+  const Client bearer{"video-key", server.base_url()};
+  const Client wallet{Authentication::sign_in_with_x("signed-video-wallet"),
+                      server.base_url()};
+
+  const auto quote = bearer.quote_video({.model = "video-fixture",
+                                         .duration = "5",
+                                         .aspect_ratio = "16:9",
+                                         .audio = false});
+  REQUIRE(quote.has_value());
+  REQUIRE(quote->quote == 1.25);
+  REQUIRE(quote->raw["seen_authorization"] == "Bearer video-key");
+  REQUIRE(quote->raw["seen_siwx"] == "");
+  REQUIRE(quote->raw["seen_body"]["audio"] == false);
+  REQUIRE(quote->metadata.x_balance_remaining == "2.250000");
+
+  const auto quote_wrong_auth = wallet.quote_video(
+      {.model = "video-fixture", .duration = "5"});
+  REQUIRE_FALSE(quote_wrong_auth);
+  REQUIRE(quote_wrong_auth.error().is(ErrorKind::InvalidArg));
+
+  const auto bad_quote = bearer.quote_video(
+      {.model = "bad-request", .duration = "5"});
+  REQUIRE_FALSE(bad_quote);
+  REQUIRE(bad_quote.error().is(ErrorKind::Http));
+  REQUIRE(bad_quote.error().status == 400);
+  const auto forbidden_quote = bearer.quote_video(
+      {.model = "forbidden", .duration = "5"});
+  REQUIRE_FALSE(forbidden_quote);
+  REQUIRE(forbidden_quote.error().is(ErrorKind::Auth));
+  REQUIRE(forbidden_quote.error().status == 403);
+
+  const auto queued = wallet.queue_video(
+      {.model = "video-fixture",
+       .prompt = "download",
+       .duration = "5",
+       .consents = nlohmann::json{{"adult_content", false}},
+       .softness = 0.0,
+       .h264_output = false,
+       .reference_image_urls = std::vector<std::string>{"first", "second"},
+       .elements = std::vector<nlohmann::json>{
+           venice::video_input::element("front", std::vector<std::string>{"ref"}),
+           nlohmann::json{{"future_kind", "opaque"}}},
+       .keyframes = std::vector<nlohmann::json>{
+           venice::video_input::keyframe("start", 0),
+           venice::video_input::keyframe("end", 120)}});
+  REQUIRE(queued.has_value());
+  REQUIRE(queued->model == "video-fixture");
+  REQUIRE(queued->queue_id == "video-queue-fixture");
+  REQUIRE(queued->download_url == "https://example.test/video.mp4");
+  REQUIRE(queued->raw["seen_siwx"] == "signed-video-wallet");
+  REQUIRE(queued->raw["seen_body"]["softness"] == 0.0);
+  REQUIRE(queued->raw["seen_body"]["h264_output"] == false);
+  REQUIRE(queued->raw["seen_body"]["reference_image_urls"] ==
+          nlohmann::json::array({"first", "second"}));
+  REQUIRE(queued->raw["seen_body"]["elements"][1]["future_kind"] == "opaque");
+  REQUIRE(queued->raw["seen_body"]["keyframes"][1]["frame_index"] == 120);
+  REQUIRE(queued->metadata.payment_response == "video-payment-receipt");
+}
+
+TEST_CASE("video calls classify status before success media and preserve MP4 bytes",
+          "[transport][video][retrieve][failure]") {
+  const TestServer server;
+  const Client client{"video-key", server.base_url()};
+
+  struct QueueCase {
+    const char* prompt;
+    ErrorKind kind;
+    int status;
+  };
+  const std::array queue_cases{
+      QueueCase{"bad-request", ErrorKind::Http, 400},
+      QueueCase{"unauthorized", ErrorKind::Auth, 401},
+      QueueCase{"payment", ErrorKind::PaymentRequired, 402},
+      QueueCase{"forbidden", ErrorKind::Auth, 403},
+      QueueCase{"conflict", ErrorKind::Http, 409},
+      QueueCase{"too-large", ErrorKind::Http, 413},
+      QueueCase{"invalid", ErrorKind::Http, 422},
+      QueueCase{"server-error", ErrorKind::Http, 500},
+  };
+  for (const auto& test : queue_cases) {
+    const auto result = client.queue_video(
+        {.model = "video-fixture", .prompt = test.prompt, .duration = "5"});
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == test.kind);
+    REQUIRE(result.error().status == test.status);
+    if (test.status == 402)
+      REQUIRE(result.error().metadata.payment_required ==
+              "video-payment-requirements");
+  }
+
+  const auto processing = client.retrieve_video(
+      {.model = "video-fixture",
+       .queue_id = "processing",
+       .delete_media_on_completion = false});
+  REQUIRE(processing.has_value());
+  const auto* status = std::get_if<venice::VideoProcessing>(&*processing);
+  REQUIRE(status != nullptr);
+  REQUIRE(status->status == "PROCESSING");
+  REQUIRE(status->average_execution_time == 30000.0);
+  REQUIRE(status->raw["seen_body"]["delete_media_on_completion"] == false);
+  REQUIRE(status->metadata.x_balance_remaining == "2.000000");
+
+  const auto media = client.retrieve_video(
+      {.model = "video-fixture", .queue_id = "media"});
+  REQUIRE(media.has_value());
+  const auto* bytes = std::get_if<venice::VideoMedia>(&*media);
+  REQUIRE(bytes != nullptr);
+  REQUIRE(bytes->bytes == std::string{"V\0ID", 4});
+  REQUIRE(bytes->media_type == "video/mp4");
+
+  for (const auto& [queue_id, status_code] :
+       std::array<std::pair<const char*, int>, 4>{{{"missing", 404},
+                                                   {"payment", 402},
+                                                   {"invalid", 422},
+                                                   {"capacity", 503}}}) {
+    const auto result = client.retrieve_video(
+        {.model = "video-fixture", .queue_id = queue_id});
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().status == status_code);
+  }
+  const auto wrong = client.retrieve_video(
+      {.model = "video-fixture", .queue_id = "wrong-media"});
+  REQUIRE_FALSE(wrong);
+  REQUIRE(wrong.error().is(ErrorKind::Parse));
+  REQUIRE(wrong.error().body == "wrong");
+}
+
+TEST_CASE("video transcription and cleanup retain their result unions and retry state",
+          "[transport][video][transcription][cleanup]") {
+  const TestServer server;
+  const Client client{"video-key", server.base_url()};
+
+  const auto json = client.transcribe_video({.url = "https://example.test/video.mp4"});
+  REQUIRE(json.has_value());
+  const auto* parsed = std::get_if<venice::JsonVideoTranscription>(&*json);
+  REQUIRE(parsed != nullptr);
+  REQUIRE(parsed->transcript == "fixture video transcript");
+  REQUIRE(parsed->language == "en");
+  REQUIRE(parsed->metadata.x_balance_remaining == "1.750000");
+
+  const auto text = client.transcribe_video(
+      {.url = "https://example.test/video.mp4", .response_format = "text"});
+  REQUIRE(text.has_value());
+  const auto* plain = std::get_if<venice::TextVideoTranscription>(&*text);
+  REQUIRE(plain != nullptr);
+  REQUIRE(plain->text == "fixture video transcript");
+  REQUIRE(plain->media_type == "text/plain");
+
+  struct TranscriptionCase {
+    const char* url;
+    ErrorKind kind;
+    int status;
+  };
+  const std::array transcription_cases{
+      TranscriptionCase{"bad-request", ErrorKind::Http, 400},
+      TranscriptionCase{"unauthorized", ErrorKind::Auth, 401},
+      TranscriptionCase{"payment", ErrorKind::PaymentRequired, 402},
+      TranscriptionCase{"forbidden", ErrorKind::Auth, 403},
+      TranscriptionCase{"rate-limited", ErrorKind::RateLimited, 429},
+      TranscriptionCase{"server-error", ErrorKind::Http, 500},
+  };
+  for (const auto& test : transcription_cases) {
+    const auto result = client.transcribe_video({.url = test.url});
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == test.kind);
+    REQUIRE(result.error().status == test.status);
+  }
+  const auto wrong = client.transcribe_video({.url = "wrong-media"});
+  REQUIRE_FALSE(wrong);
+  REQUIRE(wrong.error().is(ErrorKind::Parse));
+
+  const auto retryable = client.cleanup_video(
+      {.model = "video-fixture", .queue_id = "retry"});
+  REQUIRE(retryable.has_value());
+  REQUIRE_FALSE(retryable->success);
+  REQUIRE(retryable->raw["seen_body"]["queue_id"] == "retry");
+  const auto cleaned = client.cleanup_video(
+      {.model = "video-fixture", .queue_id = "done"});
+  REQUIRE(cleaned.has_value());
+  REQUIRE(cleaned->success);
+  struct CleanupCase {
+    const char* queue_id;
+    ErrorKind kind;
+    int status;
+  };
+  const std::array cleanup_cases{
+      CleanupCase{"bad-request", ErrorKind::Http, 400},
+      CleanupCase{"unauthorized", ErrorKind::Auth, 401},
+      CleanupCase{"payment", ErrorKind::PaymentRequired, 402},
+      CleanupCase{"server-error", ErrorKind::Http, 500},
+  };
+  for (const auto& test : cleanup_cases) {
+    const auto result = client.cleanup_video(
+        {.model = "video-fixture", .queue_id = test.queue_id});
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == test.kind);
+    REQUIRE(result.error().status == test.status);
+    if (test.status == 402)
+      REQUIRE(result.error().metadata.payment_required == "video-cleanup-payment");
+  }
+}
+
+TEST_CASE("cancellation interrupts a stalled video retrieval",
+          "[transport][video][cancel][failure]") {
+  const TestServer server;
+  const Client client{"video-key", server.base_url()};
+  venice::CancelToken token;
+  std::thread canceller{[&] {
+    while (server.video_stall_hits() == 0) std::this_thread::sleep_for(5ms);
+    token.cancel();
+  }};
+
+  std::expected<venice::VideoRetrieveResult, venice::Error> result;
+  const auto elapsed = timed([&] {
+    result = client.retrieve_video(
+        {.model = "video-fixture", .queue_id = "stall"}, {.cancel = &token});
+  });
+  canceller.join();
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().is(ErrorKind::Cancelled));
+  REQUIRE(elapsed < kPromptly);
+  REQUIRE(server.video_stall_hits() == 1);
+  REQUIRE(server.video_hits() == 1);
 }

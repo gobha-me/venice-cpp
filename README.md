@@ -73,6 +73,11 @@ right bridge.
   and explicit quote/queue/retrieve/cleanup calls for asynchronous audio.
   Successful AAC/FLAC/MP3/Opus/PCM/WAV bytes are selected by actual media type
   and are never decoded, played, or written by the client.
+- **Video** — explicit quote/queue/retrieve/cleanup generation calls plus URL
+  transcription. Retrieval preserves processing JSON or byte-exact MP4 based
+  on the actual response media type; transcription likewise preserves typed
+  JSON or exact text. The client never polls, deletes, decodes, displays or
+  writes media implicitly.
 - **Account billing** (`/billing/balance`, `/billing/usage-analytics`,
   `/billing/usage-history`) — typed balance and aggregate views plus ordered,
   cursor-paged ledger history. History can return typed JSON or byte-exact CSV,
@@ -97,12 +102,12 @@ right bridge.
   auth / payment-required / rate-limit / invalid-arg / cancelled. Response
   failures carry status, raw body and response metadata, including x402 headers.
 
-Later phases (fed by real use): video, retries/backoff, and high-level async
+Later phases (fed by real use): retries/backoff and high-level async
 workflow helpers.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 34/49 operations implemented.
+OpenAPI coverage: 39/49 operations implemented.
 
 One additional published operation is explicitly unsupported:
 `GET /billing/usage` already returns 410 for every request and points callers
@@ -397,6 +402,37 @@ returns `AudioProcessing` or `AudioMedia` from the actual response type;
 `cleanup_audio()` is named for its destructive meaning and a returned
 `success=false` remains a retryable value. The library deliberately does not
 poll or delete remote media automatically.
+
+### Video
+
+Video generation follows the server's explicit paid-work lifecycle. Consult
+`models("video")` for the chosen model's durations, aspect ratios and
+resolutions, quote first, then decide whether to enqueue:
+
+```cpp
+venice::VideoQuoteRequest quote_request;
+quote_request.model = "a-video-model";
+quote_request.duration = "5s";  // a server-owned string from Model::video
+
+const auto quote = client.quote_video(quote_request);
+if (!quote) return;              // no paid work has been created
+std::cout << "quote: " << quote->quote << '\n';
+
+venice::VideoQueueRequest queue;
+queue.model = quote_request.model;
+queue.prompt = "Sunlight moving across a quiet mountain lake";
+queue.duration = quote_request.duration;
+const auto queued = client.queue_video(queue);  // explicit paid side effect
+if (!queued) return;
+```
+
+`retrieve_video()` returns `VideoProcessing` or byte-exact `VideoMedia` from
+the successful response's actual JSON/MP4 media type. `cleanup_video()` is the
+explicit destructive operation; `success=false` remains a retryable value.
+`transcribe_video()` accepts a caller-owned URL and returns typed JSON or exact
+plain text. Nothing polls, deletes, decodes, displays or writes media
+implicitly. Queue `elements`, keyframes and legal `consents` remain raw JSON so
+future provider shapes and caller attestations are not hardcoded by the client.
 
 **`response_format` is raw JSON, not an enum.** The API accepts both
 `{"type":"json_object"}` and a full `{"type":"json_schema", …}` block, and no
@@ -1171,7 +1207,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.24.0)
+  GIT_TAG        v0.25.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -1297,6 +1333,12 @@ and streamed speech with `tts-kokoro`, transcribed the in-memory bytes with
 quote typed values agreed with their verbatim envelopes. The leg deliberately
 does not clone a voice, enqueue work, poll, delete, play or write media.
 
+**Video's safe live leg passed on 2026-08-26.** `--video` selected
+`seedance-1-5-pro-text-to-video-basic`, named four eligible alternates, took
+`4s`, `21:9` and `1080p` from its typed catalogue policy, and received a $0.69
+quote whose typed value agreed with the verbatim envelope. It did not enqueue,
+poll, delete, decode, display or write anything.
+
 **#28 is settled in v0.11.1, and its premise was wrong.** Venice does send both
 detail objects, at exactly the nesting the library reads — but only on some
 model families. `--stream` had auto-picked `gemini-3-6-flash`, one of two
@@ -1340,6 +1382,7 @@ VENICE_API_KEY=... venice-cpp --embeddings [model] # v0.18.0: float + base64
 VENICE_API_KEY=... venice-cpp --image [model]      # v0.19.0: JSON + media
 VENICE_API_KEY=... venice-cpp --image-transform [model] # v0.20.0: four transforms
 VENICE_API_KEY=... venice-cpp --audio [tts] [asr] [music] # v0.24.0: speech + transcription + quote
+VENICE_API_KEY=... venice-cpp --video [model]             # v0.25.0: catalogue + quote only
 VENICE_API_KEY=... venice-cpp --billing [lookback] # v0.21.0: balance + analytics + history
 VENICE_API_KEY=... venice-cpp --api-keys          # v0.22.0: read-only keys + rate limits
 
