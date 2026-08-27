@@ -54,6 +54,9 @@ AGENTS.md (which holds standing conventions, not state).
 - `crypto_rpc_networks` and `crypto_rpc` — public ordered network discovery and
   a Bearer/SIWX JSON-RPC proxy with exact single/batch correlation, header-only
   idempotency and response metadata (VC-33).
+- `x402_balance`, `x402_top_up` and `x402_transactions` — SIWX wallet reads,
+  public typed payment discovery, signed-payment receipts and ordered paginated
+  ledger history. No method signs, spends, retries or polls implicitly (VC-34).
 - `billing_balance`, `billing_usage_analytics` and `billing_usage_history` —
   typed account balances and aggregates plus ordered cursor history in JSON or
   byte-exact CSV, routed by actual response media type (VC-42). Verified with an
@@ -77,8 +80,8 @@ AGENTS.md (which holds standing conventions, not state).
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 44/49 operations implemented. One retired operation is
-  explicitly unsupported and the other 4 are assigned to family issues and
+- OpenAPI coverage: 47/49 operations implemented. One retired operation is
+  explicitly unsupported and the remaining operation is assigned to #39 and
   checked in `cmake/openapi_manifest.json` (VC-35). Characters
   and Models are both 3/3 on operations, and since VC-39 the `Model` metadata
   half is done too. Audio now consumes a typed music policy view; ASR carries
@@ -109,7 +112,11 @@ in full: a leg that auto-picks one model settles nothing about a shape that
 varies by model family, and two tickets have now been filed on the strength of
 a single-family run.
 
-1. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
+1. **VC-24 (#39): complete Chat Completions and the remaining Responses API
+   operation.** Preserve raw polymorphic shapes while adding stable chat
+   ergonomics; `/responses` is the only planned operation left in the checked
+   OpenAPI inventory.
+2. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
    m.raw` is overwritten for `tool_calls` because that key is modeled, and
    `ToolCall` has `raw` but no `extra`, so an unmodeled tool-call key is
    unrecoverable. VC-18 was exactly that failure. The limit is pinned by a §0
@@ -117,10 +124,39 @@ a single-family run.
    acceptance criterion. The hard half is streaming: a merge rule for arbitrary
    unmodeled keys across fragments has no wire evidence to choose it yet, so it
    stays deferred until a capture can settle the rule.
-2. Thicken endpoints as AIForge/KDE need them (chat parity,
+3. Thicken endpoints as AIForge/KDE need them (chat parity,
    retries/backoff, high-level async). Driven by real use, not speculatively.
-3. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
+4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-34 (#49) is implemented for v0.28.0.** SIWX-authenticated wallet balance
+and paginated transaction history encode the caller's EVM/Solana wallet as one
+path segment and preserve the exact response envelopes. An empty public
+`x402_top_up()` POST turns the endpoint's intentional 402 into typed payment
+requirements; the same method with `Authentication::x402_payment` returns a
+typed 200 receipt. Every other non-2xx retains the shared error classification.
+
+Base-unit payment amounts remain strings, JSON balance values remain doubles,
+network-specific option metadata remains raw, and `PAYMENT-REQUIRED` /
+`PAYMENT-RESPONSE` stay opaque response metadata. The client never owns a
+wallet key, signs a SIWX/payment payload, constructs USDC transactions, retries
+payment or changes a balance without an explicit signed call. The no-key
+`--x402` leg performs discovery only and reconciles the verbatim response at
+the envelope and option levels.
+
+Offline matrices cover strict payment/accounting shapes, tolerant transaction
+listing leaves, exact paths/queries/headers, auth boundaries, 200/402 routing,
+status-before-media precedence, malformed media/JSON/shapes, cancellation and
+timeouts. The checked OpenAPI source remains `20260826.105305` /
+`0daa64c8…`; coverage is 47/49.
+
+Live on 2026-08-27, the public discovery leg received x402 version 2 with two
+ordered USDC options: Base (`eip155:8453`) and Solana mainnet. Both advertised
+the exact base-unit amount `5000000`; typed/raw reconciliation passed at both
+levels and the opaque `PAYMENT-REQUIRED` header was present. No SIWX/payment
+proof was available, no payment was submitted and no wallet balance changed,
+so authenticated balance, transaction and receipt success shapes remain
+OpenAPI-backed rather than live-captured.
 
 **VC-33 (#48) is implemented for v0.27.0.** Public network discovery accepts a
 Public or Bearer client and preserves the observed `networks` envelope while

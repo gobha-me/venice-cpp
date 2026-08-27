@@ -5040,4 +5040,313 @@ struct ApiKeyRateLimitLogPage {
   return response;
 }
 
+// ── x402 wallet balance, top-up and transactions ───────────────────────
+//
+// This is protocol transport, not a wallet implementation. SIWX and payment
+// signatures are Authentication values in auth.hpp; none of the types below
+// owns a private key, signs a payload, constructs a USDC transaction or decodes
+// the opaque PAYMENT-* headers retained by ResponseMetadata.
+
+struct X402Balance {
+  std::string wallet_address{};
+  double balance_usd{0.0};
+  bool can_consume{false};
+  double minimum_top_up_usd{0.0};
+  double suggested_top_up_usd{0.0};
+  std::optional<double> diem_balance_usd{};
+  bool success{false};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct X402PaymentOption {
+  std::string scheme{};
+  std::string network{};
+  // Base units remain decimal text. Turning 5000000 into a floating-point
+  // value would discard the exact quantity the caller must sign.
+  std::string amount{};
+  std::string asset{};
+  std::string pay_to{};
+  int max_timeout_seconds{0};
+  // This is the wire field literally named `extra`, not a response escape
+  // hatch. It carries network-specific signing inputs such as Solana feePayer;
+  // `raw` remains the complete option and the response-side escape hatch.
+  std::optional<nlohmann::json> network_extra{};
+  nlohmann::json raw{};
+};
+
+struct X402PaymentRequirements {
+  int x402_version{0};
+  std::vector<X402PaymentOption> accepts{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct X402TopUpReceipt {
+  std::string wallet_address{};
+  double amount_credited{0.0};
+  double new_balance{0.0};
+  std::string payment_id{};
+  bool success{false};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+using X402TopUpResult =
+    std::variant<X402PaymentRequirements, X402TopUpReceipt>;
+
+struct X402TransactionsQuery {
+  std::optional<int> limit = std::nullopt;
+  std::optional<int> offset = std::nullopt;
+  std::vector<std::pair<std::string, std::string>> extra = {};
+};
+
+[[nodiscard]] inline auto x402_transactions_query_params(
+    const X402TransactionsQuery& query)
+    -> std::vector<std::pair<std::string, std::string>> {
+  std::vector<std::pair<std::string, std::string>> out;
+  if (query.limit) out.emplace_back("limit", std::to_string(*query.limit));
+  if (query.offset) out.emplace_back("offset", std::to_string(*query.offset));
+  for (const auto& [key, value] : query.extra) {
+    if (key.empty() || value.empty()) continue;
+    const bool taken = std::any_of(out.begin(), out.end(),
+                                   [&key](const auto& pair) {
+                                     return pair.first == key;
+                                   });
+    if (!taken) out.emplace_back(key, value);
+  }
+  return out;
+}
+
+struct X402Transaction {
+  std::optional<std::string> id{};
+  std::optional<double> amount{};
+  std::optional<double> balance_after{};
+  std::optional<std::string> type{};
+  std::optional<std::string> created_at{};
+  std::optional<std::string> request_id{};
+  std::optional<std::string> model_id{};
+  nlohmann::json raw{};
+};
+
+struct X402TransactionPagination {
+  std::optional<int> limit{};
+  std::optional<int> offset{};
+  std::optional<bool> has_more{};
+  nlohmann::json raw{};
+};
+
+struct X402TransactionPage {
+  std::optional<std::string> wallet_address{};
+  std::optional<double> current_balance{};
+  std::vector<X402Transaction> entries{};
+  std::size_t returned{0};
+  std::optional<X402TransactionPagination> pagination{};
+  bool success{false};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+namespace detail {
+
+[[nodiscard]] inline auto required_x402_object(const nlohmann::json& j,
+                                                const char* key,
+                                                std::string_view where)
+    -> const nlohmann::json& {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_object())
+    throw std::runtime_error{std::string{where} + ": " + key +
+                             " must be an object"};
+  return *it;
+}
+
+[[nodiscard]] inline auto required_x402_array(const nlohmann::json& j,
+                                               const char* key,
+                                               std::string_view where)
+    -> const nlohmann::json& {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_array())
+    throw std::runtime_error{std::string{where} + ": " + key +
+                             " must be an array"};
+  return *it;
+}
+
+[[nodiscard]] inline auto required_x402_string(const nlohmann::json& j,
+                                                const char* key,
+                                                std::string_view where)
+    -> std::string {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_string())
+    throw std::runtime_error{std::string{where} + ": " + key +
+                             " must be a string"};
+  return it->get<std::string>();
+}
+
+[[nodiscard]] inline auto required_x402_double(const nlohmann::json& j,
+                                                const char* key,
+                                                std::string_view where)
+    -> double {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_number())
+    throw std::runtime_error{std::string{where} + ": " + key +
+                             " must be a number"};
+  return it->get<double>();
+}
+
+[[nodiscard]] inline auto required_x402_bool(const nlohmann::json& j,
+                                              const char* key,
+                                              std::string_view where) -> bool {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_boolean())
+    throw std::runtime_error{std::string{where} + ": " + key +
+                             " must be a boolean"};
+  return it->get<bool>();
+}
+
+[[nodiscard]] inline auto required_x402_int(const nlohmann::json& j,
+                                             const char* key,
+                                             std::string_view where) -> int {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_number_integer())
+    throw std::runtime_error{std::string{where} + ": " + key +
+                             " must be an integer in int range"};
+  if (it->is_number_unsigned()) {
+    const auto value = it->get<std::uint64_t>();
+    if (value > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+      throw std::runtime_error{std::string{where} + ": " + key +
+                               " must be an integer in int range"};
+    return static_cast<int>(value);
+  }
+  const auto value = it->get<std::int64_t>();
+  if (value < std::numeric_limits<int>::min() ||
+      value > std::numeric_limits<int>::max())
+    throw std::runtime_error{std::string{where} + ": " + key +
+                             " must be an integer in int range"};
+  return static_cast<int>(value);
+}
+
+}  // namespace detail
+
+[[nodiscard]] inline auto x402_balance_from_json_body(const nlohmann::json& j)
+    -> X402Balance {
+  if (!j.is_object())
+    throw std::runtime_error{"x402 balance: response must be an object"};
+  const auto& data = detail::required_x402_object(j, "data", "x402 balance");
+
+  return X402Balance{
+      .wallet_address =
+          detail::required_x402_string(data, "walletAddress", "x402 balance"),
+      .balance_usd =
+          detail::required_x402_double(data, "balanceUsd", "x402 balance"),
+      .can_consume =
+          detail::required_x402_bool(data, "canConsume", "x402 balance"),
+      .minimum_top_up_usd = detail::required_x402_double(
+          data, "minimumTopUpUsd", "x402 balance"),
+      .suggested_top_up_usd = detail::required_x402_double(
+          data, "suggestedTopUpUsd", "x402 balance"),
+      .diem_balance_usd = detail::opt_double(data, "diemBalanceUsd"),
+      .success = detail::required_x402_bool(j, "success", "x402 balance"),
+      .raw = j,
+  };
+}
+
+[[nodiscard]] inline auto x402_payment_requirements_from_json_body(
+    const nlohmann::json& j) -> X402PaymentRequirements {
+  if (!j.is_object())
+    throw std::runtime_error{
+        "x402 payment requirements: response must be an object"};
+  const auto& accepts = detail::required_x402_array(
+      j, "accepts", "x402 payment requirements");
+
+  X402PaymentRequirements response;
+  response.x402_version = detail::required_x402_int(
+      j, "x402Version", "x402 payment requirements");
+  response.raw = j;
+  response.accepts.reserve(accepts.size());
+  for (const auto& value : accepts) {
+    if (!value.is_object())
+      throw std::runtime_error{
+          "x402 payment requirements: accepted option must be an object"};
+    X402PaymentOption option{
+        .scheme = detail::required_x402_string(
+            value, "scheme", "x402 payment option"),
+        .network = detail::required_x402_string(
+            value, "network", "x402 payment option"),
+        .amount = detail::required_x402_string(
+            value, "amount", "x402 payment option"),
+        .asset = detail::required_x402_string(
+            value, "asset", "x402 payment option"),
+        .pay_to = detail::required_x402_string(
+            value, "payTo", "x402 payment option"),
+        .max_timeout_seconds = detail::required_x402_int(
+            value, "maxTimeoutSeconds", "x402 payment option"),
+        .raw = value,
+    };
+    if (const auto* extra = detail::opt_object(value, "extra"))
+      option.network_extra = *extra;
+    response.accepts.push_back(std::move(option));
+  }
+  return response;
+}
+
+[[nodiscard]] inline auto x402_top_up_receipt_from_json_body(
+    const nlohmann::json& j) -> X402TopUpReceipt {
+  if (!j.is_object())
+    throw std::runtime_error{"x402 top-up: response must be an object"};
+  const auto& data = detail::required_x402_object(j, "data", "x402 top-up");
+  return X402TopUpReceipt{
+      .wallet_address =
+          detail::required_x402_string(data, "walletAddress", "x402 top-up"),
+      .amount_credited =
+          detail::required_x402_double(data, "amountCredited", "x402 top-up"),
+      .new_balance =
+          detail::required_x402_double(data, "newBalance", "x402 top-up"),
+      .payment_id =
+          detail::required_x402_string(data, "paymentId", "x402 top-up"),
+      .success = detail::required_x402_bool(j, "success", "x402 top-up"),
+      .raw = j,
+  };
+}
+
+[[nodiscard]] inline auto x402_transactions_from_json_body(
+    const nlohmann::json& j) -> X402TransactionPage {
+  if (!j.is_object())
+    throw std::runtime_error{"x402 transactions: response must be an object"};
+  const auto& data =
+      detail::required_x402_object(j, "data", "x402 transactions");
+  const auto& values = detail::required_x402_array(
+      data, "transactions", "x402 transactions");
+
+  X402TransactionPage response;
+  response.success =
+      detail::required_x402_bool(j, "success", "x402 transactions");
+  response.wallet_address = detail::opt_string(data, "walletAddress");
+  response.current_balance = detail::opt_double(data, "currentBalance");
+  response.returned = values.size();
+  response.raw = j;
+  response.entries.reserve(values.size());
+  for (const auto& value : values) {
+    if (!value.is_object()) continue;
+    response.entries.push_back(X402Transaction{
+        .id = detail::opt_string(value, "id"),
+        .amount = detail::opt_double(value, "amount"),
+        .balance_after = detail::opt_double(value, "balanceAfter"),
+        .type = detail::opt_string(value, "type"),
+        .created_at = detail::opt_string(value, "createdAt"),
+        .request_id = detail::opt_string(value, "requestId"),
+        .model_id = detail::opt_string(value, "modelId"),
+        .raw = value,
+    });
+  }
+  if (const auto* pagination = detail::opt_object(data, "pagination")) {
+    response.pagination = X402TransactionPagination{
+        .limit = detail::opt_int(*pagination, "limit"),
+        .offset = detail::opt_int(*pagination, "offset"),
+        .has_more = detail::opt_bool(*pagination, "hasMore"),
+        .raw = *pagination,
+    };
+  }
+  return response;
+}
+
 }  // namespace venice

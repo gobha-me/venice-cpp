@@ -1723,8 +1723,11 @@
       "method": "GET",
       "path": "/x402/balance/{walletAddress}",
       "family": "x402",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 49,
+      "public_api": [
+        "Client::x402_balance"
+      ],
       "security": [
         [
           "siwx"
@@ -1756,8 +1759,11 @@
       "method": "POST",
       "path": "/x402/top-up",
       "family": "x402",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 49,
+      "public_api": [
+        "Client::x402_top_up"
+      ],
       "security": [
         []
       ],
@@ -1786,8 +1792,11 @@
       "method": "GET",
       "path": "/x402/transactions/{walletAddress}",
       "family": "x402",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 49,
+      "public_api": [
+        "Client::x402_transactions"
+      ],
       "security": [
         [
           "siwx"

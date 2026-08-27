@@ -133,6 +133,16 @@ struct CapturedWeb3Request {
   std::string body{};
 };
 
+struct CapturedX402Request {
+  std::string method{};
+  std::string path{};
+  std::string content_type{};
+  std::string authorization{};
+  std::string siwx{};
+  std::string payment{};
+  std::string body{};
+};
+
 // A peer that can be made to stop answering.
 //
 //   GET  /api/v1/api_keys/rate_limits — accepts, then never answers (until
@@ -1551,6 +1561,182 @@ class TestServer {
                  res.set_content(output.dump(), "application/json");
                });
 
+    const auto x402_error = [](httplib::Response& res, int status) {
+      res.status = status;
+      res.set_header("X-Protocol-Trace", "x402-error");
+      res.set_content(R"({"error":"x402 refused"})", "text/plain");
+    };
+
+    m_svr.Get(R"(/api/v1/x402/balance/(.*))",
+              [this, x402_error](const httplib::Request& req,
+                                 httplib::Response& res) {
+                ++m_x402_hits;
+                capture_x402(req);
+                constexpr std::array<int, 5> kStatuses{400, 401, 403, 429, 500};
+                for (const int status : kStatuses) {
+                  if (req.target.find("/status-" + std::to_string(status)) !=
+                      std::string::npos)
+                    return x402_error(res, status);
+                }
+                if (req.target.find("/stall") != std::string::npos) {
+                  ++m_x402_stall_hits;
+                  m_gate.wait(kStallCap);
+                }
+                if (req.target.find("/wrong-media") != std::string::npos) {
+                  res.set_content("wrong", "text/plain");
+                  return;
+                }
+                if (req.target.find("/invalid-json") != std::string::npos) {
+                  res.set_content("{", "application/json");
+                  return;
+                }
+                if (req.target.find("/malformed") != std::string::npos) {
+                  res.set_content(R"({"success":true,"data":{}})",
+                                  "application/json");
+                  return;
+                }
+                res.set_header("X-Balance-Remaining", "12.500000");
+                res.set_content(
+                    nlohmann::json{
+                        {"success", true},
+                        {"data",
+                         {{"walletAddress", "0xnormalized"},
+                          {"balanceUsd", 12.5},
+                          {"canConsume", true},
+                          {"minimumTopUpUsd", 5},
+                          {"suggestedTopUpUsd", 10},
+                          {"diemBalanceUsd", 2.25}}},
+                        {"seen_target", req.target}}
+                        .dump(),
+                    "application/json; charset=utf-8");
+              });
+
+    m_svr.Get(R"(/api/v1/x402/transactions/(.*))",
+              [this, x402_error](const httplib::Request& req,
+                                 httplib::Response& res) {
+                ++m_x402_hits;
+                capture_x402(req);
+                constexpr std::array<int, 5> kStatuses{400, 401, 403, 429, 500};
+                for (const int status : kStatuses) {
+                  if (req.target.find("/status-" + std::to_string(status)) !=
+                      std::string::npos)
+                    return x402_error(res, status);
+                }
+                if (req.target.find("/wrong-media") != std::string::npos) {
+                  res.set_content("wrong", "text/plain");
+                  return;
+                }
+                if (req.target.find("/invalid-json") != std::string::npos) {
+                  res.set_content("{", "application/json");
+                  return;
+                }
+                if (req.target.find("/malformed") != std::string::npos) {
+                  res.set_content(R"({"success":true,"data":{}})",
+                                  "application/json");
+                  return;
+                }
+                res.set_content(
+                    nlohmann::json{
+                        {"success", true},
+                        {"data",
+                         {{"walletAddress", "0xnormalized"},
+                          {"currentBalance", 12.35},
+                          {"transactions",
+                           nlohmann::json::array(
+                               {{{"id", "ledger-1"},
+                                 {"amount", -0.15},
+                                 {"balanceAfter", 12.35},
+                                 {"type", "CHARGE"},
+                                 {"createdAt", "later"},
+                                 {"requestId", "request-1"},
+                                 {"modelId", "model-1"}}})},
+                          {"pagination",
+                           {{"limit", 2},
+                            {"offset", 1},
+                            {"hasMore", false}}}}},
+                        {"seen_target", req.target}}
+                        .dump(),
+                    "application/json");
+              });
+
+    m_svr.Post("/api/v1/x402/top-up",
+               [this, x402_error](const httplib::Request& req,
+                                  httplib::Response& res) {
+                 ++m_x402_hits;
+                 capture_x402(req);
+                 const std::string control =
+                     req.get_header_value("Idempotency-Key");
+                 for (const int status : {400, 429, 500}) {
+                   if (control == "status-" + std::to_string(status))
+                     return x402_error(res, status);
+                 }
+                 if (control == "stall") {
+                   ++m_x402_stall_hits;
+                   m_gate.wait(kStallCap);
+                 }
+                 if (control == "wrong-media-402") {
+                   res.status = 402;
+                   res.set_content("wrong", "text/plain");
+                   return;
+                 }
+                 if (control == "invalid-json-402") {
+                   res.status = 402;
+                   res.set_content("{", "application/json");
+                   return;
+                 }
+                 if (control == "malformed-402") {
+                   res.status = 402;
+                   res.set_content(R"({"x402Version":2})", "application/json");
+                   return;
+                 }
+                 if (control == "wrong-media-200") {
+                   res.set_content("wrong", "text/plain");
+                   return;
+                 }
+                 if (control == "invalid-json-200") {
+                   res.set_content("{", "application/json");
+                   return;
+                 }
+                 if (control == "malformed-200") {
+                   res.set_content(R"({"success":true,"data":{}})",
+                                   "application/json");
+                   return;
+                 }
+
+                 if (req.get_header_value("PAYMENT-SIGNATURE").empty()) {
+                   res.status = 402;
+                   res.set_header("PAYMENT-REQUIRED", "opaque-requirements");
+                   res.set_content(
+                       nlohmann::json{
+                           {"x402Version", 2},
+                           {"accepts",
+                            {{{"scheme", "exact"},
+                              {"network", "eip155:8453"},
+                              {"amount", "5000000"},
+                              {"asset", "0xasset"},
+                              {"payTo", "0xreceiver"},
+                              {"maxTimeoutSeconds", 300},
+                              {"extra", {{"version", "2"}}}}}},
+                           {"fixture", "public-discovery"}}
+                           .dump(),
+                       "application/json; charset=utf-8");
+                   return;
+                 }
+
+                 res.set_header("PAYMENT-RESPONSE", "opaque-settlement");
+                 res.set_content(
+                     nlohmann::json{
+                         {"success", true},
+                         {"data",
+                          {{"walletAddress", "0xnormalized"},
+                           {"amountCredited", 10},
+                           {"newBalance", 22.5},
+                           {"paymentId", "payment-1"}}},
+                         {"fixture", "paid-top-up"}}
+                         .dump(),
+                     "application/json");
+               });
+
     m_svr.Get("/api/v1/billing/balance",
               [this](const httplib::Request& req, httplib::Response& res) {
                 ++m_billing_hits;
@@ -1847,6 +2033,10 @@ class TestServer {
   [[nodiscard]] auto crypto_rpc_stall_hits() const -> int {
     return m_crypto_rpc_stall_hits.load();
   }
+  [[nodiscard]] auto x402_hits() const -> int { return m_x402_hits.load(); }
+  [[nodiscard]] auto x402_stall_hits() const -> int {
+    return m_x402_stall_hits.load();
+  }
   [[nodiscard]] auto last_transform() const -> CapturedTransform {
     const std::lock_guard<std::mutex> lock{m_transform_mu};
     return m_last_transform;
@@ -1854,6 +2044,10 @@ class TestServer {
   [[nodiscard]] auto last_web3() const -> CapturedWeb3Request {
     const std::lock_guard<std::mutex> lock{m_web3_mu};
     return m_last_web3;
+  }
+  [[nodiscard]] auto last_x402() const -> CapturedX402Request {
+    const std::lock_guard<std::mutex> lock{m_x402_mu};
+    return m_last_x402;
   }
   [[nodiscard]] auto multipart_stall_hits() const -> int { return m_multipart_stall_hits.load(); }
 
@@ -1864,6 +2058,19 @@ class TestServer {
   void capture_web3(const httplib::Request& req) {
     const std::lock_guard<std::mutex> lock{m_web3_mu};
     m_last_web3 = CapturedWeb3Request{
+        .method = req.method,
+        .path = req.target,
+        .content_type = req.get_header_value("Content-Type"),
+        .authorization = req.get_header_value("Authorization"),
+        .siwx = req.get_header_value("SIGN-IN-WITH-X"),
+        .payment = req.get_header_value("PAYMENT-SIGNATURE"),
+        .body = req.body,
+    };
+  }
+
+  void capture_x402(const httplib::Request& req) {
+    const std::lock_guard<std::mutex> lock{m_x402_mu};
+    m_last_x402 = CapturedX402Request{
         .method = req.method,
         .path = req.target,
         .content_type = req.get_header_value("Content-Type"),
@@ -1904,12 +2111,16 @@ class TestServer {
   std::atomic<int> m_augment_stall_hits{0};
   std::atomic<int> m_crypto_rpc_hits{0};
   std::atomic<int> m_crypto_rpc_stall_hits{0};
+  std::atomic<int> m_x402_hits{0};
+  std::atomic<int> m_x402_stall_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
   mutable std::mutex m_transform_mu;
   CapturedTransform m_last_transform{};
   Web3ChallengeMode m_web3_challenge_mode;
   mutable std::mutex m_web3_mu;
   CapturedWeb3Request m_last_web3{};
+  mutable std::mutex m_x402_mu;
+  CapturedX402Request m_last_x402{};
 };
 
 // What the catalogue fixture echoed under `key`, or a marker naming what was
@@ -5059,4 +5270,218 @@ TEST_CASE("cancellation interrupts a stalled crypto RPC call",
   REQUIRE(result.error().is(ErrorKind::Cancelled));
   REQUIRE(elapsed < kPromptly);
   REQUIRE(server.crypto_rpc_stall_hits() == 1);
+}
+
+TEST_CASE("x402 endpoints reject impossible auth and empty wallets before the socket",
+          "[transport][x402][auth][failure]") {
+  const TestServer server;
+  const Client public_client{Authentication::public_access(), server.base_url()};
+  const Client bearer{"bearer-secret", server.base_url()};
+  const Client wallet{Authentication::sign_in_with_x("signed-wallet"),
+                      server.base_url()};
+  const Client payment{Authentication::x402_payment("signed-payment"),
+                       server.base_url()};
+
+  REQUIRE_FALSE(public_client.x402_balance("0xabc"));
+  REQUIRE_FALSE(bearer.x402_balance("0xabc"));
+  REQUIRE_FALSE(payment.x402_balance("0xabc"));
+  REQUIRE_FALSE(wallet.x402_balance(""));
+
+  REQUIRE_FALSE(bearer.x402_top_up());
+  REQUIRE_FALSE(wallet.x402_top_up());
+
+  REQUIRE_FALSE(public_client.x402_transactions("0xabc"));
+  REQUIRE_FALSE(bearer.x402_transactions("0xabc"));
+  REQUIRE_FALSE(payment.x402_transactions("0xabc"));
+  REQUIRE_FALSE(wallet.x402_transactions(""));
+  REQUIRE(server.x402_hits() == 0);
+}
+
+TEST_CASE("x402 top-up sends an empty public discovery or one payment header",
+          "[transport][x402][top-up]") {
+  const TestServer server;
+  const Client public_client{Authentication::public_access(), server.base_url()};
+
+  const auto discovery = public_client.x402_top_up();
+  REQUIRE(discovery.has_value());
+  const auto* requirements =
+      std::get_if<venice::X402PaymentRequirements>(&*discovery);
+  REQUIRE(requirements != nullptr);
+  REQUIRE(requirements->x402_version == 2);
+  REQUIRE(requirements->accepts.size() == 1);
+  REQUIRE(requirements->accepts.front().amount == "5000000");
+  REQUIRE(requirements->metadata.payment_required == "opaque-requirements");
+  REQUIRE(requirements->raw.at("fixture") == "public-discovery");
+
+  const auto public_capture = server.last_x402();
+  REQUIRE(public_capture.method == "POST");
+  REQUIRE(public_capture.path == "/api/v1/x402/top-up");
+  REQUIRE(public_capture.content_type.empty());
+  REQUIRE(public_capture.authorization.empty());
+  REQUIRE(public_capture.siwx.empty());
+  REQUIRE(public_capture.payment.empty());
+  REQUIRE(public_capture.body.empty());
+
+  const std::string signed_payment = "signed-payment-secret";
+  const auto receipt = public_client.x402_top_up(
+      {.authentication = Authentication::x402_payment(signed_payment)});
+  REQUIRE(receipt.has_value());
+  const auto* paid = std::get_if<venice::X402TopUpReceipt>(&*receipt);
+  REQUIRE(paid != nullptr);
+  REQUIRE(paid->wallet_address == "0xnormalized");
+  REQUIRE(paid->amount_credited == 10.0);
+  REQUIRE(paid->new_balance == 22.5);
+  REQUIRE(paid->payment_id == "payment-1");
+  REQUIRE(paid->metadata.payment_response == "opaque-settlement");
+  REQUIRE(paid->raw.dump().find(signed_payment) == std::string::npos);
+
+  const auto paid_capture = server.last_x402();
+  REQUIRE(paid_capture.method == "POST");
+  REQUIRE(paid_capture.content_type.empty());
+  REQUIRE(paid_capture.authorization.empty());
+  REQUIRE(paid_capture.siwx.empty());
+  REQUIRE(paid_capture.payment == signed_payment);
+  REQUIRE(paid_capture.body.empty());
+  REQUIRE(server.x402_hits() == 2);
+}
+
+TEST_CASE("x402 wallet reads send canonical SIWX with encoded path and query",
+          "[transport][x402][wallet]") {
+  const TestServer server;
+  const std::string signed_siwx = "signed-siwx-secret";
+  const Client wallet{Authentication::sign_in_with_x(signed_siwx),
+                      server.base_url()};
+
+  const auto balance = wallet.x402_balance("wallet/with space");
+  REQUIRE(balance.has_value());
+  REQUIRE(balance->wallet_address == "0xnormalized");
+  REQUIRE(balance->balance_usd == 12.5);
+  REQUIRE(balance->metadata.x_balance_remaining == "12.500000");
+  REQUIRE(balance->raw.at("seen_target") ==
+          "/api/v1/x402/balance/wallet%2Fwith%20space");
+  auto capture = server.last_x402();
+  REQUIRE(capture.path == "/api/v1/x402/balance/wallet%2Fwith%20space");
+  REQUIRE(capture.siwx == signed_siwx);
+  REQUIRE(capture.authorization.empty());
+  REQUIRE(capture.payment.empty());
+
+  venice::X402TransactionsQuery query;
+  query.limit = 2;
+  query.offset = 1;
+  query.extra = {{"future", "a/b"}};
+  const auto page = wallet.x402_transactions("wallet/with space", query);
+  REQUIRE(page.has_value());
+  REQUIRE(page->entries.size() == 1);
+  REQUIRE(page->entries.front().id ==
+          std::optional<std::string>{"ledger-1"});
+  REQUIRE(page->pagination->limit == std::optional<int>{2});
+  REQUIRE(page->raw.at("seen_target") ==
+          "/api/v1/x402/transactions/wallet%2Fwith%20space?limit=2&offset=1&future=a%2Fb");
+  capture = server.last_x402();
+  REQUIRE(capture.path ==
+          "/api/v1/x402/transactions/wallet%2Fwith%20space?limit=2&offset=1&future=a%2Fb");
+  REQUIRE(capture.siwx == signed_siwx);
+  REQUIRE(capture.body.empty());
+}
+
+TEST_CASE("x402 status errors precede media validation and accepted statuses parse",
+          "[transport][x402][failure]") {
+  const TestServer server;
+  const Client wallet{Authentication::sign_in_with_x("signed-wallet"),
+                      server.base_url()};
+  const Client public_client{Authentication::public_access(), server.base_url()};
+
+  struct StatusCase {
+    int status;
+    ErrorKind kind;
+  };
+  const std::array wallet_statuses{
+      StatusCase{400, ErrorKind::Http}, StatusCase{401, ErrorKind::Auth},
+      StatusCase{403, ErrorKind::Auth}, StatusCase{429, ErrorKind::RateLimited},
+      StatusCase{500, ErrorKind::Http}};
+  for (const auto& test : wallet_statuses) {
+    const auto balance =
+        wallet.x402_balance("status-" + std::to_string(test.status));
+    REQUIRE_FALSE(balance);
+    REQUIRE(balance.error().kind == test.kind);
+    REQUIRE(balance.error().status == test.status);
+    REQUIRE(balance.error().body == R"({"error":"x402 refused"})");
+    REQUIRE(balance.error().metadata.header("X-Protocol-Trace") ==
+            "x402-error");
+
+    const auto transactions =
+        wallet.x402_transactions("status-" + std::to_string(test.status));
+    REQUIRE_FALSE(transactions);
+    REQUIRE(transactions.error().kind == test.kind);
+    REQUIRE(transactions.error().status == test.status);
+  }
+
+  for (const std::string control : {"wrong-media", "invalid-json", "malformed"}) {
+    const auto balance = wallet.x402_balance(control);
+    REQUIRE_FALSE(balance);
+    REQUIRE(balance.error().is(ErrorKind::Parse));
+    REQUIRE(balance.error().status == 200);
+    const auto transactions = wallet.x402_transactions(control);
+    REQUIRE_FALSE(transactions);
+    REQUIRE(transactions.error().is(ErrorKind::Parse));
+    REQUIRE(transactions.error().status == 200);
+  }
+
+  for (const int status : {400, 429, 500}) {
+    const auto result = public_client.x402_top_up(
+        {.idempotency_key = "status-" + std::to_string(status)});
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().status == status);
+    REQUIRE(result.error().body == R"({"error":"x402 refused"})");
+    REQUIRE(result.error().metadata.header("X-Protocol-Trace") ==
+            "x402-error");
+  }
+  for (const std::string control : {"wrong-media-402", "invalid-json-402",
+                                    "malformed-402", "wrong-media-200",
+                                    "invalid-json-200", "malformed-200"}) {
+    const auto result =
+        public_client.x402_top_up({.idempotency_key = control});
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().is(ErrorKind::Parse));
+    REQUIRE(result.error().status ==
+            (control.ends_with("402") ? 402 : 200));
+  }
+}
+
+TEST_CASE("cancellation and timeout interrupt a stalled x402 discovery",
+          "[transport][x402][cancel][timeout][failure]") {
+  {
+    const TestServer server;
+    const Client client{Authentication::public_access(), server.base_url()};
+    venice::CancelToken token;
+    std::thread canceller{[&] {
+      while (server.x402_stall_hits() == 0)
+        std::this_thread::sleep_for(5ms);
+      token.cancel();
+    }};
+
+    std::expected<venice::X402TopUpResult, venice::Error> result;
+    const auto elapsed = timed([&] {
+      result = client.x402_top_up(
+          {.cancel = &token, .idempotency_key = "stall"});
+    });
+    canceller.join();
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().is(ErrorKind::Cancelled));
+    REQUIRE(elapsed < kPromptly);
+    REQUIRE(server.x402_stall_hits() == 1);
+  }
+
+  {
+    const TestServer server;
+    const Client client{Authentication::public_access(), server.base_url()};
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = client.x402_top_up(
+        {.read_timeout = 100ms, .idempotency_key = "stall"});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().is(ErrorKind::Network));
+    REQUIRE(elapsed < kPromptly);
+    REQUIRE(server.x402_stall_hits() == 1);
+  }
 }

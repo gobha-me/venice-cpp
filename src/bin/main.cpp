@@ -870,6 +870,90 @@ auto crypto_rpc_report(const venice::Client& client) -> int {
   return EXIT_SUCCESS;
 }
 
+// ── x402 payment discovery (VC-34, #49) ─────────────────────────────────
+//
+// The only safe credential-free live leg for this family. It sends an empty
+// POST, receives the payment choices Venice is currently advertising and stops
+// there: no wallet key, SIWX proof or payment signature is available to this
+// process, and no balance is changed.
+constexpr std::array<std::string_view, 2> kModeledX402RequirementKeys{
+    "x402Version", "accepts"};
+constexpr std::array<std::string_view, 7> kModeledX402OptionKeys{
+    "scheme", "network", "amount", "asset", "payTo", "maxTimeoutSeconds",
+    "extra"};
+
+auto x402_report(const venice::Client& client) -> int {
+  const auto result = client.x402_top_up();
+  if (!result) {
+    std::cerr << "x402 discovery failed ["
+              << venice::to_string(result.error().kind) << "] "
+              << result.error().message << '\n';
+    if (!result.error().body.empty()) std::cerr << result.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+
+  const auto* requirements =
+      std::get_if<venice::X402PaymentRequirements>(&*result);
+  if (requirements == nullptr) {
+    std::cerr << "an empty public top-up unexpectedly returned a payment receipt\n";
+    return EXIT_FAILURE;
+  }
+
+  std::cerr << "x402 requirements, envelope verbatim:\n"
+            << requirements->raw.dump(2) << '\n';
+  report_unmodeled("unmodeled x402 requirement keys: ", requirements->raw,
+                   kModeledX402RequirementKeys,
+                   "X402PaymentRequirements::raw");
+
+  const auto* raw_accepts =
+      venice::detail::opt_array(requirements->raw, "accepts");
+  bool agrees =
+      venice::detail::opt_int(requirements->raw, "x402Version") ==
+          std::optional<int>{requirements->x402_version} &&
+      raw_accepts != nullptr &&
+      raw_accepts->size() == requirements->accepts.size();
+  if (raw_accepts != nullptr) {
+    for (std::size_t i = 0;
+         i < raw_accepts->size() && i < requirements->accepts.size(); ++i) {
+      const auto& raw = raw_accepts->at(i);
+      const auto& typed = requirements->accepts.at(i);
+      report_unmodeled("unmodeled x402 option keys: ", raw,
+                       kModeledX402OptionKeys, "X402PaymentOption::raw");
+      const auto* extra = venice::detail::opt_object(raw, "extra");
+      agrees = agrees &&
+               venice::detail::opt_string(raw, "scheme") ==
+                   std::optional<std::string>{typed.scheme} &&
+               venice::detail::opt_string(raw, "network") ==
+                   std::optional<std::string>{typed.network} &&
+               venice::detail::opt_string(raw, "amount") ==
+                   std::optional<std::string>{typed.amount} &&
+               venice::detail::opt_string(raw, "asset") ==
+                   std::optional<std::string>{typed.asset} &&
+               venice::detail::opt_string(raw, "payTo") ==
+                   std::optional<std::string>{typed.pay_to} &&
+               venice::detail::opt_int(raw, "maxTimeoutSeconds") ==
+                   std::optional<int>{typed.max_timeout_seconds} &&
+               ((extra == nullptr && !typed.network_extra) ||
+                (extra != nullptr && typed.network_extra &&
+                 *extra == *typed.network_extra));
+    }
+  }
+
+  if (!requirements->metadata.payment_required) {
+    std::cerr << "x402 discovery lacked the opaque PAYMENT-REQUIRED header\n";
+    agrees = false;
+  }
+  std::cerr << "x402 version " << requirements->x402_version << ": "
+            << requirements->accepts.size()
+            << " accepted payment options; raw/typed="
+            << (agrees ? "agree" : "MISMATCH") << '\n';
+  for (const auto& option : requirements->accepts)
+    std::cerr << "  " << option.network << " / " << option.asset
+              << " / base units " << option.amount << '\n';
+  std::cerr << "No payment payload was signed or submitted; no wallet balance was changed.\n";
+  return agrees ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 // ── image transformations (VC-41, #66) ─────────────────────────────────
 //
 // A valid 256x256 solid-colour PNG, kept as base64 so the smoke leg performs
@@ -2661,7 +2745,7 @@ auto main(int argc, char** argv) -> int {
   const std::string_view arg2 = argc > 3 ? std::string_view{argv[3]} : std::string_view{};
   const std::string_view arg3 = argc > 4 ? std::string_view{argv[4]} : std::string_view{};
 
-  // The four legs that need no credential, dispatched above the key lookup
+  // The five legs that need no credential, dispatched above the key lookup
   // deliberately. Measured 2026-08-11: /models/traits and
   // /models/compatibility_mapping (VC-38, #59) and /models itself (VC-39, #60)
   // all answer 200 with no Authorization header at all, for every modality.
@@ -2681,11 +2765,13 @@ auto main(int argc, char** argv) -> int {
     return show_modality(venice::Client{venice::Authentication::public_access()}, arg);
   if (leg == "--styles")
     return image_styles_report(venice::Client{venice::Authentication::public_access()});
+  if (leg == "--x402")
+    return x402_report(venice::Client{venice::Authentication::public_access()});
 
   const char* key = std::getenv("VENICE_API_KEY");
   if (key == nullptr || *key == '\0') {
     std::cerr << "VENICE_API_KEY not set; nothing to call with a credential.\n"
-                 "(--traits, --compat, --modality and --styles need no key;\n"
+                 "(--traits, --compat, --modality, --styles and --x402 need no key;\n"
                  " --embeddings, --image, --image-transform, --audio, --video, "
                  "--augment, --crypto-rpc,\n"
                  " --billing and\n"
