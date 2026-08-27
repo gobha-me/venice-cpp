@@ -462,8 +462,8 @@ TEST_CASE("raw holds the whole body, including what nothing models", "[response]
   const auto body = nlohmann::json::parse(kReplyBody);
   const auto r = ChatResponse::from_json_body(body);
   REQUIRE(r.raw == body);
-  // choices[1..n] and logprobs are deliberately untyped; this is what makes
-  // that deferral honest rather than lossy.
+  // Unknown choice and envelope keys remain deliberately untyped; this is what
+  // makes retaining raw honest rather than lossy.
   REQUIRE(r.raw.at("choices").at(0).at("index") == 0);
 }
 

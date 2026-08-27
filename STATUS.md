@@ -8,7 +8,11 @@ AGENTS.md (which holds standing conventions, not state).
 **Phase 0: DONE and verified against the live API.**
 - `chat()` non-streaming completion (verified: "venice-cpp works").
 - `chat_stream()` SSE streaming, three forms: a content-text callback and two
-  that assemble into a caller-owned `StreamAccumulator`. Cancellable.
+  that assemble into a caller-owned `StreamAccumulator`. Cancellable, and now
+  retains every `n > 1` choice independently by wire index (VC-24).
+- `create_response()` — Alpha/stateless non-streaming Responses API with raw
+  polymorphic input/output items, typed status/usage/error metadata and
+  function-call/citation accessors (VC-24).
 - A reply is a `Message` and a `Message` is what you send — reasoning_content,
   tool_calls, tool_call_id, refusal, multimodal content parts and a tool call's
   `thought_signature`, all round-trippable, all individually withholdable.
@@ -80,8 +84,8 @@ AGENTS.md (which holds standing conventions, not state).
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 47/49 operations implemented. One retired operation is
-  explicitly unsupported and the remaining operation is assigned to #39 and
+- OpenAPI coverage: 48/49 operations implemented. The sole remainder is the
+  evidence-backed retired `GET /billing/usage`, explicitly unsupported and
   checked in `cmake/openapi_manifest.json` (VC-35). Characters
   and Models are both 3/3 on operations, and since VC-39 the `Model` metadata
   half is done too. Audio now consumes a typed music policy view; ASR carries
@@ -112,11 +116,7 @@ in full: a leg that auto-picks one model settles nothing about a shape that
 varies by model family, and two tickets have now been filed on the strength of
 a single-family run.
 
-1. **VC-24 (#39): complete Chat Completions and the remaining Responses API
-   operation.** Preserve raw polymorphic shapes while adding stable chat
-   ergonomics; `/responses` is the only planned operation left in the checked
-   OpenAPI inventory.
-2. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
+1. **VC-19 (#31): no escape hatch reaches inside a tool call.** `m.extra =
    m.raw` is overwritten for `tool_calls` because that key is modeled, and
    `ToolCall` has `raw` but no `extra`, so an unmodeled tool-call key is
    unrecoverable. VC-18 was exactly that failure. The limit is pinned by a §0
@@ -124,10 +124,32 @@ a single-family run.
    acceptance criterion. The hard half is streaming: a merge rule for arbitrary
    unmodeled keys across fragments has no wire evidence to choose it yet, so it
    stays deferred until a capture can settle the rule.
-3. Thicken endpoints as AIForge/KDE need them (chat parity,
+2. Thicken endpoints as AIForge/KDE need them (chat parity,
    retries/backoff, high-level async). Driven by real use, not speculatively.
-4. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
+3. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-24 (#39) is implemented for v0.29.0.** Every currently documented Chat
+request property has a first-class member or raw-with-builder shape;
+`max_completion_tokens` is preferred while `max_tokens` remains compatible.
+Multimodal image/audio/video/file parts and prompt-cache controls have exact
+builders. Buffered replies expose all choices and their logprobs; streamed
+deltas expose each choice's logprobs without inventing a cross-frame merge.
+Prompt logprobs, stop reasons, and distinct cache-read/cache-write usage buckets
+are likewise reachable.
+
+`Client::create_response` implements the last planned OpenAPI operation with a
+stateless JSON contract. Input/output item universes stay raw and unknown items
+survive, while output text, function calls, citations, usage and failure details
+have typed accessors. The method forces `stream=false` because the audited
+document publishes no SSE event schema, and explicitly enabling E2EE fails
+before transport rather than silently rerouting. `--responses` selects a
+non-E2EE text model, reports alternatives and reconciles the verbatim envelope.
+
+The manifest now records 48 implemented operations plus the one retired,
+evidence-backed unsupported operation. #31 remains deliberately open: VC-24
+does not invent a merge rule for arbitrary unmodeled keys split across streamed
+tool-call fragments.
 
 **VC-34 (#49) is implemented for v0.28.0.** SIWX-authenticated wallet balance
 and paginated transaction history encode the caller's EVM/Solana wallet as one

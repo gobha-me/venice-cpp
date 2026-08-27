@@ -110,11 +110,20 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   one bool, and it leaves no second source of truth for that bit. The parameter
   has no default, on purpose: a defaulted `stream` would rebuild the very defect
   it retires, a bit that looks set and silently never reaches the wire.
+- **Chat stream options do not own the stream bit.** `ChatRequest::stream_options`
+  is emitted only by `chat_stream()`; buffered `chat()` erases even an
+  `extra["stream_options"]`, while the streaming path preserves an extra-supplied
+  object only when the typed member is unset. `ChatResponse::choices` exposes
+  every choice; legacy message/content/finish fields remain first-choice
+  conveniences. `StreamDelta::logprobs` borrows the current choice fragment;
+  the accumulator does not invent a merge for provider-shaped logprobs whose
+  published schema defines no cross-frame composition.
 - **Range checking: none, deliberately — representability checking: yes.**
   Structural preconditions that make a request unsendable by construction are
   `ErrorKind::InvalidArg`, checked in `Client::validate` before any socket: an
   empty model, no messages, and a non-finite `temperature` / `top_p` /
-  `frequency_penalty` / `presence_penalty`. NaN and ±inf are not a range opinion
+  `frequency_penalty` / `presence_penalty` / `max_temp` / `min_p` / `min_temp` /
+  `repetition_penalty`. NaN and ±inf are not a range opinion
   — JSON cannot encode them, nlohmann collapses them to `null`, and the 400 that
   follows never mentions NaN (VC-10). Value *ranges* (temperature 0-2, top_p
   0-1, penalties -2..2) are the server's policy and are transmitted verbatim,
@@ -142,6 +151,9 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   *loses* whenever `tools` is engaged, so the hatch's behaviour would flip on an
   unrelated field. The container stays typed
   (`optional<vector<nlohmann::json>>`) so engaged-but-empty can emit `[]`.
+  Message content and Responses input/output follow the same rule: item
+  universes remain raw JSON, while builders cover the documented text, image,
+  audio, video, file, cache-control, function-call and reference shapes.
 - **Embedding input follows that same raw-with-builders rule; embedding output
   does not collapse two wire shapes.** `EmbeddingRequest::input` is raw json,
   with `embedding_input::{text,texts,tokens,token_batches}` for the documented
@@ -214,6 +226,12 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   Never print uploaded or returned content in the live leg, and describe
   Venice's retention statement as server behavior rather than a local
   secure-erasure guarantee.
+- **Responses is Alpha, stateless and non-streaming in this public API.**
+  `create_response()` forces `stream=false` because the audited document
+  publishes no SSE event schema. Input/output item collections remain raw and
+  unknown items survive; status, usage, error, function-call and citation views
+  are typed. Explicit E2EE enablement is `InvalidArg`, and the client never
+  silently reroutes to Chat Completions.
 - **Crypto RPC keeps the method universe raw and the transport layers distinct.**
   Network discovery is a tolerant public listing; proxy request params and
   result/error payloads remain raw JSON with small JSON-RPC 2.0 builders.
@@ -396,11 +414,12 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   completion body's *top-level* shape is a contract: `j.at("choices")` must keep
   throwing, because that is what `Client::chat`'s try/catch turns into
   `ErrorKind::Parse` and `test/01client/` pins it.
-- **Usage/cost metadata:** keep cache buckets distinct (cached vs uncached
+- **Usage/cost metadata:** keep cache buckets distinct (cached-read,
+  cache-write and uncached
   tokens price differently — see venice-cli #75). Model *pricing* has two cache
-  buckets (`cache_input` read, `cache_write` write) where `Usage` reports one,
-  so the two cannot be paired 1:1 — don't write code that assumes they can.
-  **Both of `Usage`'s optional fields are per-family, and absent is not zero.**
+  buckets (`cache_input` read, `cache_write` write), and `Usage` now preserves
+  both independently rather than pairing or collapsing them.
+  **All three of `Usage`'s optional fields are per-family, and absent is not zero.**
   VC-17 measured seven families: five send
   `prompt_tokens_details.cached_tokens`, two of those also send
   `completion_tokens_details.reasoning_tokens`, and two send neither while both

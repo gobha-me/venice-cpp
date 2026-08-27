@@ -119,7 +119,7 @@ workflow helpers.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 47/49 operations implemented.
+OpenAPI coverage: 48/49 operations implemented.
 
 One additional published operation is explicitly unsupported:
 `GET /billing/usage` already returns 410 for every request and points callers
@@ -181,6 +181,9 @@ req.messages = {venice::Message::user("Hello")};
 // sampling controls — every one is optional; unset fields are never serialized
 req.temperature = 0.7;
 req.top_p = 0.9;
+req.max_completion_tokens = 256;  // preferred; max_tokens remains compatible
+req.reasoning_effort = "medium";
+req.prompt_cache_key = "conversation-42";
 req.stop = std::vector<std::string>{"\n\n"};
 req.seed = 42;
 req.response_format = venice::response_format::json_object();
@@ -211,6 +214,54 @@ auto s2 = client.chat_stream(req, acc, [](const venice::StreamDelta& d) {
 });
 // acc.message() is the whole assistant turn; acc.chunks() is every frame verbatim
 ```
+
+`ChatResponse::choices` exposes every returned choice, including its index,
+message, finish/stop reasons and raw logprobs. The historical `message`,
+`content`, and `finish_reason` fields remain choice-zero conveniences. Streaming
+assembles choices independently by their wire index; `StreamDelta::choice_index`
+identifies the choice represented by a callback, and `StreamDelta::logprobs`
+borrows that choice's provider-shaped logprobs for the current chunk.
+
+`ChatStreamOptions` does not own the `stream` bit. The selected client method is
+the only source of truth: `chat()` emits `stream=false` and no stream options,
+while `chat_stream()` emits `stream=true` and may include them:
+
+```cpp
+req.stream_options = venice::ChatStreamOptions{.include_usage = true};
+```
+
+### Responses API
+
+`create_response` is Venice's Alpha, stateless Responses endpoint. Its input
+and output item lists remain raw JSON so a new item type is immediately
+reachable; builders and typed accessors cover the documented forms:
+
+```cpp
+venice::ResponsesRequest request;
+request.model = "zai-org-glm-5-1";
+request.input = venice::responses_input::items({
+    venice::responses_items::message(
+        "user", nlohmann::json::array({
+                    venice::responses_content::input_text("Describe this image"),
+                    venice::responses_content::input_image(
+                        "https://example.com/image.png", "high")}))});
+request.max_output_tokens = 256;
+request.tools = std::vector<nlohmann::json>{
+    venice::tools::function("lookup", "Look up a value")};
+
+if (auto response = client.create_response(request)) {
+  const std::string text = response->output_text();
+  const auto calls = response->function_calls();
+  const auto citations = response->citations();
+  // response->output and response->raw preserve every unknown item/key.
+}
+```
+
+The public method deliberately forces `stream=false`: the current document
+describes a JSON success body but publishes no SSE event schema. A streaming
+API will not be guessed from another provider's contract. The endpoint also
+does not support E2EE; explicitly enabling it is `InvalidArg`, and the client
+never silently reroutes the request to Chat Completions.
 
 ### Authentication and x402 metadata
 
@@ -883,9 +934,10 @@ const venice::PriceTier& tier =
 
 Pairing that against a reply's `Usage` afterwards is a *reconstruction*, and it
 cannot be made exact — which is why `cost` above exists. Pricing carries **two**
-cache buckets (`cache_input` for a read, `cache_write` for populating it) while
-`Usage` reports only one (`cached_tokens`), so a response cannot be paired 1:1
-with the rate card. And `cached_tokens` itself is **per-family**: five of the
+cache buckets (`cache_input` for a read, `cache_write` for populating it), and
+`Usage` preserves the corresponding `cached_tokens` and
+`cache_creation_input_tokens` only when the provider reports them. Those
+details are **per-family**: five of the
 seven models VC-17 swept report it, two report nothing but the three flat
 counts, so an estimate must treat an absent bucket as unknown rather than as
 zero. Run `venice-cpp --usage <model>` to see what a given family reports.
@@ -1071,14 +1123,15 @@ matters more than on the direct fetch: the path continues after the slug, so an
 unencoded `/` would address a route this operation does not own.
 
 **`ChatRequest::extra` is a top-level passthrough**, same idea as
-`VeniceParameters::extra`: Venice accepts sampling keys this struct doesn't
-model (`top_k`, `min_p`, `repetition_penalty`), and `extra` reaches them without
-forking the header. Modeled fields always win over a same-named key in `extra`.
+`VeniceParameters::extra`: every currently documented request property now has
+a first-class member, while `extra` keeps future Venice additions reachable
+without forking the header. Modeled fields always win over a same-named key.
 
 Ranges are not checked client-side, but representability is. Structural problems
 that make a request unsendable — an empty model, no messages, or a non-finite
-`temperature` / `top_p` / `frequency_penalty` / `presence_penalty`, since JSON
-has no NaN or infinity — come back as `ErrorKind::InvalidArg` naming the
+`temperature` / `top_p` / `frequency_penalty` / `presence_penalty` / `max_temp`
+/ `min_p` / `min_temp` / `repetition_penalty`, since JSON has no NaN or infinity
+— come back as `ErrorKind::InvalidArg` naming the
 offending field, before any HTTP call is made. Value-range policy belongs to the
 server, so `temperature = 5.0` is transmitted and the API decides. Values inside
 `extra` are passthrough and are not inspected, finiteness included.
@@ -1170,10 +1223,12 @@ There is no callback-only structured overload on purpose. Beside the
 a source break for code that compiles today — and requiring the accumulator is
 what guarantees you cannot ask for the rich stream and then lose it.
 
-A `StreamDelta` is one SSE frame: `content`, `reasoning_content`, `role`,
+A `StreamDelta` is one choice within an SSE frame: `content`,
+`reasoning_content`, `role`,
 `finish_reason`, `refusal`, tool-call fragments, `usage`, `cost`, and `chunk`
 pointing at the whole verbatim frame. Every field is optional because a frame carries some
-of them, and it is a struct rather than a variant so that a future field is
+of them; an `n > 1` frame produces one callback per choice with the same
+`chunk` pointer and a distinct `choice_index`. It is a struct rather than a variant so that a future field is
 additive instead of an ABI break. **It is a view** — valid only for the duration
 of the callback. Anything worth keeping is already in the accumulator.
 
@@ -1241,6 +1296,25 @@ validated or length-checked.
 wire has four states and only that type holds all of them: absent (`nullopt`),
 `null` (`= nullptr`), text, and a multimodal parts array. `text()` flattens it
 when you just want the words.
+
+The content builders spell the documented multimodal and prompt-cache shapes
+without closing the raw JSON escape hatch:
+
+```cpp
+const auto cache = venice::cache_control::ephemeral("1h");
+venice::Message multimodal = venice::Message::user("placeholder");
+multimodal.content = nlohmann::json::array({
+    venice::message_content::text("Compare these inputs", cache),
+    venice::message_content::image_url("https://example.com/image.png"),
+    venice::message_content::input_audio("<base64>", "wav"),
+    venice::message_content::video_url("https://example.com/video.mp4"),
+    venice::message_content::file(
+        "data:application/pdf;base64,<base64>", "document.pdf", cache)});
+```
+
+`reasoning_details` elements remain raw provider objects and message-level
+`thought_signature` remains opaque; both are assign-or-erase modeled fields so
+they can be deliberately replayed or withheld like `reasoning_content`.
 
 ### Declaring tools
 
@@ -1310,7 +1384,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.28.0)
+  GIT_TAG        v0.29.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
