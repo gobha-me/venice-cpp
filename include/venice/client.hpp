@@ -26,6 +26,9 @@
 //   * quote/queue/retrieve/cleanup_audio(req)
 //   * quote/queue/retrieve/cleanup_video(req)
 //   * transcribe_video(req)         -> expected<VideoTranscriptionResult>
+//   * parse_document(req)           -> expected<DocumentParseResult>
+//   * scrape_web(req)               -> expected<WebScrapeResponse>
+//   * search_web(req)               -> expected<WebSearchResponse>
 //   * models()                      -> expected<vector<Model>>
 //   * model_traits(type)            -> expected<ModelTraits>
 //   * model_compatibility_mapping(type)
@@ -267,6 +270,23 @@ inline void append_audio_file(MultipartBody& body, std::string name,
                         .bytes = audio.bytes,
                         .filename = audio.filename,
                         .content_type = audio.media_type});
+}
+
+inline void append_document_file(MultipartBody &body, std::string name,
+                                 const DocumentFile &document) {
+  body.parts.push_back({.name = std::move(name),
+                        .bytes = document.bytes,
+                        .filename = document.filename,
+                        .content_type = document.media_type});
+}
+
+[[nodiscard]] inline auto
+document_parse_body(const DocumentParseRequest &request) -> MultipartBody {
+  MultipartBody body;
+  append_document_file(body, "file", request.file);
+  if (request.response_format)
+    append_form_field(body, "response_format", *request.response_format);
+  return body;
 }
 
 [[nodiscard]] inline auto audio_transcription_body(
@@ -1378,6 +1398,105 @@ class Client {
     }
   }
 
+  // ── augment ──────────────────────────────────────────────────────────
+  [[nodiscard]] auto parse_document(const DocumentParseRequest &req,
+                                    const RequestOptions &opts = {}) const
+      -> std::expected<DocumentParseResult, Error> {
+    if (auto ok = validate(req); !ok)
+      return std::unexpected{std::move(ok.error())};
+    auto headers =
+        request_headers(detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!headers)
+      return std::unexpected{std::move(headers.error())};
+    auto response = detail::send_buffered(
+        m_base_url,
+        detail::BufferedRequest{.method = detail::HttpMethod::Post,
+                                .endpoint = "/augment/text-parser",
+                                .headers = std::move(*headers),
+                                .body = detail::document_parse_body(req)},
+        opts);
+    if (!response)
+      return std::unexpected{std::move(response.error())};
+    if (response->status < 200 || response->status >= 300)
+      return std::unexpected{
+          detail::http_error(response->status, response->body,
+                             detail::metadata_from_headers(response->headers))};
+
+    auto metadata = detail::metadata_from_headers(response->headers);
+    if (response->content_type == "text/plain")
+      return DocumentParseResult{TextDocumentParse{
+          .text = std::move(response->body),
+          .media_type = std::move(response->content_type),
+          .metadata = std::move(metadata),
+      }};
+    if (!detail::is_json_media_type(response->content_type)) {
+      const auto actual = response->content_type.empty()
+                              ? std::string{"<missing>"}
+                              : response->content_type;
+      return std::unexpected{
+          Error{ErrorKind::Parse, response->status,
+                "unexpected response content type: " + actual, response->body,
+                std::move(metadata)}};
+    }
+
+    auto body = detail::decode_json(*response);
+    if (!body)
+      return std::unexpected{std::move(body.error())};
+    try {
+      auto parsed = document_parse_from_json_body(*body);
+      parsed.metadata = std::move(metadata);
+      return DocumentParseResult{std::move(parsed)};
+    } catch (const std::exception &e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"document parse: "} + e.what(),
+                                   response->body, std::move(metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto scrape_web(const WebScrapeRequest &req,
+                                const RequestOptions &opts = {}) const
+      -> std::expected<WebScrapeResponse, Error> {
+    if (auto ok = validate(req); !ok)
+      return std::unexpected{std::move(ok.error())};
+    auto response =
+        post_json_response("/augment/scrape", req.to_json_body(),
+                           detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!response)
+      return std::unexpected{std::move(response.error())};
+    try {
+      auto parsed = web_scrape_from_json_body(response->body);
+      parsed.metadata = std::move(response->metadata);
+      return parsed;
+    } catch (const std::exception &e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"web scrape parse: "} + e.what(),
+                                   response->raw_body,
+                                   std::move(response->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto search_web(const WebSearchRequest &req,
+                                const RequestOptions &opts = {}) const
+      -> std::expected<WebSearchResponse, Error> {
+    if (auto ok = validate(req); !ok)
+      return std::unexpected{std::move(ok.error())};
+    auto response =
+        post_json_response("/augment/search", req.to_json_body(),
+                           detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!response)
+      return std::unexpected{std::move(response.error())};
+    try {
+      auto parsed = web_search_from_json_body(response->body);
+      parsed.metadata = std::move(response->metadata);
+      return parsed;
+    } catch (const std::exception &e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"web search parse: "} + e.what(),
+                                   response->raw_body,
+                                   std::move(response->metadata)}};
+    }
+  }
+
   // ── models ────────────────────────────────────────────────────────────
   //
   // Only the shape of the *response* can fail here; individual entries degrade
@@ -2351,6 +2470,36 @@ class Client {
     if (req.url.empty())
       return std::unexpected{
           Error{ErrorKind::InvalidArg, 0, "video transcription URL is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const DocumentParseRequest &req)
+      -> std::expected<void, Error> {
+    if (req.file.bytes.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "document file bytes are empty", {}}};
+    if (req.file.filename.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "document file name is empty", {}}};
+    if (req.file.media_type.empty())
+      return std::unexpected{Error{
+          ErrorKind::InvalidArg, 0, "document file media type is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const WebScrapeRequest &req)
+      -> std::expected<void, Error> {
+    if (req.url.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "web scrape URL is empty", {}}};
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const WebSearchRequest &req)
+      -> std::expected<void, Error> {
+    if (req.query.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "web search query is empty", {}}};
     return {};
   }
 

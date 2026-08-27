@@ -2113,6 +2113,165 @@ namespace detail {
   };
 }
 
+// ── augment ─────────────────────────────────────────────────────────────
+//
+// These are direct source-material operations, not ChatRequest web-search
+// flags. Document parsing owns its upload bytes and selects JSON versus exact
+// text from the successful response's actual media type. Scrape and search use
+// typed stable fields while retaining the provider's verbatim objects.
+
+struct DocumentFile {
+  std::string bytes{};
+  std::string filename{};
+  std::string media_type{};
+};
+
+struct DocumentParseRequest {
+  DocumentFile file{};
+  std::optional<std::string> response_format{};
+};
+
+struct JsonDocumentParse {
+  std::string text{};
+  double tokens{0.0};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct TextDocumentParse {
+  std::string text{};
+  std::string media_type{};
+  ResponseMetadata metadata{};
+};
+
+using DocumentParseResult = std::variant<JsonDocumentParse, TextDocumentParse>;
+
+struct WebScrapeRequest {
+  std::string url{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["url"] = url;
+    return j;
+  }
+};
+
+struct WebScrapeResponse {
+  std::string url{};
+  std::string content{};
+  std::string format{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct WebSearchRequest {
+  std::string query{};
+  std::optional<int> limit{};
+  std::optional<std::string> search_provider{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
+    j["query"] = query;
+    if (limit)
+      j["limit"] = *limit;
+    if (search_provider)
+      j["search_provider"] = *search_provider;
+    return j;
+  }
+};
+
+// Search is a listing: one provider result with a missing or newly-shaped
+// display field must not discard its siblings. Optional fields preserve the
+// distinction between a real empty string and an unreadable/absent value, and
+// raw retains every key on the object.
+struct WebSearchResult {
+  std::optional<std::string> title{};
+  std::optional<std::string> url{};
+  std::optional<std::string> content{};
+  std::optional<std::string> date{};
+  nlohmann::json raw{};
+};
+
+struct WebSearchResponse {
+  std::optional<std::string> query{};
+  std::vector<WebSearchResult> results{};
+  // Number of elements supplied by Venice before non-object entries are
+  // skipped, so a degraded listing remains observable without walking raw.
+  std::size_t returned{0};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+namespace detail {
+
+[[nodiscard]] inline auto required_augment_string(const nlohmann::json &j,
+                                                  const char *key,
+                                                  const char *where)
+    -> std::string {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_string())
+    throw std::runtime_error{std::string{where} + ": " + key +
+                             " must be a string"};
+  return it->get<std::string>();
+}
+
+} // namespace detail
+
+[[nodiscard]] inline auto document_parse_from_json_body(const nlohmann::json &j)
+    -> JsonDocumentParse {
+  if (!j.is_object())
+    throw std::runtime_error{"document parse: response must be an object"};
+  const auto tokens = j.find("tokens");
+  if (tokens == j.end() || !tokens->is_number())
+    throw std::runtime_error{"document parse: tokens must be a number"};
+  return JsonDocumentParse{
+      .text = detail::required_augment_string(j, "text", "document parse"),
+      .tokens = tokens->get<double>(),
+      .raw = j,
+  };
+}
+
+[[nodiscard]] inline auto web_scrape_from_json_body(const nlohmann::json &j)
+    -> WebScrapeResponse {
+  if (!j.is_object())
+    throw std::runtime_error{"web scrape: response must be an object"};
+  return WebScrapeResponse{
+      .url = detail::required_augment_string(j, "url", "web scrape"),
+      .content = detail::required_augment_string(j, "content", "web scrape"),
+      .format = detail::required_augment_string(j, "format", "web scrape"),
+      .raw = j,
+  };
+}
+
+[[nodiscard]] inline auto web_search_from_json_body(const nlohmann::json &j)
+    -> WebSearchResponse {
+  if (!j.is_object())
+    throw std::runtime_error{"web search: response must be an object"};
+  const auto results = j.find("results");
+  if (results == j.end() || !results->is_array())
+    throw std::runtime_error{"web search: results must be an array"};
+
+  WebSearchResponse response;
+  response.query = detail::opt_string(j, "query");
+  response.returned = results->size();
+  response.raw = j;
+  response.results.reserve(results->size());
+  for (const auto &item : *results) {
+    if (!item.is_object())
+      continue;
+    response.results.push_back(WebSearchResult{
+        .title = detail::opt_string(item, "title"),
+        .url = detail::opt_string(item, "url"),
+        .content = detail::opt_string(item, "content"),
+        .date = detail::opt_string(item, "date"),
+        .raw = item,
+    });
+  }
+  return response;
+}
+
 // ── money ─────────────────────────────────────────────────────────────────
 //
 // Venice quotes every amount in two currencies at once: USD and `diem`, its

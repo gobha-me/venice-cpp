@@ -713,6 +713,94 @@ auto video_report(const venice::Client& client, std::string_view named_model) ->
   return EXIT_SUCCESS;
 }
 
+// `--augment` (VC-32, #47) performs exactly one minimal call to each direct
+// source-material operation. These calls may consume account balance. Inputs
+// are synthetic/public, and the leg never prints uploaded or returned content:
+// only shapes, counts and raw-to-typed agreement leave the process.
+auto augment_report(const venice::Client &client) -> int {
+  bool agrees = true;
+
+  const std::string document = "venice-cpp augment smoke check\n";
+  const auto parsed =
+      client.parse_document({.file = {.bytes = document,
+                                      .filename = "venice-cpp-smoke.txt",
+                                      .media_type = "text/plain"},
+                             .response_format = "json"});
+  if (!parsed) {
+    std::cerr << "document parse failed ["
+              << venice::to_string(parsed.error().kind) << "] "
+              << parsed.error().message << '\n';
+    return EXIT_FAILURE;
+  }
+  const auto *json = std::get_if<venice::JsonDocumentParse>(&*parsed);
+  if (json == nullptr) {
+    std::cerr << "document parser requested JSON but returned text media\n";
+    return EXIT_FAILURE;
+  }
+  const bool document_agrees =
+      venice::detail::opt_string(json->raw, "text") ==
+          std::optional<std::string>{json->text} &&
+      venice::detail::opt_double(json->raw, "tokens") ==
+          std::optional<double>{json->tokens};
+  std::cerr << "document: " << json->text.size() << " extracted chars, "
+            << json->tokens
+            << " tokens; raw/typed=" << (document_agrees ? "agree" : "MISMATCH")
+            << '\n';
+  agrees = document_agrees && agrees;
+
+  const auto scraped = client.scrape_web({.url = "https://example.com"});
+  if (!scraped) {
+    std::cerr << "web scrape failed ["
+              << venice::to_string(scraped.error().kind) << "] "
+              << scraped.error().message << '\n';
+    return EXIT_FAILURE;
+  }
+  const bool scrape_agrees =
+      venice::detail::opt_string(scraped->raw, "url") ==
+          std::optional<std::string>{scraped->url} &&
+      venice::detail::opt_string(scraped->raw, "content") ==
+          std::optional<std::string>{scraped->content} &&
+      venice::detail::opt_string(scraped->raw, "format") ==
+          std::optional<std::string>{scraped->format};
+  std::cerr << "scrape: " << scraped->content.size()
+            << " chars, format=" << scraped->format
+            << "; raw/typed=" << (scrape_agrees ? "agree" : "MISMATCH") << '\n';
+  agrees = scrape_agrees && agrees;
+
+  const auto searched =
+      client.search_web({.query = "Venice AI API", .limit = 1});
+  if (!searched) {
+    std::cerr << "web search failed ["
+              << venice::to_string(searched.error().kind) << "] "
+              << searched.error().message << '\n';
+    return EXIT_FAILURE;
+  }
+  const auto *raw_results = venice::detail::opt_array(searched->raw, "results");
+  bool search_agrees =
+      raw_results != nullptr && raw_results->size() == searched->returned &&
+      searched->query == venice::detail::opt_string(searched->raw, "query");
+  if (raw_results != nullptr && !raw_results->empty() &&
+      !searched->results.empty() && raw_results->front().is_object()) {
+    const auto &raw = raw_results->front();
+    const auto &typed = searched->results.front();
+    search_agrees =
+        search_agrees &&
+        typed.title == venice::detail::opt_string(raw, "title") &&
+        typed.url == venice::detail::opt_string(raw, "url") &&
+        typed.content == venice::detail::opt_string(raw, "content") &&
+        typed.date == venice::detail::opt_string(raw, "date");
+  }
+  std::cerr << "search: " << searched->results.size() << " usable of "
+            << searched->returned
+            << " returned; raw/typed=" << (search_agrees ? "agree" : "MISMATCH")
+            << '\n';
+  agrees = search_agrees && agrees;
+
+  std::cerr << "No uploaded or returned content was printed, saved or retained "
+               "by this leg.\n";
+  return agrees ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 // ── image transformations (VC-41, #66) ──────────────────────────────────
 //
 // A valid 256x256 solid-colour PNG, kept as base64 so the smoke leg performs
@@ -2529,7 +2617,9 @@ auto main(int argc, char** argv) -> int {
   if (key == nullptr || *key == '\0') {
     std::cerr << "VENICE_API_KEY not set; nothing to call with a credential.\n"
                  "(--traits, --compat, --modality and --styles need no key;\n"
-                 " --embeddings, --image, --image-transform, --audio, --video, --billing and\n"
+                 " --embeddings, --image, --image-transform, --audio, --video, "
+                 "--augment,\n"
+                 " --billing and\n"
                  " --api-keys need a key.)\n";
     return EXIT_SUCCESS;
   }
@@ -2553,6 +2643,8 @@ auto main(int argc, char** argv) -> int {
   if (leg == "--image-transform") return image_transform_report(client, arg);
   if (leg == "--audio") return audio_report(client, arg, arg2, arg3);
   if (leg == "--video") return video_report(client, arg);
+  if (leg == "--augment")
+    return augment_report(client);
   if (leg == "--billing") return billing_report(client, arg);
   if (leg == "--api-keys") return api_keys_report(client);
 

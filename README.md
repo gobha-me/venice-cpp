@@ -78,6 +78,10 @@ right bridge.
   on the actual response media type; transcription likewise preserves typed
   JSON or exact text. The client never polls, deletes, decodes, displays or
   writes media implicitly.
+- **Augment** — owned multipart document parsing with typed JSON or exact text,
+  plus direct web scrape and ordered web search calls. Stable render fields are
+  typed, provider metadata remains in `raw`, and the client never writes or
+  retains uploaded documents.
 - **Account billing** (`/billing/balance`, `/billing/usage-analytics`,
   `/billing/usage-history`) — typed balance and aggregate views plus ordered,
   cursor-paged ledger history. History can return typed JSON or byte-exact CSV,
@@ -107,7 +111,7 @@ workflow helpers.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 39/49 operations implemented.
+OpenAPI coverage: 42/49 operations implemented.
 
 One additional published operation is explicitly unsupported:
 `GET /billing/usage` already returns 410 for every request and points callers
@@ -433,6 +437,38 @@ explicit destructive operation; `success=false` remains a retryable value.
 plain text. Nothing polls, deletes, decodes, displays or writes media
 implicitly. Queue `elements`, keyframes and legal `consents` remain raw JSON so
 future provider shapes and caller attestations are not hardcoded by the client.
+
+### Augment
+
+Augment operations return source material directly rather than changing chat
+flags. Document parsing owns the upload bytes and uses the successful response's
+actual media type to distinguish structured JSON from exact plain text:
+
+```cpp
+venice::DocumentParseRequest document;
+document.file = {.bytes = bytes,
+                 .filename = "report.pdf",
+                 .media_type = "application/pdf"};
+document.response_format = "json";
+
+const auto parsed = client.parse_document(document);
+if (!parsed) return;
+
+const auto scraped = client.scrape_web({.url = "https://example.com"});
+const auto searched = client.search_web(
+    {.query = "Venice AI API", .limit = 5, .search_provider = "brave"});
+```
+
+`scrape_web()` returns the stable URL/content/format fields and the verbatim
+response. `search_web()` preserves result order; each provider result keeps
+optional title/URL/content/date views plus its exact `raw` object. Provider
+names, limits, formats and URL policy remain server-owned. Venice's retention
+statement describes server behavior; the C++ client does not turn it into a
+local secure-erasure guarantee.
+
+Live on 2026-08-27, `--augment` parsed the synthetic document as JSON, scraped
+`example.com` as markdown and returned one search result; all three typed views
+agreed with their retained raw responses. The leg printed no source content.
 
 **`response_format` is raw JSON, not an enum.** The API accepts both
 `{"type":"json_object"}` and a full `{"type":"json_schema", …}` block, and no
@@ -1207,7 +1243,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.25.0)
+  GIT_TAG        v0.26.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -1383,6 +1419,7 @@ VENICE_API_KEY=... venice-cpp --image [model]      # v0.19.0: JSON + media
 VENICE_API_KEY=... venice-cpp --image-transform [model] # v0.20.0: four transforms
 VENICE_API_KEY=... venice-cpp --audio [tts] [asr] [music] # v0.24.0: speech + transcription + quote
 VENICE_API_KEY=... venice-cpp --video [model]             # v0.25.0: catalogue + quote only
+VENICE_API_KEY=... venice-cpp --augment                   # v0.26.0: three minimal billed calls
 VENICE_API_KEY=... venice-cpp --billing [lookback] # v0.21.0: balance + analytics + history
 VENICE_API_KEY=... venice-cpp --api-keys          # v0.22.0: read-only keys + rate limits
 

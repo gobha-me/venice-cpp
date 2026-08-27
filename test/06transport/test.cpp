@@ -1300,6 +1300,147 @@ class TestServer {
                                  "application/json");
                });
 
+    const auto augment_error = [](httplib::Response &res, int status,
+                                  std::string_view message) {
+      res.status = status;
+      res.set_header("X-Protocol-Trace", "augment-error");
+      res.set_content(nlohmann::json{{"error", message}}.dump(), "text/plain");
+    };
+
+    m_svr.Post("/api/v1/augment/text-parser", [this, form_value, augment_error](
+                                                  const httplib::Request &req,
+                                                  httplib::Response &res) {
+      ++m_augment_hits;
+      const auto control = form_value(req, "response_format");
+      if (control == "stall") {
+        ++m_augment_stall_hits;
+        m_gate.wait(kStallCap);
+      }
+      if (control.starts_with("status-")) {
+        const int status = std::stoi(control.substr(7));
+        if (status == 402)
+          res.set_header("PAYMENT-REQUIRED", "augment-payment-requirements");
+        return augment_error(res, status, "document parse failed");
+      }
+      if (control == "wrong-media") {
+        res.set_content("wrong", "application/octet-stream");
+        return;
+      }
+      if (control == "invalid-json") {
+        res.set_content("{not-json", "application/json");
+        return;
+      }
+      if (control == "malformed") {
+        res.set_content(R"({"text":"fixture","tokens":"many"})",
+                        "application/json");
+        return;
+      }
+
+      const auto file = req.files.find("file");
+      res.set_header("X-Balance-Remaining", "1.500000");
+      res.set_header("PAYMENT-RESPONSE", "augment-payment-receipt");
+      if (control == "text") {
+        res.set_content(std::string{"fixture\0text", 12},
+                        "text/plain; charset=utf-8");
+        return;
+      }
+      res.set_content(
+          nlohmann::json{
+              {"text", "fixture document"},
+              {"tokens", 2.5},
+              {"seen_file_size",
+               file == req.files.end() ? 0U : file->second.content.size()},
+              {"seen_filename",
+               file == req.files.end() ? "" : file->second.filename},
+              {"seen_media_type",
+               file == req.files.end() ? "" : file->second.content_type},
+              {"seen_authorization", req.get_header_value("Authorization")},
+              {"seen_siwx", req.get_header_value("SIGN-IN-WITH-X")}}
+              .dump(),
+          "application/json; charset=utf-8");
+    });
+
+    m_svr.Post("/api/v1/augment/scrape", [this, augment_error](
+                                             const httplib::Request &req,
+                                             httplib::Response &res) {
+      ++m_augment_hits;
+      const auto body = nlohmann::json::parse(req.body);
+      const auto control = body.at("url").get<std::string>();
+      if (control.starts_with("status-")) {
+        const int status = std::stoi(control.substr(7));
+        if (status == 402)
+          res.set_header("PAYMENT-REQUIRED", "augment-payment-requirements");
+        return augment_error(res, status, "scrape failed");
+      }
+      if (control == "wrong-media") {
+        res.set_content("wrong", "text/plain");
+        return;
+      }
+      if (control == "invalid-json") {
+        res.set_content("{not-json", "application/json");
+        return;
+      }
+      if (control == "malformed") {
+        res.set_content(
+            R"({"url":"malformed","content":7,"format":"markdown"})",
+            "application/json");
+        return;
+      }
+      res.set_header("X-Balance-Remaining", "1.250000");
+      res.set_content(
+          nlohmann::json{
+              {"url", control},
+              {"content", "# Fixture"},
+              {"format", "markdown"},
+              {"seen_body", body},
+              {"seen_authorization", req.get_header_value("Authorization")},
+              {"seen_siwx", req.get_header_value("SIGN-IN-WITH-X")}}
+              .dump(),
+          "application/json");
+    });
+
+    m_svr.Post("/api/v1/augment/search", [this, augment_error](
+                                             const httplib::Request &req,
+                                             httplib::Response &res) {
+      ++m_augment_hits;
+      const auto body = nlohmann::json::parse(req.body);
+      const auto control = body.at("query").get<std::string>();
+      if (control.starts_with("status-")) {
+        const int status = std::stoi(control.substr(7));
+        if (status == 402)
+          res.set_header("PAYMENT-REQUIRED", "augment-payment-requirements");
+        return augment_error(res, status, "search failed");
+      }
+      if (control == "wrong-media") {
+        res.set_content("wrong", "text/plain");
+        return;
+      }
+      if (control == "invalid-json") {
+        res.set_content("{not-json", "application/json");
+        return;
+      }
+      if (control == "malformed") {
+        res.set_content(R"({"query":"malformed","results":{}})",
+                        "application/json");
+        return;
+      }
+      res.set_header("X-Balance-Remaining", "1.000000");
+      res.set_content(
+          nlohmann::json{
+              {"query", control},
+              {"results",
+               nlohmann::json::array({{{"title", "Fixture"},
+                                       {"url", "https://example.test/result"},
+                                       {"content", "result content"},
+                                       {"date", "2026-08-27"},
+                                       {"future", true}}})},
+              {"seen_body", body},
+              {"seen_authorization", req.get_header_value("Authorization")},
+              {"seen_siwx", req.get_header_value("SIGN-IN-WITH-X")}}
+              .dump(),
+          "application/json");
+    });
+
     m_svr.Get("/api/v1/billing/balance",
               [this](const httplib::Request& req, httplib::Response& res) {
                 ++m_billing_hits;
@@ -1584,6 +1725,12 @@ class TestServer {
   [[nodiscard]] auto video_stall_hits() const -> int {
     return m_video_stall_hits.load();
   }
+  [[nodiscard]] auto augment_hits() const -> int {
+    return m_augment_hits.load();
+  }
+  [[nodiscard]] auto augment_stall_hits() const -> int {
+    return m_augment_stall_hits.load();
+  }
   [[nodiscard]] auto last_transform() const -> CapturedTransform {
     const std::lock_guard<std::mutex> lock{m_transform_mu};
     return m_last_transform;
@@ -1637,6 +1784,8 @@ class TestServer {
   std::atomic<int> m_audio_hits{0};
   std::atomic<int> m_video_hits{0};
   std::atomic<int> m_video_stall_hits{0};
+  std::atomic<int> m_augment_hits{0};
+  std::atomic<int> m_augment_stall_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
   mutable std::mutex m_transform_mu;
   CapturedTransform m_last_transform{};
@@ -4438,4 +4587,179 @@ TEST_CASE("cancellation interrupts a stalled video retrieval",
   REQUIRE(elapsed < kPromptly);
   REQUIRE(server.video_stall_hits() == 1);
   REQUIRE(server.video_hits() == 1);
+}
+
+TEST_CASE("augment endpoints reject impossible auth modes before the socket",
+          "[transport][augment][auth][failure]") {
+  const TestServer server;
+  const Client public_client{Authentication::public_access(),
+                             server.base_url()};
+  const Client payment_client{Authentication::x402_payment("signed-payment"),
+                              server.base_url()};
+  const venice::DocumentParseRequest document{
+      .file = {.bytes = "fixture",
+               .filename = "fixture.txt",
+               .media_type = "text/plain"}};
+
+  REQUIRE_FALSE(public_client.parse_document(document));
+  REQUIRE_FALSE(public_client.scrape_web({.url = "https://example.test"}));
+  REQUIRE_FALSE(payment_client.search_web({.query = "fixture"}));
+  REQUIRE(server.augment_hits() == 0);
+}
+
+TEST_CASE("document parsing preserves multipart bytes and selects actual "
+          "response media",
+          "[transport][augment][document]") {
+  const TestServer server;
+  const Client bearer{"augment-key", server.base_url()};
+  const Client wallet{Authentication::sign_in_with_x("signed-augment-wallet"),
+                      server.base_url()};
+  const auto bytes = std::string{"doc\0bytes", 9};
+  venice::DocumentParseRequest request{.file = {.bytes = bytes,
+                                                .filename = "fixture.txt",
+                                                .media_type = "text/plain"},
+                                       .response_format = "json"};
+
+  const auto json = bearer.parse_document(request);
+  REQUIRE(json.has_value());
+  const auto *parsed = std::get_if<venice::JsonDocumentParse>(&*json);
+  REQUIRE(parsed != nullptr);
+  REQUIRE(parsed->text == "fixture document");
+  REQUIRE(parsed->tokens == 2.5);
+  REQUIRE(parsed->raw["seen_file_size"] == bytes.size());
+  REQUIRE(parsed->raw["seen_filename"] == "fixture.txt");
+  REQUIRE(parsed->raw["seen_media_type"] == "text/plain");
+  REQUIRE(parsed->raw["seen_authorization"] == "Bearer augment-key");
+  REQUIRE(parsed->metadata.x_balance_remaining == "1.500000");
+  REQUIRE(parsed->metadata.payment_response == "augment-payment-receipt");
+
+  request.response_format = "text";
+  const auto text = wallet.parse_document(request);
+  REQUIRE(text.has_value());
+  const auto *plain = std::get_if<venice::TextDocumentParse>(&*text);
+  REQUIRE(plain != nullptr);
+  REQUIRE(plain->text == std::string{"fixture\0text", 12});
+  REQUIRE(plain->media_type == "text/plain");
+  REQUIRE(plain->metadata.x_balance_remaining == "1.500000");
+  REQUIRE(server.augment_hits() == 2);
+}
+
+TEST_CASE("scrape and search post exact modeled-wins JSON with Bearer or SIWX",
+          "[transport][augment][json][auth]") {
+  const TestServer server;
+  const Client bearer{"augment-key", server.base_url()};
+  const Client wallet{Authentication::sign_in_with_x("signed-augment-wallet"),
+                      server.base_url()};
+
+  const auto scraped =
+      wallet.scrape_web({.url = "https://example.test",
+                         .extra = {{"url", "shadow"}, {"future", 1}}});
+  REQUIRE(scraped.has_value());
+  REQUIRE(scraped->url == "https://example.test");
+  REQUIRE(scraped->content == "# Fixture");
+  REQUIRE(scraped->format == "markdown");
+  REQUIRE(scraped->raw["seen_body"]["future"] == 1);
+  REQUIRE(scraped->raw["seen_siwx"] == "signed-augment-wallet");
+  REQUIRE(scraped->metadata.x_balance_remaining == "1.250000");
+
+  const auto searched =
+      bearer.search_web({.query = "fixture",
+                         .limit = 0,
+                         .search_provider = "future-provider",
+                         .extra = {{"query", "shadow"}, {"future", true}}});
+  REQUIRE(searched.has_value());
+  REQUIRE(searched->query == "fixture");
+  REQUIRE(searched->returned == 1);
+  REQUIRE(searched->results.size() == 1);
+  REQUIRE(searched->results[0].title == "Fixture");
+  REQUIRE(searched->results[0].raw["future"] == true);
+  REQUIRE(searched->raw["seen_body"]["limit"] == 0);
+  REQUIRE(searched->raw["seen_body"]["search_provider"] == "future-provider");
+  REQUIRE(searched->raw["seen_authorization"] == "Bearer augment-key");
+  REQUIRE(searched->metadata.x_balance_remaining == "1.000000");
+}
+
+TEST_CASE("augment status errors win over media and successful shape failures "
+          "are parse errors",
+          "[transport][augment][failure]") {
+  const TestServer server;
+  const Client client{"augment-key", server.base_url()};
+  const venice::DocumentFile file{.bytes = "fixture",
+                                  .filename = "fixture.txt",
+                                  .media_type = "text/plain"};
+
+  struct StatusCase {
+    int status;
+    ErrorKind kind;
+  };
+  const std::array status_cases{
+      StatusCase{400, ErrorKind::Http},
+      StatusCase{401, ErrorKind::Auth},
+      StatusCase{402, ErrorKind::PaymentRequired},
+      StatusCase{403, ErrorKind::Auth},
+      StatusCase{415, ErrorKind::Http},
+      StatusCase{429, ErrorKind::RateLimited},
+      StatusCase{500, ErrorKind::Http},
+  };
+  for (const auto &test : status_cases) {
+    const auto result = client.parse_document(
+        {.file = file,
+         .response_format = "status-" + std::to_string(test.status)});
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == test.kind);
+    REQUIRE(result.error().status == test.status);
+    REQUIRE(result.error().body == R"({"error":"document parse failed"})");
+    REQUIRE(result.error().metadata.header("x-protocol-trace") ==
+            "augment-error");
+    if (test.status == 402)
+      REQUIRE(result.error().metadata.payment_required ==
+              "augment-payment-requirements");
+  }
+
+  for (const std::string control :
+       {"wrong-media", "invalid-json", "malformed"}) {
+    CAPTURE(control);
+    const auto result =
+        client.parse_document({.file = file, .response_format = control});
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().is(ErrorKind::Parse));
+    REQUIRE(result.error().status == 200);
+  }
+
+  for (const std::string control :
+       {"wrong-media", "invalid-json", "malformed"}) {
+    const auto scrape = client.scrape_web({.url = control});
+    REQUIRE_FALSE(scrape);
+    REQUIRE(scrape.error().is(ErrorKind::Parse));
+    const auto search = client.search_web({.query = control});
+    REQUIRE_FALSE(search);
+    REQUIRE(search.error().is(ErrorKind::Parse));
+  }
+}
+
+TEST_CASE("cancellation interrupts a stalled document parse",
+          "[transport][augment][cancel][failure]") {
+  const TestServer server;
+  const Client client{"augment-key", server.base_url()};
+  venice::CancelToken token;
+  std::thread canceller{[&] {
+    while (server.augment_stall_hits() == 0)
+      std::this_thread::sleep_for(5ms);
+    token.cancel();
+  }};
+
+  std::expected<venice::DocumentParseResult, venice::Error> result;
+  const auto elapsed = timed([&] {
+    result = client.parse_document({.file = {.bytes = "fixture",
+                                             .filename = "fixture.txt",
+                                             .media_type = "text/plain"},
+                                    .response_format = "stall"},
+                                   {.cancel = &token});
+  });
+  canceller.join();
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().is(ErrorKind::Cancelled));
+  REQUIRE(elapsed < kPromptly);
+  REQUIRE(server.augment_stall_hits() == 1);
+  REQUIRE(server.augment_hits() == 1);
 }
