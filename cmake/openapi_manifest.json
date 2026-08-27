@@ -1472,8 +1472,11 @@
       "method": "POST",
       "path": "/responses",
       "family": "responses",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 39,
+      "public_api": [
+        "Client::create_response"
+      ],
       "security": [
         [
           "BearerAuth"

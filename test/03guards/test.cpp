@@ -59,18 +59,22 @@ constexpr auto kQuietNaN = std::numeric_limits<double>::quiet_NaN();
 constexpr auto kSignalingNaN = std::numeric_limits<double>::signaling_NaN();
 constexpr auto kInf = std::numeric_limits<double>::infinity();
 
-// Mirrors Client::validate's own table on purpose: if a fifth double field is
+// Mirrors Client::validate's own table on purpose: if another double field is
 // added there and not here, the new field ships unguarded and this file still
 // passes. The two lists are meant to be edited together.
 struct Field {
   std::optional<double> ChatRequest::*ptr;
   const char* name;
 };
-constexpr std::array<Field, 4> kGuarded{{
+constexpr std::array<Field, 8> kGuarded{{
     {&ChatRequest::temperature, "temperature"},
     {&ChatRequest::top_p, "top_p"},
     {&ChatRequest::frequency_penalty, "frequency_penalty"},
     {&ChatRequest::presence_penalty, "presence_penalty"},
+    {&ChatRequest::max_temp, "max_temp"},
+    {&ChatRequest::min_p, "min_p"},
+    {&ChatRequest::min_temp, "min_temp"},
+    {&ChatRequest::repetition_penalty, "repetition_penalty"},
 }};
 
 constexpr std::array<double, 4> kNonFinite{{kQuietNaN, kSignalingNaN, kInf, -kInf}};

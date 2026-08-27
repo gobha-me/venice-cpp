@@ -451,6 +451,17 @@ struct Message {
   // simply unexpressible, which is what filed VC-05 in this shape.
   std::optional<std::string> reasoning_content{};
 
+  // Provider-authored reasoning blocks. Their elements are deliberately raw:
+  // the documented object is provider-shaped and Venice adds formats without
+  // changing the surrounding message contract. Modeled at the message level
+  // so a caller can deliberately replay them; `raw` remains response-only.
+  std::optional<std::vector<nlohmann::json>> reasoning_details{};
+
+  // Some native providers attach the opaque signature to the assistant
+  // message rather than to an individual ToolCall. Keep the two wire
+  // locations distinct and replay each exactly where it arrived.
+  std::optional<std::string> thought_signature{};
+
   // optional<vector>, not a bare vector, for the reason ChatRequest::stop is:
   // engaged-but-empty must emit `[]` and disengaged must omit the key, and a
   // bare vector collapses those two into one.
@@ -493,6 +504,10 @@ struct Message {
     if (m.content) j["content"] = *m.content; else j.erase("content");
     if (m.reasoning_content) j["reasoning_content"] = *m.reasoning_content;
     else j.erase("reasoning_content");
+    if (m.reasoning_details) j["reasoning_details"] = *m.reasoning_details;
+    else j.erase("reasoning_details");
+    if (m.thought_signature) j["thought_signature"] = *m.thought_signature;
+    else j.erase("thought_signature");
     if (m.tool_calls) j["tool_calls"] = *m.tool_calls; else j.erase("tool_calls");
     if (m.tool_call_id) j["tool_call_id"] = *m.tool_call_id; else j.erase("tool_call_id");
     if (m.name) j["name"] = *m.name; else j.erase("name");
@@ -508,6 +523,9 @@ struct Message {
     // nullopt.
     if (const auto it = j.find("content"); it != j.end()) m.content = *it;
     m.reasoning_content = detail::opt_string(j, "reasoning_content");
+    if (const auto* details = detail::opt_array(j, "reasoning_details"))
+      m.reasoning_details = details->get<std::vector<nlohmann::json>>();
+    m.thought_signature = detail::opt_string(j, "thought_signature");
     m.tool_call_id = detail::opt_string(j, "tool_call_id");
     m.name = detail::opt_string(j, "name");
     m.refusal = detail::opt_string(j, "refusal");
@@ -546,6 +564,83 @@ struct Message {
   }
 };
 
+// ── caller-authored message content builders ─────────────────────────────
+//
+// Message::content stays raw JSON because its part universe is polymorphic.
+// These builders cover the documented forms without turning that universe into
+// a closed variant. Every returned object can still be edited by the caller.
+
+namespace cache_control {
+
+inline auto ephemeral(std::string ttl = {}) -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["type"] = "ephemeral";
+  if (!ttl.empty()) j["ttl"] = std::move(ttl);
+  return j;
+}
+
+}  // namespace cache_control
+
+namespace message_content {
+
+inline void attach_cache_control(nlohmann::json& part, nlohmann::json cache) {
+  if (!cache.is_null()) part["cache_control"] = std::move(cache);
+}
+
+inline auto text(std::string value, nlohmann::json cache = nullptr) -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["type"] = "text";
+  j["text"] = std::move(value);
+  attach_cache_control(j, std::move(cache));
+  return j;
+}
+
+inline auto image_url(std::string url, nlohmann::json cache = nullptr) -> nlohmann::json {
+  auto image = nlohmann::json::object();
+  image["url"] = std::move(url);
+  auto j = nlohmann::json::object();
+  j["type"] = "image_url";
+  j["image_url"] = std::move(image);
+  attach_cache_control(j, std::move(cache));
+  return j;
+}
+
+inline auto input_audio(std::string data, std::string format = {},
+                        nlohmann::json cache = nullptr) -> nlohmann::json {
+  auto audio = nlohmann::json::object();
+  audio["data"] = std::move(data);
+  if (!format.empty()) audio["format"] = std::move(format);
+  auto j = nlohmann::json::object();
+  j["type"] = "input_audio";
+  j["input_audio"] = std::move(audio);
+  attach_cache_control(j, std::move(cache));
+  return j;
+}
+
+inline auto video_url(std::string url, nlohmann::json cache = nullptr) -> nlohmann::json {
+  auto video = nlohmann::json::object();
+  video["url"] = std::move(url);
+  auto j = nlohmann::json::object();
+  j["type"] = "video_url";
+  j["video_url"] = std::move(video);
+  attach_cache_control(j, std::move(cache));
+  return j;
+}
+
+inline auto file(std::string file_data, std::string filename = {},
+                 nlohmann::json cache = nullptr) -> nlohmann::json {
+  auto value = nlohmann::json::object();
+  value["file_data"] = std::move(file_data);
+  if (!filename.empty()) value["filename"] = std::move(filename);
+  auto j = nlohmann::json::object();
+  j["type"] = "file";
+  j["file"] = std::move(value);
+  attach_cache_control(j, std::move(cache));
+  return j;
+}
+
+}  // namespace message_content
+
 // ── venice_parameters (the Venice extension block) ───────────────────────
 //
 // Only set fields are serialized. Mirrors the flags venice-cli surfaces;
@@ -560,6 +655,9 @@ struct VeniceParameters {
   std::optional<bool> strip_thinking_response;
   std::optional<bool> disable_thinking;
   std::optional<bool> enable_x_search;
+  std::optional<bool> enable_e2ee;
+  std::optional<bool> include_search_results_in_stream;
+  std::optional<bool> return_search_results_as_documents;
   nlohmann::json extra;  // forward-compatible passthrough for unmodeled keys
 
   friend void to_json(nlohmann::json& j, const VeniceParameters& p) {
@@ -573,6 +671,11 @@ struct VeniceParameters {
     if (p.strip_thinking_response) j["strip_thinking_response"] = *p.strip_thinking_response;
     if (p.disable_thinking) j["disable_thinking"] = *p.disable_thinking;
     if (p.enable_x_search) j["enable_x_search"] = *p.enable_x_search;
+    if (p.enable_e2ee) j["enable_e2ee"] = *p.enable_e2ee;
+    if (p.include_search_results_in_stream)
+      j["include_search_results_in_stream"] = *p.include_search_results_in_stream;
+    if (p.return_search_results_as_documents)
+      j["return_search_results_as_documents"] = *p.return_search_results_as_documents;
   }
 };
 
@@ -743,6 +846,49 @@ inline auto function(std::string name) -> nlohmann::json {
 
 }  // namespace tool_choice
 
+// Stable wrappers around otherwise open JSON request shapes. The request
+// members remain raw JSON so a newly added key never requires a source release.
+namespace reasoning_config {
+
+inline auto make(std::string effort = {}, std::string summary = {}) -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  if (!effort.empty()) j["effort"] = std::move(effort);
+  if (!summary.empty()) j["summary"] = std::move(summary);
+  return j;
+}
+
+}  // namespace reasoning_config
+
+namespace text_config {
+
+inline auto verbosity(std::string value) -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["verbosity"] = std::move(value);
+  return j;
+}
+
+}  // namespace text_config
+
+namespace fallbacks {
+
+inline auto model(std::string id) -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["model"] = std::move(id);
+  return j;
+}
+
+}  // namespace fallbacks
+
+struct ChatStreamOptions {
+  std::optional<bool> include_usage{};
+  nlohmann::json extra{};
+
+  friend void to_json(nlohmann::json& j, const ChatStreamOptions& options) {
+    j = options.extra.is_object() ? options.extra : nlohmann::json::object();
+    if (options.include_usage) j["include_usage"] = *options.include_usage;
+  }
+};
+
 // ── chat request ──────────────────────────────────────────────────────────
 //
 // Ranges are not checked client-side; representability is. The line this
@@ -764,8 +910,21 @@ struct ChatRequest {
   std::vector<Message> messages;
   std::optional<double> temperature;
   std::optional<double> top_p;
+  std::optional<bool> logprobs;
+  std::optional<int> top_logprobs;
+  std::optional<int> max_completion_tokens;
+  std::optional<double> max_temp;
+  std::optional<double> min_p;
+  std::optional<double> min_temp;
+  std::optional<int> n;
+  std::optional<std::string> prompt_cache_key;
+  std::optional<std::string> prompt_cache_retention;
+  std::optional<double> repetition_penalty;
+  std::optional<nlohmann::json> reasoning;
+  std::optional<std::string> reasoning_effort;
   std::optional<int> max_tokens;
   std::optional<std::vector<std::string>> stop;  // always sent as an array
+  std::optional<std::vector<std::int64_t>> stop_token_ids;
   std::optional<double> frequency_penalty;
   std::optional<double> presence_penalty;
   // Wider than max_tokens on purpose, not by oversight: callers seed from
@@ -791,11 +950,19 @@ struct ChatRequest {
   // response_format has — that one is at least always an object.
   std::optional<nlohmann::json> tool_choice;
   std::optional<bool> parallel_tool_calls;
+  std::optional<ChatStreamOptions> stream_options;
+  std::optional<int> top_k;
+  std::optional<std::string> user;
+  std::optional<std::vector<nlohmann::json>> fallbacks;
+  std::optional<bool> store;
+  std::optional<std::string> verbosity;
+  std::optional<nlohmann::json> text;
+  std::optional<std::vector<std::string>> include;
+  std::optional<nlohmann::json> metadata;
   std::optional<VeniceParameters> venice_parameters;
   // Forward-compatible top-level passthrough, mirroring VeniceParameters::extra.
-  // Venice accepts sampling keys this struct doesn't model (top_k, min_p,
-  // repetition_penalty); without this they'd be unreachable without forking the
-  // header. Modeled fields always win over a same-named key here.
+  // Newly introduced properties remain reachable without waiting for a source
+  // release. Modeled fields always win over a same-named key here.
   nlohmann::json extra;
 
   // Serialize to the wire body.
@@ -828,8 +995,21 @@ struct ChatRequest {
     j["stream"] = stream;
     if (temperature) j["temperature"] = *temperature;
     if (top_p) j["top_p"] = *top_p;
+    if (logprobs) j["logprobs"] = *logprobs;
+    if (top_logprobs) j["top_logprobs"] = *top_logprobs;
+    if (max_completion_tokens) j["max_completion_tokens"] = *max_completion_tokens;
+    if (max_temp) j["max_temp"] = *max_temp;
+    if (min_p) j["min_p"] = *min_p;
+    if (min_temp) j["min_temp"] = *min_temp;
+    if (n) j["n"] = *n;
+    if (prompt_cache_key) j["prompt_cache_key"] = *prompt_cache_key;
+    if (prompt_cache_retention) j["prompt_cache_retention"] = *prompt_cache_retention;
+    if (repetition_penalty) j["repetition_penalty"] = *repetition_penalty;
+    if (reasoning) j["reasoning"] = *reasoning;
+    if (reasoning_effort) j["reasoning_effort"] = *reasoning_effort;
     if (max_tokens) j["max_tokens"] = *max_tokens;
     if (stop) j["stop"] = *stop;
+    if (stop_token_ids) j["stop_token_ids"] = *stop_token_ids;
     if (frequency_penalty) j["frequency_penalty"] = *frequency_penalty;
     if (presence_penalty) j["presence_penalty"] = *presence_penalty;
     if (seed) j["seed"] = *seed;
@@ -843,6 +1023,22 @@ struct ChatRequest {
     // execute two at once. Worse than wrong, in fact: dereferencing the unset
     // case is UB, which is why breaking this line reddens the baseline too.
     if (parallel_tool_calls) j["parallel_tool_calls"] = *parallel_tool_calls;
+    // stream_options cannot change the transport mode. A value smuggled
+    // through extra is removed from buffered chat; on the SSE path the typed
+    // member wins, while an unmodeled object survives when it is unset.
+    if (!stream) {
+      j.erase("stream_options");
+    } else if (stream_options) {
+      j["stream_options"] = *stream_options;
+    }
+    if (top_k) j["top_k"] = *top_k;
+    if (user) j["user"] = *user;
+    if (fallbacks) j["fallbacks"] = *fallbacks;
+    if (store) j["store"] = *store;
+    if (verbosity) j["verbosity"] = *verbosity;
+    if (text) j["text"] = *text;
+    if (include) j["include"] = *include;
+    if (metadata) j["metadata"] = *metadata;
     if (venice_parameters) j["venice_parameters"] = *venice_parameters;
     return j;
   }
@@ -2433,6 +2629,9 @@ struct Usage {
   int completion_tokens{0};
   int total_tokens{0};
   std::optional<int> cached_tokens{};  // cache-read tokens, when reported
+  // Cache writes are billed separately from cache reads. The two buckets must
+  // never be collapsed even when a provider happens to report equal values.
+  std::optional<int> cache_creation_input_tokens{};
   // Of completion_tokens, how many went to thinking. Without this a reasoning
   // model's actual cost is invisible: the tokens are billed inside
   // completion_tokens with nothing saying what fraction was reasoning.
@@ -2474,8 +2673,13 @@ struct Usage {
     // the same number in every capture, which is why it stays untyped rather
     // than becoming a third read of one fact.
     if (j.contains("cached_tokens")) u.cached_tokens = j.at("cached_tokens").get<int>();
-    if (const auto* pd = detail::opt_object(j, "prompt_tokens_details"))
-      if (pd->contains("cached_tokens")) u.cached_tokens = pd->at("cached_tokens").get<int>();
+    if (const auto* pd = detail::opt_object(j, "prompt_tokens_details")) {
+      if (pd->contains("cached_tokens"))
+        u.cached_tokens = pd->at("cached_tokens").get<int>();
+      if (pd->contains("cache_creation_input_tokens"))
+        u.cache_creation_input_tokens =
+            pd->at("cache_creation_input_tokens").get<int>();
+    }
 
     // opt_object here is intent, not protection, and that was measured rather
     // than assumed: swapping it for a plain `contains` leaves the whole suite
@@ -2502,17 +2706,47 @@ struct Usage {
 
 // ── chat response ─────────────────────────────────────────────────────────
 
+struct ChatChoice {
+  int index{0};
+  std::optional<Message> message{};
+  // Engaged null is distinct from an absent key: the documented response
+  // commonly sends "logprobs": null.
+  std::optional<nlohmann::json> logprobs{};
+  std::optional<std::string> finish_reason{};
+  std::optional<std::string> stop_reason{};
+  nlohmann::json raw{};
+
+  friend void from_json(const nlohmann::json& j, ChatChoice& choice) {
+    if (!j.is_object()) return;
+    choice.raw = j;
+    // Missing retains the historical choice-zero default used by older
+    // compatible gateways and fixtures. Present-but-corrupt stays loud: index
+    // has no "unknown" representation, so tolerant parsing would silently turn
+    // a bad join key into the real choice zero.
+    if (j.contains("index")) j.at("index").get_to(choice.index);
+    choice.finish_reason = detail::opt_string(j, "finish_reason");
+    choice.stop_reason = detail::opt_string(j, "stop_reason");
+    if (const auto it = j.find("logprobs"); it != j.end()) choice.logprobs = *it;
+    if (const auto* message = detail::opt_object(j, "message"))
+      choice.message = message->get<Message>();
+  }
+};
+
 struct ChatResponse {
   std::string id{};
   std::string model{};
   std::string content{};        // assistant message text — a snapshot; see below
   std::string finish_reason{};  // "stop" | "length" | ...
   std::optional<Usage> usage{};
+  std::vector<ChatChoice> choices{};
+  // OpenAI-compatible prompt logprobs are a provider-shaped object. Preserve
+  // the whole value, including an explicit null.
+  std::optional<nlohmann::json> prompt_logprobs{};
 
   // What Venice charged for THIS call, as the server reports it — authoritative
   // where pairing Usage against Model::pricing is a reconstruction, and VC-17
-  // established that reconstruction cannot be exact anyway (cached_tokens is
-  // per-family; pricing has two cache buckets where Usage reports one).
+  // established that reconstruction cannot be exact anyway (cache detail
+  // buckets are optional and per-family even though pricing always names both).
   //
   // It lives here and not on Usage because it is a top-level SIBLING of `usage`
   // on the wire, and Usage::from_json only ever receives the `usage` sub-object
@@ -2561,10 +2795,10 @@ struct ChatResponse {
   // caller's history and onto the wire.
   std::optional<Message> message{};
 
-  // The verbatim body. Everything this struct does not model is here —
-  // choices[1..n], logprobs, the completion_tokens_details buckets Usage
-  // leaves untyped, and whatever Venice adds next. It is what makes deferring
-  // those typings honest rather than lossy, and it is never sent anywhere.
+  // The verbatim body. Everything this struct does not model is here — the
+  // completion_tokens_details buckets Usage leaves untyped and whatever Venice
+  // adds next. It is what makes deferring those typings honest rather than
+  // lossy, and it is never sent anywhere.
   nlohmann::json raw{};
 
   std::optional<std::int64_t> created{};
@@ -2593,10 +2827,13 @@ struct ChatResponse {
     if (const auto* vp = detail::opt_object(j, "venice_parameters")) r.venice_parameters = *vp;
 
     const auto& choices = j.at("choices");
-    if (!choices.empty()) {
-      const auto& c0 = choices.at(0);
-      if (c0.contains("message")) {
-        r.message = c0.at("message").get<Message>();
+    if (!choices.is_array()) throw std::runtime_error{"chat choices is not an array"};
+    r.choices.reserve(choices.size());
+    for (const auto& item : choices) r.choices.push_back(item.get<ChatChoice>());
+    if (!r.choices.empty()) {
+      const auto& c0 = r.choices.front();
+      if (c0.message) {
+        r.message = c0.message;
         // A derived snapshot, populated once here and never read by the
         // library. It exists so `res->content` keeps working; mutating it
         // changes nothing about what a later request sends. The invariant
@@ -2604,15 +2841,281 @@ struct ChatResponse {
         // duplication is policed rather than merely documented.
         r.content = r.message->text();
       }
-      if (c0.contains("finish_reason") && !c0.at("finish_reason").is_null())
-        r.finish_reason = c0.at("finish_reason").get<std::string>();
+      if (c0.finish_reason) r.finish_reason = *c0.finish_reason;
     }
+    if (const auto it = j.find("prompt_logprobs"); it != j.end())
+      r.prompt_logprobs = *it;
     if (j.contains("usage") && !j.at("usage").is_null()) r.usage = j.at("usage").get<Usage>();
     // Top level, beside usage rather than inside it — see ChatResponse::cost.
     if (const auto* c = detail::opt_object(j, "cost")) r.cost = c->get<Price>();
     return r;
   }
 };
+
+// ── Responses API ─────────────────────────────────────────────────────────
+//
+// The endpoint's input and output item universes are intentionally raw JSON.
+// Builders make the documented shapes convenient; the raw containers ensure a
+// newly introduced item type is reachable on day one rather than rejected by a
+// closed variant.
+
+namespace responses_input {
+
+inline auto text(std::string value) -> nlohmann::json {
+  return nlohmann::json(std::move(value));
+}
+
+inline auto items(std::vector<nlohmann::json> values) -> nlohmann::json {
+  return nlohmann::json(std::move(values));
+}
+
+}  // namespace responses_input
+
+namespace responses_content {
+
+inline auto input_text(std::string text) -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["type"] = "input_text";
+  j["text"] = std::move(text);
+  return j;
+}
+
+inline auto input_image(std::string url, std::string detail = {}) -> nlohmann::json {
+  auto image = nlohmann::json::object();
+  image["url"] = std::move(url);
+  if (!detail.empty()) image["detail"] = std::move(detail);
+  auto j = nlohmann::json::object();
+  j["type"] = "input_image";
+  j["image_url"] = std::move(image);
+  return j;
+}
+
+inline auto output_text(std::string text, nlohmann::json annotations = nullptr)
+    -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["type"] = "output_text";
+  j["text"] = std::move(text);
+  if (!annotations.is_null()) j["annotations"] = std::move(annotations);
+  return j;
+}
+
+}  // namespace responses_content
+
+namespace responses_items {
+
+inline auto message(std::string role, nlohmann::json content) -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["type"] = "message";
+  j["role"] = std::move(role);
+  j["content"] = std::move(content);
+  return j;
+}
+
+inline auto reasoning(nlohmann::json summary = nullptr, std::string encrypted_content = {})
+    -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["type"] = "reasoning";
+  if (!summary.is_null()) j["summary"] = std::move(summary);
+  if (!encrypted_content.empty()) j["encrypted_content"] = std::move(encrypted_content);
+  return j;
+}
+
+inline auto function_call(std::string call_id, std::string name, std::string arguments,
+                          std::string id = {}) -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["type"] = "function_call";
+  if (!id.empty()) j["id"] = std::move(id);
+  j["call_id"] = std::move(call_id);
+  j["name"] = std::move(name);
+  j["arguments"] = std::move(arguments);
+  return j;
+}
+
+inline auto function_call_output(std::string call_id, nlohmann::json output)
+    -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["type"] = "function_call_output";
+  j["call_id"] = std::move(call_id);
+  j["output"] = std::move(output);
+  return j;
+}
+
+inline auto item_reference(std::string id) -> nlohmann::json {
+  auto j = nlohmann::json::object();
+  j["type"] = "item_reference";
+  j["id"] = std::move(id);
+  return j;
+}
+
+}  // namespace responses_items
+
+struct ResponsesRequest {
+  std::string model{};
+  nlohmann::json input{};
+  std::optional<std::vector<std::string>> include{};
+  std::optional<int> max_output_tokens{};
+  std::optional<double> temperature{};
+  std::optional<double> top_p{};
+  std::optional<std::vector<nlohmann::json>> fallbacks{};
+  std::optional<nlohmann::json> reasoning{};
+  std::optional<std::vector<nlohmann::json>> tools{};
+  std::optional<nlohmann::json> tool_choice{};
+  std::optional<bool> web_search{};
+  std::optional<VeniceParameters> venice_parameters{};
+  nlohmann::json extra{};
+
+  [[nodiscard]] auto to_json_body() const -> nlohmann::json {
+    auto j = extra.is_object() ? extra : nlohmann::json::object();
+    j["model"] = model;
+    j["input"] = input;
+    // No public Responses streaming contract is exposed until Venice publishes
+    // event schemas or a live capture can establish them.
+    j["stream"] = false;
+    if (include) j["include"] = *include;
+    if (max_output_tokens) j["max_output_tokens"] = *max_output_tokens;
+    if (temperature) j["temperature"] = *temperature;
+    if (top_p) j["top_p"] = *top_p;
+    if (fallbacks) j["fallbacks"] = *fallbacks;
+    if (reasoning) j["reasoning"] = *reasoning;
+    if (tools) j["tools"] = *tools;
+    if (tool_choice) j["tool_choice"] = *tool_choice;
+    if (web_search) j["web_search"] = *web_search;
+    if (venice_parameters) j["venice_parameters"] = *venice_parameters;
+    return j;
+  }
+};
+
+struct ResponsesUsage {
+  int input_tokens{0};
+  int output_tokens{0};
+  int total_tokens{0};
+  std::optional<int> cached_tokens{};
+  std::optional<int> reasoning_tokens{};
+
+  friend void from_json(const nlohmann::json& j, ResponsesUsage& usage) {
+    j.at("input_tokens").get_to(usage.input_tokens);
+    j.at("output_tokens").get_to(usage.output_tokens);
+    j.at("total_tokens").get_to(usage.total_tokens);
+    if (const auto* details = detail::opt_object(j, "input_tokens_details"))
+      if (details->contains("cached_tokens"))
+        usage.cached_tokens = details->at("cached_tokens").get<int>();
+    if (const auto* details = detail::opt_object(j, "output_tokens_details"))
+      if (details->contains("reasoning_tokens"))
+        usage.reasoning_tokens = details->at("reasoning_tokens").get<int>();
+  }
+};
+
+struct ResponsesError {
+  std::string code{};
+  std::string message{};
+  nlohmann::json raw{};
+
+  friend void from_json(const nlohmann::json& j, ResponsesError& error) {
+    error.raw = j;
+    j.at("code").get_to(error.code);
+    j.at("message").get_to(error.message);
+  }
+};
+
+struct ResponseFunctionCall {
+  std::string id{};
+  std::string call_id{};
+  std::string name{};
+  std::string arguments{};
+  std::optional<std::string> status{};
+  nlohmann::json raw{};
+};
+
+struct ResponseCitation {
+  std::string url{};
+  std::optional<std::string> title{};
+  int start_index{0};
+  int end_index{0};
+  nlohmann::json raw{};
+};
+
+struct ResponsesResponse {
+  std::string id{};
+  std::string object{};
+  std::int64_t created_at{0};
+  std::string model{};
+  std::string status{};
+  std::vector<nlohmann::json> output{};
+  std::optional<ResponsesUsage> usage{};
+  std::optional<ResponsesError> error{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+
+  [[nodiscard]] auto output_text() const -> std::string {
+    std::string result;
+    for (const auto& item : output) {
+      if (!item.is_object() || detail::opt_string(item, "type") != "message") continue;
+      const auto* content = detail::opt_array(item, "content");
+      if (content == nullptr) continue;
+      for (const auto& part : *content) {
+        if (!part.is_object() || detail::opt_string(part, "type") != "output_text") continue;
+        if (const auto* text = detail::opt_string_at(part, "text")) result += *text;
+      }
+    }
+    return result;
+  }
+
+  [[nodiscard]] auto function_calls() const -> std::vector<ResponseFunctionCall> {
+    std::vector<ResponseFunctionCall> result;
+    for (const auto& item : output) {
+      if (!item.is_object() || detail::opt_string(item, "type") != "function_call") continue;
+      const auto id = detail::opt_string(item, "id");
+      const auto call_id = detail::opt_string(item, "call_id");
+      const auto name = detail::opt_string(item, "name");
+      const auto arguments = detail::opt_string(item, "arguments");
+      if (!id || !call_id || !name || !arguments) continue;
+      result.push_back(ResponseFunctionCall{*id, *call_id, *name, *arguments,
+                                            detail::opt_string(item, "status"), item});
+    }
+    return result;
+  }
+
+  [[nodiscard]] auto citations() const -> std::vector<ResponseCitation> {
+    std::vector<ResponseCitation> result;
+    for (const auto& item : output) {
+      const auto* content = item.is_object() ? detail::opt_array(item, "content") : nullptr;
+      if (content == nullptr) continue;
+      for (const auto& part : *content) {
+        const auto* annotations = part.is_object() ? detail::opt_array(part, "annotations") : nullptr;
+        if (annotations == nullptr) continue;
+        for (const auto& annotation : *annotations) {
+          if (!annotation.is_object() ||
+              detail::opt_string(annotation, "type") != "url_citation")
+            continue;
+          const auto url = detail::opt_string(annotation, "url");
+          const auto start = detail::opt_int(annotation, "start_index");
+          const auto end = detail::opt_int(annotation, "end_index");
+          if (!url || !start || !end) continue;
+          result.push_back(ResponseCitation{*url, detail::opt_string(annotation, "title"),
+                                            *start, *end, annotation});
+        }
+      }
+    }
+    return result;
+  }
+};
+
+[[nodiscard]] inline auto responses_from_json_body(const nlohmann::json& j)
+    -> ResponsesResponse {
+  ResponsesResponse response;
+  response.raw = j;
+  j.at("id").get_to(response.id);
+  j.at("object").get_to(response.object);
+  j.at("created_at").get_to(response.created_at);
+  j.at("model").get_to(response.model);
+  j.at("status").get_to(response.status);
+  j.at("output").get_to(response.output);
+  if (const auto* usage = detail::opt_object(j, "usage"))
+    response.usage = usage->get<ResponsesUsage>();
+  if (const auto* error = detail::opt_object(j, "error"))
+    response.error = error->get<ResponsesError>();
+  return response;
+}
 
 
 // ── model pricing ─────────────────────────────────────────────────────────

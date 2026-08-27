@@ -72,6 +72,7 @@ using venice::ImageUpscaleRequest;
 using venice::Message;
 using venice::MultiImageEditRequest;
 using venice::OpenAIImageGenerationRequest;
+using venice::ResponsesRequest;
 using venice::Authentication;
 
 using namespace std::chrono_literals;
@@ -1973,6 +1974,62 @@ class TestServer {
                      });
                });
 
+    m_svr.Post("/api/v1/responses",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_responses_hits;
+                 const auto bearer = req.get_header_value("Authorization");
+                 const auto siwx = req.get_header_value("SIGN-IN-WITH-X");
+                 if (bearer.empty() && siwx.empty()) {
+                   res.status = 401;
+                   res.set_content(R"({"error":"missing test authentication"})",
+                                   "application/json");
+                   return;
+                 }
+                 const auto request = nlohmann::json::parse(req.body);
+                 const auto model = request.at("model").get<std::string>();
+                 res.set_header("x-balance-remaining", "3.210000");
+                 res.set_header("X-Protocol-Trace", "responses-fixture");
+                 if (model.starts_with("status-")) {
+                   res.status = std::stoi(model.substr(7));
+                   res.set_content(R"({"error":"responses refused"})", "text/plain");
+                   return;
+                 }
+                 if (model == "wrong-media") {
+                   res.set_content("not json", "text/plain");
+                   return;
+                 }
+                 if (model == "invalid-json") {
+                   res.set_content("{", "application/json");
+                   return;
+                 }
+                 if (model == "malformed") {
+                   res.set_content(R"({"id":"resp_1"})", "application/json");
+                   return;
+                 }
+                 res.set_content(
+                     nlohmann::json{{"id", "resp_1"},
+                                    {"object", "response"},
+                                    {"created_at", 10},
+                                    {"model", model},
+                                    {"status", "completed"},
+                                    {"output",
+                                     nlohmann::json::array(
+                                         {{{"type", "message"},
+                                           {"id", "msg_1"},
+                                           {"status", "completed"},
+                                           {"role", "assistant"},
+                                           {"content",
+                                            nlohmann::json::array(
+                                                {{{"type", "output_text"},
+                                                  {"text", "ok"},
+                                                  {"annotations", nlohmann::json::array()}}})}}})},
+                                    {"seen_stream", request.at("stream")},
+                                    {"seen_authorization", bearer},
+                                    {"seen_siwx", siwx}}
+                         .dump(),
+                     "application/json");
+               });
+
     m_port = m_svr.bind_to_any_port("127.0.0.1");
     m_thread = std::thread{[this] { m_svr.listen_after_bind(); }};
     m_svr.wait_until_ready();
@@ -1996,6 +2053,7 @@ class TestServer {
   [[nodiscard]] auto stall_hits() const -> int { return m_stall_hits.load(); }
   [[nodiscard]] auto models_hits() const -> int { return m_models_hits.load(); }
   [[nodiscard]] auto chat_hits() const -> int { return m_chat_hits.load(); }
+  [[nodiscard]] auto responses_hits() const -> int { return m_responses_hits.load(); }
   [[nodiscard]] auto character_hits() const -> int { return m_character_hits.load(); }
   [[nodiscard]] auto review_hits() const -> int { return m_review_hits.load(); }
   [[nodiscard]] auto billing_hits() const -> int { return m_billing_hits.load(); }
@@ -2090,6 +2148,7 @@ class TestServer {
   std::atomic<int> m_stall_hits{0};
   std::atomic<int> m_models_hits{0};
   std::atomic<int> m_chat_hits{0};
+  std::atomic<int> m_responses_hits{0};
   std::atomic<int> m_character_hits{0};
   std::atomic<int> m_review_hits{0};
   std::atomic<int> m_billing_hits{0};
@@ -2139,6 +2198,13 @@ auto minimal_chat() -> ChatRequest {
   r.model = "test-model";
   r.messages = {Message::user("hi")};
   return r;
+}
+
+auto minimal_response() -> ResponsesRequest {
+  ResponsesRequest request;
+  request.model = "response-test";
+  request.input = venice::responses_input::text("hello");
+  return request;
 }
 
 auto minimal_embedding() -> EmbeddingRequest {
@@ -5484,4 +5550,73 @@ TEST_CASE("cancellation and timeout interrupt a stalled x402 discovery",
     REQUIRE(elapsed < kPromptly);
     REQUIRE(server.x402_stall_hits() == 1);
   }
+}
+
+TEST_CASE("Responses API uses buffered JSON transport and preserves metadata",
+          "[transport][responses]") {
+  const TestServer server;
+  const Client bearer{"test-key", server.base_url()};
+
+  auto request = minimal_response();
+  request.extra["stream"] = true;
+  const auto response = bearer.create_response(request);
+  REQUIRE(response.has_value());
+  REQUIRE(response->output_text() == "ok");
+  REQUIRE(response->raw.at("seen_stream") == false);
+  REQUIRE(response->raw.at("seen_authorization") == "Bearer test-key");
+  REQUIRE(response->metadata.x_balance_remaining == "3.210000");
+  REQUIRE(response->metadata.header("x-protocol-trace") == "responses-fixture");
+  REQUIRE(server.responses_hits() == 1);
+
+  const Client siwx{Authentication::sign_in_with_x("signed-proof"), server.base_url()};
+  const auto signed_response = siwx.create_response(minimal_response());
+  REQUIRE(signed_response.has_value());
+  REQUIRE(signed_response->raw.at("seen_siwx") == "signed-proof");
+  REQUIRE(signed_response->raw.at("seen_authorization") == "");
+}
+
+TEST_CASE("Responses status classification precedes media and success parsing stays loud",
+          "[transport][responses][failure]") {
+  const TestServer server;
+  const Client client{"test-key", server.base_url()};
+
+  struct StatusCase {
+    int status;
+    ErrorKind kind;
+  };
+  const std::array cases{StatusCase{400, ErrorKind::Http},
+                         StatusCase{401, ErrorKind::Auth},
+                         StatusCase{402, ErrorKind::PaymentRequired},
+                         StatusCase{429, ErrorKind::RateLimited},
+                         StatusCase{500, ErrorKind::Http}};
+  for (const auto& test : cases) {
+    auto request = minimal_response();
+    request.model = "status-" + std::to_string(test.status);
+    const auto result = client.create_response(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == test.kind);
+    REQUIRE(result.error().status == test.status);
+    REQUIRE(result.error().body == R"({"error":"responses refused"})");
+    REQUIRE(result.error().metadata.header("x-protocol-trace") == "responses-fixture");
+  }
+
+  for (const std::string model : {"wrong-media", "invalid-json", "malformed"}) {
+    auto request = minimal_response();
+    request.model = model;
+    const auto result = client.create_response(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::Parse);
+    REQUIRE(result.error().status == 200);
+    REQUIRE(result.error().metadata.x_balance_remaining == "3.210000");
+  }
+}
+
+TEST_CASE("Responses rejects unsupported authentication before a socket",
+          "[transport][responses][auth][failure]") {
+  const TestServer server;
+  const Client public_client{Authentication::public_access(), server.base_url()};
+  const auto result = public_client.create_response(minimal_response());
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(server.responses_hits() == 0);
 }

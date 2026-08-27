@@ -32,13 +32,15 @@ expect_invalid("missing required field" "${_bad}" "family is required")
 string(JSON _bad SET "${_manifest}" operations 0 state "\"mystery\"")
 expect_invalid("unknown state" "${_bad}" "state 'mystery' is unknown")
 
-# Row 40 remains planned (`POST /responses`); row 0 is implemented.
-# Pinning each failure to a row in the matching state keeps this matrix honest
-# as family work advances the first operations in the manifest.
-string(JSON _bad REMOVE "${_manifest}" operations 40 tracking_issue)
+# No operation remains planned after VC-24, so manufacture that state on row 0
+# before testing its issue requirements. This keeps the failure matrix alive
+# without lying about the checked inventory.
+string(JSON _bad SET "${_manifest}" operations 0 state "\"planned\"")
+string(JSON _bad REMOVE "${_bad}" operations 0 tracking_issue)
 expect_invalid("planned operation without issue" "${_bad}" "tracking_issue is required")
 
-string(JSON _bad SET "${_manifest}" operations 40 tracking_issue 26)
+string(JSON _bad SET "${_manifest}" operations 0 state "\"planned\"")
+string(JSON _bad SET "${_bad}" operations 0 tracking_issue 26)
 expect_invalid("planned operation linked only to a child ticket" "${_bad}" "not a family issue under #36")
 
 string(JSON _bad REMOVE "${_manifest}" operations 0 public_api)
@@ -47,7 +49,7 @@ expect_invalid("implemented operation without public API" "${_bad}" "public_api 
 string(JSON _bad SET "${_manifest}" source sha256 "\"not-a-digest\"")
 expect_invalid("invalid source digest" "${_bad}" "64 lowercase hexadecimal")
 
-validate_openapi_coverage_text("OpenAPI coverage: 27/49 operations implemented." "OpenAPI coverage: 47/49 operations implemented." _coverage_ok)
+validate_openapi_coverage_text("OpenAPI coverage: 27/49 operations implemented." "OpenAPI coverage: 48/49 operations implemented." _coverage_ok)
 if(_coverage_ok)
   message(WARNING "FAIL : stale documentation coverage was accepted")
   math(EXPR _fail_count "${_fail_count} + 1")
@@ -57,7 +59,7 @@ endif()
 
 # Happy path last: validate the real manifest and the two public status claims.
 validate_openapi_manifest("${_manifest}" _ok _report _total _implemented)
-if(NOT _ok OR NOT _total EQUAL 49 OR NOT _implemented EQUAL 47)
+if(NOT _ok OR NOT _total EQUAL 49 OR NOT _implemented EQUAL 48)
   message(WARNING "FAIL : checked-in manifest — ${_report}; total=${_total}, implemented=${_implemented}")
   math(EXPR _fail_count "${_fail_count} + 1")
 else()

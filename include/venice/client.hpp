@@ -10,6 +10,7 @@
 //   * chat(req)                     -> expected<ChatResponse>   (non-streaming)
 //   * chat_stream(req, on_token)    -> expected<ChatResponse>   (content text)
 //   * chat_stream(req, acc[, on_delta])                         (structured)
+//   * create_response(req)          -> expected<ResponsesResponse>
 //   * embeddings(req)               -> expected<EmbeddingResponse>
 //   * generate_image(req)           -> expected<ImageGenerationResult>
 //   * generate_image_openai(req)    -> expected<OpenAIImageGenerationResponse>
@@ -776,7 +777,6 @@ class Client {
     std::string error_body;
     std::string parse_err;
     detail::SseFramer framer;
-    std::vector<ToolCall> frags;  // backing store for the span in each delta
 
     auto cli = detail::make_transport(m_base_url, opts);
     // Declared after cli and never before: the guard's watcher thread holds a
@@ -798,19 +798,21 @@ class Client {
       return true;
     };
 
-    // One SSE payload -> one delta -> the accumulator, then the observer.
-    // Ingest happens before the callback on purpose: a callback that stops the
-    // stream must not cost the caller the frame that made it decide to.
+    // One SSE payload -> one delta per choice -> the accumulator, then the
+    // observer. Ingest happens before each callback on purpose: a callback that
+    // stops the stream must not cost the caller the choice that made it decide
+    // to stop.
     const auto on_payload = [&](std::string_view line) {
       if (early_stop) return;  // stop at the frame, not at the end of the chunk
       if (line == "[DONE]") return;
       try {
         const auto j = nlohmann::json::parse(line);
-        frags.clear();
-        const auto d = delta_from_chunk(j, frags);
         acc.note_envelope(j);
-        acc.ingest(d);
-        if (on_delta && !on_delta(d)) early_stop = true;
+        for_each_delta_from_chunk(j, [&](const StreamDelta& d) {
+          if (early_stop) return;
+          acc.ingest(d);
+          if (on_delta && !on_delta(d)) early_stop = true;
+        });
       } catch (const std::exception& e) {
         if (parse_err.empty()) parse_err = e.what();
       }
@@ -871,6 +873,31 @@ class Client {
                                  const RequestOptions& opts = {}) const
       -> std::expected<ChatResponse, Error> {
     return chat_stream(req, acc, std::function<bool(const StreamDelta&)>{}, opts);
+  }
+
+  // ── Responses API (non-streaming) ────────────────────────────────────
+  //
+  // Venice documents the endpoint as Alpha and stateless. The current schema
+  // describes the JSON success body but not SSE event payloads, so this method
+  // deliberately exposes only the contract that can be parsed without
+  // speculation. ResponsesRequest::to_json_body forces stream=false.
+  [[nodiscard]] auto create_response(const ResponsesRequest& req,
+                                     const RequestOptions& opts = {}) const
+      -> std::expected<ResponsesResponse, Error> {
+    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+
+    auto res = post_json_response("/responses", req.to_json_body(),
+                                  detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!res) return std::unexpected{std::move(res.error())};
+    try {
+      auto response = responses_from_json_body(res->body);
+      response.metadata = std::move(res->metadata);
+      return response;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, res->status,
+                                   std::string{"responses parse: "} + e.what(),
+                                   res->raw_body, std::move(res->metadata)}};
+    }
   }
 
   // ── embeddings ────────────────────────────────────────────────────────
@@ -2284,17 +2311,21 @@ class Client {
     // Pointer-to-member, so name and field travel together and a future double
     // field is one line. Members rather than references into `req`: the table
     // is then a compile-time constant with no lifetime relationship to any
-    // request. test/03guards/ mirrors this list on purpose — a fifth field
+    // request. test/03guards/ mirrors this list on purpose — another field
     // added here and not there ships unguarded with the suite still green.
     struct DoubleField {
       std::optional<double> ChatRequest::*field;
       std::string_view name;
     };
-    static constexpr std::array<DoubleField, 4> kDoubleFields{{
+    static constexpr std::array<DoubleField, 8> kDoubleFields{{
         {&ChatRequest::temperature, "temperature"},
         {&ChatRequest::top_p, "top_p"},
         {&ChatRequest::frequency_penalty, "frequency_penalty"},
         {&ChatRequest::presence_penalty, "presence_penalty"},
+        {&ChatRequest::max_temp, "max_temp"},
+        {&ChatRequest::min_p, "min_p"},
+        {&ChatRequest::min_temp, "min_temp"},
+        {&ChatRequest::repetition_penalty, "repetition_penalty"},
     }};
 
     for (const auto& [field, name] : kDoubleFields) {
@@ -2309,6 +2340,27 @@ class Client {
     if (req.messages.empty())
       return std::unexpected{Error{ErrorKind::InvalidArg, 0, "messages is empty", {}}};
 
+    return {};
+  }
+
+  [[nodiscard]] static auto validate(const ResponsesRequest& req)
+      -> std::expected<void, Error> {
+    if (req.temperature && !std::isfinite(*req.temperature))
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "temperature is not finite", {}}};
+    if (req.top_p && !std::isfinite(*req.top_p))
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "top_p is not finite", {}}};
+    if (req.model.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "model is empty", {}}};
+    if (req.input.is_null())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "responses input is missing", {}}};
+    if (req.input.is_string() && req.input.get_ref<const std::string&>().empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "responses input is empty", {}}};
+    if (req.input.is_array() && req.input.empty())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0, "responses input is empty", {}}};
+    if (req.venice_parameters && req.venice_parameters->enable_e2ee.value_or(false))
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0,
+                                   "responses does not support E2EE", {}}};
     return {};
   }
 

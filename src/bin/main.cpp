@@ -2478,6 +2478,8 @@ auto report_usage(const nlohmann::json& raw, const std::optional<venice::Usage>&
     return k->get<int>();
   };
   const auto raw_cached = nested("prompt_tokens_details", "cached_tokens");
+  const auto raw_cache_write =
+      nested("prompt_tokens_details", "cache_creation_input_tokens");
   const auto raw_reasoning = nested("completion_tokens_details", "reasoning_tokens");
 
   const auto show = [](const char* label, std::optional<int> from_raw, std::optional<int> from_typed) {
@@ -2490,6 +2492,7 @@ auto report_usage(const nlohmann::json& raw, const std::optional<venice::Usage>&
     std::cerr << '\n';
   };
   show("typed cached_tokens: ", raw_cached, typed->cached_tokens);
+  show("typed cache writes : ", raw_cache_write, typed->cache_creation_input_tokens);
   show("typed reasoning    : ", raw_reasoning, typed->reasoning_tokens);
 
   // Name what we do not model. cache_read_input_tokens turned up this way — a
@@ -2497,7 +2500,9 @@ auto report_usage(const nlohmann::json& raw, const std::optional<venice::Usage>&
   // captures of the VC-17 sweep, which is why it stays untyped.
   report_unmodeled("unmodeled usage keys: ", raw, kModeledUsageKeys, "ChatResponse::raw");
 
-  return raw_cached != typed->cached_tokens || raw_reasoning != typed->reasoning_tokens;
+  return raw_cached != typed->cached_tokens ||
+         raw_cache_write != typed->cache_creation_input_tokens ||
+         raw_reasoning != typed->reasoning_tokens;
 }
 
 // Every key `ChatResponse` reads off the response *envelope* — id, model,
@@ -2521,9 +2526,9 @@ auto report_usage(const nlohmann::json& raw, const std::optional<venice::Usage>&
 // and cost — so created / system_fingerprint / venice_parameters on a chunk are
 // filtered out here while the accumulator does in fact drop them. Under-reports
 // the stream, and said out loud rather than left to be found.
-constexpr std::array<std::string_view, 9> kModeledBodyKeys{
+constexpr std::array<std::string_view, 10> kModeledBodyKeys{
     "id",      "object", "model", "created", "system_fingerprint",
-    "choices", "usage",  "cost",  "venice_parameters"};
+    "choices", "usage",  "cost",  "venice_parameters", "prompt_logprobs"};
 
 // Name what an envelope carries that nothing models. Separate from report_cost
 // because the discovery check must not be gated on the thing being discovered:
@@ -2737,6 +2742,102 @@ auto usage_report(const venice::Client& client, std::string_view model) -> int {
   return mismatch ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
+auto pick_for_responses(const venice::Client& client,
+                        std::size_t max_alternates = 4) -> std::optional<ModelPick> {
+  const auto models = client.models("text");
+  if (!models) {
+    std::cerr << "models(text) failed [" << venice::to_string(models.error().kind)
+              << "] " << models.error().message << '\n';
+    return std::nullopt;
+  }
+  ModelPick pick;
+  for (const auto& model : *models) {
+    if (model.id.empty() ||
+        (model.capabilities && model.capabilities->supports_e2ee.value_or(false)))
+      continue;
+    if (pick.chosen.empty())
+      pick.chosen = model.id;
+    else if (pick.alternates.size() < max_alternates)
+      pick.alternates.push_back(model.id);
+    else
+      break;
+  }
+  if (pick.chosen.empty()) {
+    std::cerr << "no non-E2EE text model carried a usable id\n";
+    return std::nullopt;
+  }
+  return pick;
+}
+
+constexpr std::array<std::string_view, 8> kModeledResponsesEnvelopeKeys{
+    "id", "object", "created_at", "model", "status", "output", "usage", "error"};
+constexpr std::array<std::string_view, 5> kModeledResponsesMessageKeys{
+    "type", "id", "status", "role", "content"};
+constexpr std::array<std::string_view, 6> kModeledResponsesFunctionKeys{
+    "type", "id", "call_id", "name", "arguments", "status"};
+constexpr std::array<std::string_view, 4> kModeledResponsesReasoningKeys{
+    "type", "id", "summary", "encrypted_content"};
+constexpr std::array<std::string_view, 3> kModeledResponsesWebSearchKeys{
+    "type", "id", "status"};
+constexpr std::array<std::string_view, 5> kModeledResponsesUsageKeys{
+    "input_tokens", "input_tokens_details", "output_tokens", "output_tokens_details",
+    "total_tokens"};
+
+auto responses_report(const venice::Client& client, std::string_view requested) -> int {
+  ModelPick pick;
+  if (!requested.empty()) {
+    pick.chosen = std::string{requested};
+  } else {
+    auto selected = pick_for_responses(client);
+    if (!selected) return EXIT_FAILURE;
+    pick = std::move(*selected);
+  }
+  report_pick(pick, "type=text and supportsE2EE!=true",
+              "`venice-cpp --responses <id>`");
+
+  venice::ResponsesRequest request;
+  request.model = pick.chosen;
+  request.input = venice::responses_input::text("Reply with exactly: ok");
+  request.max_output_tokens = 8;
+  request.venice_parameters = venice::VeniceParameters{};
+  request.venice_parameters->enable_e2ee = false;
+
+  const auto response = client.create_response(request);
+  if (!response) {
+    std::cerr << "responses failed [" << venice::to_string(response.error().kind) << "] "
+              << response.error().message << "\nbody: " << response.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+
+  std::cerr << "status: " << response->status << "\noutput items: "
+            << response->output.size() << "\noutput text: " << response->output_text() << '\n';
+  report_unmodeled("unmodeled response envelope keys: ", response->raw,
+                   kModeledResponsesEnvelopeKeys, "ResponsesResponse::raw");
+  if (const auto* usage = venice::detail::opt_object(response->raw, "usage"))
+    report_unmodeled("unmodeled responses usage keys: ", *usage,
+                     kModeledResponsesUsageKeys, "ResponsesUsage");
+
+  for (const auto& item : response->output) {
+    const auto type = venice::detail::opt_string(item, "type");
+    if (type == "message")
+      report_unmodeled("unmodeled message output keys: ", item,
+                       kModeledResponsesMessageKeys, "ResponsesResponse::output");
+    else if (type == "function_call")
+      report_unmodeled("unmodeled function output keys: ", item,
+                       kModeledResponsesFunctionKeys, "ResponsesResponse::output");
+    else if (type == "reasoning")
+      report_unmodeled("unmodeled reasoning output keys: ", item,
+                       kModeledResponsesReasoningKeys, "ResponsesResponse::output");
+    else if (type == "web_search_call")
+      report_unmodeled("unmodeled web-search output keys: ", item,
+                       kModeledResponsesWebSearchKeys, "ResponsesResponse::output");
+    else
+      std::cerr << "unknown raw output item type: " << type.value_or("unknown")
+                << "   (payload retained in ResponsesResponse::output)\n";
+  }
+  return EXIT_SUCCESS;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -2774,7 +2875,7 @@ auto main(int argc, char** argv) -> int {
                  "(--traits, --compat, --modality, --styles and --x402 need no key;\n"
                  " --embeddings, --image, --image-transform, --audio, --video, "
                  "--augment, --crypto-rpc,\n"
-                 " --billing and\n"
+                 " --billing, --responses and\n"
                  " --api-keys need a key.)\n";
     return EXIT_SUCCESS;
   }
@@ -2803,6 +2904,7 @@ auto main(int argc, char** argv) -> int {
   if (leg == "--crypto-rpc") return crypto_rpc_report(client);
   if (leg == "--billing") return billing_report(client, arg);
   if (leg == "--api-keys") return api_keys_report(client);
+  if (leg == "--responses") return responses_report(client, arg);
 
   const std::string prompt = argc > 1 ? argv[1] : "Say hello in one short sentence.";
 

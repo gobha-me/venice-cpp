@@ -176,19 +176,35 @@ class SseFramer {
 // one level down — VC-06 already recorded that a new ErrorKind enumerator is a
 // break for an exhaustive switch.
 //
-// One delta per SSE frame, not one per kind. Venice's final frame carries
-// finish_reason and usage together, and a reasoning model can emit
-// reasoning_content and content in the same chunk; a variant would force either
-// fanning one frame into several callbacks or dropping a field.
+// One delta per choice in an SSE frame, not one per kind. The common n==1 case
+// remains one callback per frame; n>1 fans out only at the choice boundary.
+// Venice's final frame carries finish_reason and usage together, and a reasoning
+// model can emit reasoning_content and content in the same choice; a variant
+// would force either fanning one choice into several callbacks or dropping a
+// field.
 struct StreamDelta {
   // The whole verbatim chunk. Never null for a delta the accumulator produced.
   const nlohmann::json* chunk{nullptr};
+  // Internal envelope ownership marker: a multi-choice SSE frame fans out to
+  // one StreamDelta per choice, but chunks() must retain the frame only once.
+  bool first_choice_in_chunk{true};
+
+  // The server's join key for n>1. Disengaged retains the historical
+  // single-choice behavior and is treated as choice zero by the accumulator.
+  std::optional<int> choice_index{};
 
   std::optional<std::string_view> content{};
   std::optional<std::string_view> reasoning_content{};
+  const nlohmann::json* reasoning_details{nullptr};
+  std::optional<std::string_view> thought_signature{};
   std::optional<std::string_view> role{};
   std::optional<std::string_view> finish_reason{};
+  std::optional<std::string_view> stop_reason{};
   std::optional<std::string_view> refusal{};
+  // Provider-shaped choice logprobs for this chunk. Borrowed rather than
+  // accumulated: the published shape does not define a cross-frame merge rule,
+  // and wrapping fragments in a made-up array would no longer match the wire.
+  const nlohmann::json* logprobs{nullptr};
 
   // Fragments exactly as received, unmerged — merging is the accumulator's job
   // and doing it here would mean every observer redoing it. Borrowed from
@@ -200,12 +216,15 @@ struct StreamDelta {
   // Borrowed exactly as `usage` is, for the same reason and with the same
   // lifetime: this is a view, and both die with `chunk`.
   const nlohmann::json* cost{nullptr};
+  const nlohmann::json* prompt_logprobs{nullptr};
 
   // True when the chunk carried nothing this struct models. Not an error: Venice
   // sends role-only openers and empty keep-alive frames.
   [[nodiscard]] auto empty() const noexcept -> bool {
-    return !content && !reasoning_content && !role && !finish_reason && !refusal &&
-           tool_calls.empty() && usage == nullptr && cost == nullptr;
+    return !choice_index && !content && !reasoning_content && reasoning_details == nullptr &&
+           !thought_signature && !role && !finish_reason && !stop_reason && !refusal &&
+           logprobs == nullptr && tool_calls.empty() && usage == nullptr && cost == nullptr &&
+           prompt_logprobs == nullptr;
   }
 };
 
@@ -228,46 +247,74 @@ namespace detail {
 // turns out to be. `frags` owns the tool-call fragments the returned span points
 // at, so it must outlive the delta.
 //
-// Only choices[0] is surfaced, matching every other read in this library. A
-// multi-choice stream is not reachable today (`n` is not a modeled request
-// field) and the whole chunk is retained regardless, so nothing is lost.
-[[nodiscard]] inline auto delta_from_chunk(const nlohmann::json& chunk,
-                                           std::vector<ToolCall>& frags) -> StreamDelta {
+namespace detail {
+
+[[nodiscard]] inline auto delta_from_choice(const nlohmann::json& chunk,
+                                            const nlohmann::json* choice,
+                                            std::vector<ToolCall>& frags,
+                                            bool include_envelope) -> StreamDelta {
   StreamDelta d;
   d.chunk = &chunk;
+  d.first_choice_in_chunk = include_envelope;
   if (!chunk.is_object()) return d;
 
-  if (const auto* u = detail::opt_object(chunk, "usage")) d.usage = u;
-  // Above the choices read below, and that ordering is load bearing rather than
-  // stylistic: the next two lines return early on a missing or empty choices
-  // array, and the cost-bearing frame is the usage frame, which Venice sends
-  // with "choices": []. Measured 2026-08-10 on every family swept for VC-20 —
-  // a read placed after the early return never fires on the only frame that
-  // carries the key. test/07stream/ §8 pins it.
-  if (const auto* c = detail::opt_object(chunk, "cost")) d.cost = c;
+  if (include_envelope) {
+    if (const auto* u = opt_object(chunk, "usage")) d.usage = u;
+    if (const auto* c = opt_object(chunk, "cost")) d.cost = c;
+    if (const auto it = chunk.find("prompt_logprobs"); it != chunk.end())
+      d.prompt_logprobs = &*it;
+  }
+  if (choice == nullptr || !choice->is_object()) return d;
 
-  const auto* choices = detail::opt_array(chunk, "choices");
-  if (choices == nullptr || choices->empty()) return d;
+  d.choice_index = opt_int(*choice, "index");
+  d.finish_reason = view_of(*choice, "finish_reason");
+  d.stop_reason = view_of(*choice, "stop_reason");
+  if (const auto it = choice->find("logprobs"); it != choice->end()) d.logprobs = &*it;
 
-  const auto& c0 = choices->at(0);
-  if (!c0.is_object()) return d;
-
-  d.finish_reason = detail::view_of(c0, "finish_reason");
-
-  const auto* delta = detail::opt_object(c0, "delta");
+  const auto* delta = opt_object(*choice, "delta");
   if (delta == nullptr) return d;
+  d.content = view_of(*delta, "content");
+  d.reasoning_content = view_of(*delta, "reasoning_content");
+  if (const auto* details = opt_array(*delta, "reasoning_details"))
+    d.reasoning_details = details;
+  d.thought_signature = view_of(*delta, "thought_signature");
+  d.role = view_of(*delta, "role");
+  d.refusal = view_of(*delta, "refusal");
 
-  d.content = detail::view_of(*delta, "content");
-  d.reasoning_content = detail::view_of(*delta, "reasoning_content");
-  d.role = detail::view_of(*delta, "role");
-  d.refusal = detail::view_of(*delta, "refusal");
-
-  if (const auto* tc = detail::opt_array(*delta, "tool_calls")) {
+  if (const auto* tc = opt_array(*delta, "tool_calls")) {
     const auto first = frags.size();
     for (const auto& e : *tc) frags.push_back(e.get<ToolCall>());
     d.tool_calls = std::span<const ToolCall>{frags.data() + first, frags.size() - first};
   }
   return d;
+}
+
+}  // namespace detail
+
+// Compatibility helper: returns the first choice, as it always has. The
+// transport and StreamAccumulator's chunk overload use
+// for_each_delta_from_chunk below to retain every choice.
+[[nodiscard]] inline auto delta_from_chunk(const nlohmann::json& chunk,
+                                           std::vector<ToolCall>& frags) -> StreamDelta {
+  const auto* choices = detail::opt_array(chunk, "choices");
+  const auto* first = choices != nullptr && !choices->empty() ? &choices->front() : nullptr;
+  return detail::delta_from_choice(chunk, first, frags, /*include_envelope=*/true);
+}
+
+template <typename Fn>
+inline void for_each_delta_from_chunk(const nlohmann::json& chunk, Fn&& fn) {
+  const auto* choices = detail::opt_array(chunk, "choices");
+  if (choices == nullptr || choices->empty()) {
+    std::vector<ToolCall> frags;
+    fn(detail::delta_from_choice(chunk, nullptr, frags, /*include_envelope=*/true));
+    return;
+  }
+  bool first = true;
+  for (const auto& choice : *choices) {
+    std::vector<ToolCall> frags;
+    fn(detail::delta_from_choice(chunk, &choice, frags, first));
+    first = false;
+  }
 }
 
 // ── assembly ──────────────────────────────────────────────────────────────
@@ -303,18 +350,29 @@ class StreamAccumulator {
   // ambiguity the three-overload set is shaped to avoid — test/07stream/ pins
   // the non-convertibility with a static_assert so this cannot regress.
   void ingest(const StreamDelta& d) {
-    if (d.chunk != nullptr && m_keep_chunks) m_chunks.push_back(*d.chunk);
+    if (d.chunk != nullptr && d.first_choice_in_chunk && m_keep_chunks)
+      m_chunks.push_back(*d.chunk);
 
-    // First write wins for role: it arrives once, in the opening frame.
-    if (d.role && m_role.empty()) m_role = std::string{*d.role};
-
-    if (d.content) m_content.append(*d.content);
-    if (d.reasoning_content) m_reasoning.append(*d.reasoning_content);
-    if (d.refusal) m_refusal.append(*d.refusal);
-    // Not `else if` and not gated on finish_reason: content and reasoning are
-    // independent streams that may interleave in any order, and finish_reason
-    // can arrive before the last tool-call argument fragment.
-    if (d.finish_reason) m_finish = std::string{*d.finish_reason};
+    const bool has_choice_data = d.choice_index || d.role || d.content || d.reasoning_content ||
+                                 d.reasoning_details != nullptr || d.thought_signature ||
+                                 d.refusal || d.finish_reason || d.stop_reason ||
+                                 !d.tool_calls.empty();
+    if (has_choice_data) {
+      auto& choice = m_choices[d.choice_index.value_or(0)];
+      // First write wins for role/signature; text-bearing fields append because
+      // SSE fragments are not complete values on their own.
+      if (d.role && choice.role.empty()) choice.role = std::string{*d.role};
+      if (d.content) choice.content.append(*d.content);
+      if (d.reasoning_content) choice.reasoning.append(*d.reasoning_content);
+      if (d.reasoning_details != nullptr)
+        for (const auto& item : *d.reasoning_details) choice.reasoning_details.push_back(item);
+      if (d.thought_signature && choice.thought_signature.empty())
+        choice.thought_signature = std::string{*d.thought_signature};
+      if (d.refusal) choice.refusal.append(*d.refusal);
+      if (d.finish_reason) choice.finish = std::string{*d.finish_reason};
+      if (d.stop_reason) choice.stop_reason = std::string{*d.stop_reason};
+      for (const auto& frag : d.tool_calls) merge_tool_call(choice, frag);
+    }
     // Cost BEFORE usage, and the order is load bearing. Cost rides on the usage
     // frame — one object, both keys — and `get<Usage>()` below is loud, so a
     // wrong-typed token count throws out of this function. chat_stream catches
@@ -332,8 +390,7 @@ class StreamAccumulator {
     // detail::opt_double, a predicate — so nothing after it is at risk from it.
     if (d.cost != nullptr) m_cost = d.cost->get<Price>();
     if (d.usage != nullptr) m_usage = d.usage->get<Usage>();
-
-    for (const auto& frag : d.tool_calls) merge_tool_call(frag);
+    if (d.prompt_logprobs != nullptr) m_prompt_logprobs = *d.prompt_logprobs;
 
     m_saw_anything = m_saw_anything || !d.empty();
   }
@@ -343,32 +400,16 @@ class StreamAccumulator {
   // delta view deliberately does not model id/model, and a caller who only had
   // this entry point would otherwise silently lose them.
   void ingest(const nlohmann::json& chunk) {
-    std::vector<ToolCall> frags;
     note_envelope(chunk);
-    ingest(delta_from_chunk(chunk, frags));
+    for_each_delta_from_chunk(chunk, [&](const StreamDelta& delta) { ingest(delta); });
   }
 
   // The assembled turn, ready to append to the next request's messages.
   [[nodiscard]] auto message() const -> Message {
-    Message m;
-    // "assistant" when the stream never said: it is the only role a completion
-    // can reply with, and a roleless message is one no server accepts.
-    m.role = m_role.empty() ? std::string{"assistant"} : m_role;
-    // Absent rather than "" when nothing arrived: a tool-call-only turn has no
-    // content, and emitting "" would differ from what the non-streamed parse
-    // produces for the same reply.
-    if (!m_content.empty()) m.content = m_content;
-    if (!m_reasoning.empty()) m.reasoning_content = m_reasoning;
-    if (!m_refusal.empty()) m.refusal = m_refusal;
-    if (!m_calls.empty()) {
-      std::vector<ToolCall> calls;
-      calls.reserve(m_calls.size());
-      // std::map iterates in key order, so emission is by index rather than by
-      // arrival — fragments for call 1 can precede call 0's.
-      for (const auto& [idx, call] : m_calls) calls.push_back(call);
-      m.tool_calls = std::move(calls);
-    }
-    return m;
+    if (!m_choices.empty()) return message_from(m_choices.begin()->second);
+    Message message;
+    message.role = "assistant";
+    return message;
   }
 
   // The same shape Client::chat returns for the same reply. `raw` is
@@ -380,10 +421,26 @@ class StreamAccumulator {
     ChatResponse r;
     r.id = m_id;
     r.model = m_model;
-    r.finish_reason = m_finish;
     r.usage = m_usage;
     r.cost = m_cost;
-    r.message = message();
+    r.prompt_logprobs = m_prompt_logprobs;
+    for (const auto& [index, state] : m_choices) {
+      ChatChoice choice;
+      choice.index = index;
+      choice.message = message_from(state);
+      if (!state.finish.empty()) choice.finish_reason = state.finish;
+      if (!state.stop_reason.empty()) choice.stop_reason = state.stop_reason;
+      r.choices.push_back(std::move(choice));
+    }
+    if (!r.choices.empty()) {
+      r.message = r.choices.front().message;
+      if (r.choices.front().finish_reason)
+        r.finish_reason = *r.choices.front().finish_reason;
+    } else {
+      // Preserve the historical accumulator behavior for an envelope-only
+      // partial result.
+      r.message = message();
+    }
     r.content = r.message->text();
     return r;
   }
@@ -440,8 +497,37 @@ class StreamAccumulator {
   // complete record lives. Overlaying the fragments into one object would be a
   // synthesised value wearing a "verbatim" label, which is the same thing
   // response() refuses to do for ChatResponse::raw above.
-  void merge_tool_call(const ToolCall& frag) {
-    auto& slot = m_calls[frag.index.value_or(0)];
+  struct ChoiceState {
+    std::string role{};
+    std::string content{};
+    std::string reasoning{};
+    std::vector<nlohmann::json> reasoning_details{};
+    std::string thought_signature{};
+    std::string refusal{};
+    std::string finish{};
+    std::string stop_reason{};
+    std::map<int, ToolCall> calls{};
+  };
+
+  [[nodiscard]] static auto message_from(const ChoiceState& state) -> Message {
+    Message message;
+    message.role = state.role.empty() ? std::string{"assistant"} : state.role;
+    if (!state.content.empty()) message.content = state.content;
+    if (!state.reasoning.empty()) message.reasoning_content = state.reasoning;
+    if (!state.reasoning_details.empty()) message.reasoning_details = state.reasoning_details;
+    if (!state.thought_signature.empty()) message.thought_signature = state.thought_signature;
+    if (!state.refusal.empty()) message.refusal = state.refusal;
+    if (!state.calls.empty()) {
+      std::vector<ToolCall> calls;
+      calls.reserve(state.calls.size());
+      for (const auto& entry : state.calls) calls.push_back(entry.second);
+      message.tool_calls = std::move(calls);
+    }
+    return message;
+  }
+
+  static void merge_tool_call(ChoiceState& choice, const ToolCall& frag) {
+    auto& slot = choice.calls[frag.index.value_or(0)];
     if (slot.id.empty()) slot.id = frag.id;
     if (slot.type.empty()) slot.type = frag.type;
     if (slot.name.empty()) slot.name = frag.name;
@@ -458,10 +544,11 @@ class StreamAccumulator {
     if (slot.raw.is_null()) slot.raw = frag.raw;
   }
 
-  std::string m_role, m_content, m_reasoning, m_refusal, m_finish, m_id, m_model;
+  std::string m_id, m_model;
   std::optional<Usage> m_usage{};
   std::optional<Price> m_cost{};
-  std::map<int, ToolCall> m_calls{};
+  std::optional<nlohmann::json> m_prompt_logprobs{};
+  std::map<int, ChoiceState> m_choices{};
   std::vector<nlohmann::json> m_chunks{};
   bool m_keep_chunks{true};
   bool m_saw_anything{false};
