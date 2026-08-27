@@ -970,8 +970,11 @@
       "method": "GET",
       "path": "/crypto/rpc/networks",
       "family": "crypto-rpc",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 48,
+      "public_api": [
+        "Client::crypto_rpc_networks"
+      ],
       "security": [
         []
       ],
@@ -986,8 +989,11 @@
       "method": "POST",
       "path": "/crypto/rpc/{network}",
       "family": "crypto-rpc",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 48,
+      "public_api": [
+        "Client::crypto_rpc"
+      ],
       "security": [
         [
           "BearerAuth"

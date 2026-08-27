@@ -214,6 +214,15 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   Never print uploaded or returned content in the live leg, and describe
   Venice's retention statement as server behavior rather than a local
   secure-erasure guarantee.
+- **Crypto RPC keeps the method universe raw and the transport layers distinct.**
+  Network discovery is a tolerant public listing; proxy request params and
+  result/error payloads remain raw JSON with small JSON-RPC 2.0 builders.
+  HTTP-200 `error` members are successful proxy transport results, while
+  non-2xx status remains `venice::Error`. Network slugs are open strings encoded
+  as one path segment. `Idempotency-Key` is per-call header state in
+  `RequestOptions`, never request JSON or diagnostics; response IDs, batch order,
+  charge headers and x402 metadata stay exact. The client hardcodes neither
+  supported networks/methods nor Venice's batch and idempotency policy.
 - **Braces build arrays, parentheses build scalars.** `nlohmann::json{"auto"}` is
   `["auto"]`; `nlohmann::json("auto")` is `"auto"`. Both compile, so only an
   `is_string()`-style assertion catches the wrong one. The *object* builders

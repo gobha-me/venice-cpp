@@ -1441,6 +1441,116 @@ class TestServer {
           "application/json");
     });
 
+    m_svr.Get("/api/v1/crypto/rpc/networks",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                ++m_crypto_rpc_hits;
+                const auto control = req.get_header_value("Idempotency-Key");
+                if (control == "wrong-media") {
+                  res.set_content("not json", "text/plain");
+                  return;
+                }
+                if (control == "invalid-json") {
+                  res.set_content("{not-json", "application/json");
+                  return;
+                }
+                if (control == "malformed") {
+                  res.set_content(R"({"networks":"not-an-array"})",
+                                  "application/json");
+                  return;
+                }
+                res.set_header("X-Protocol-Trace", "crypto-networks");
+                res.set_content(
+                    nlohmann::json{
+                        {"networks", nlohmann::json::array(
+                                         {"ethereum-mainnet", 42,
+                                          "solana-mainnet"})},
+                        {"seen_authorization",
+                         req.get_header_value("Authorization")}}
+                        .dump(),
+                    "application/json; charset=utf-8");
+              });
+
+    m_svr.Post(R"(/api/v1/crypto/rpc/(.*))",
+               [this](const httplib::Request& req, httplib::Response& res) {
+                 ++m_crypto_rpc_hits;
+                 constexpr std::array<int, 5> kErrorStatuses{400, 401, 402, 429,
+                                                              500};
+                 for (const int status : kErrorStatuses) {
+                   if (req.target != "/api/v1/crypto/rpc/status-" +
+                                         std::to_string(status))
+                     continue;
+                   res.status = status;
+                   res.set_header("X-Protocol-Trace", "crypto-rpc-error");
+                   if (status == 402)
+                     res.set_header("PAYMENT-REQUIRED",
+                                    "crypto-payment-requirements");
+                   res.set_content(R"({"error":"proxy refused"})", "text/plain");
+                   return;
+                 }
+                 if (req.target == "/api/v1/crypto/rpc/stall") {
+                   ++m_crypto_rpc_stall_hits;
+                   m_gate.wait(kStallCap);
+                 }
+                 if (req.target == "/api/v1/crypto/rpc/wrong-media") {
+                   res.set_content("wrong", "text/plain");
+                   return;
+                 }
+                 if (req.target == "/api/v1/crypto/rpc/invalid-json") {
+                   res.set_content("{not-json", "application/json");
+                   return;
+                 }
+                 if (req.target == "/api/v1/crypto/rpc/malformed") {
+                   res.set_content(R"({"jsonrpc":"2.0","result":true})",
+                                   "application/json");
+                   return;
+                 }
+
+                 const auto body = nlohmann::json::parse(req.body);
+                 const auto response_item = [&](const nlohmann::json& input,
+                                                std::size_t index) {
+                   auto output = nlohmann::json::object();
+                   output["jsonrpc"] = "2.0";
+                   output["id"] = input.value("id", nlohmann::json(nullptr));
+                   if (index == 1U) {
+                     output["error"] =
+                         {{"code", -32602}, {"message", "invalid params"}};
+                   } else {
+                     output["result"] = nlohmann::json{
+                         {"seen_target", req.target},
+                         {"seen_body", input},
+                         {"seen_raw_body", req.body},
+                         {"seen_authorization",
+                          req.get_header_value("Authorization")},
+                         {"seen_siwx", req.get_header_value("SIGN-IN-WITH-X")},
+                         {"seen_idempotency",
+                          req.get_header_value("Idempotency-Key")}};
+                   }
+                   return output;
+                 };
+
+                 nlohmann::json output;
+                 if (body.is_array()) {
+                   output = nlohmann::json::array();
+                   for (std::size_t i = 0; i < body.size(); ++i)
+                     output.push_back(response_item(body.at(i), i));
+                 } else if (req.target == "/api/v1/crypto/rpc/rpc-error") {
+                   output = nlohmann::json{{"jsonrpc", "2.0"},
+                                           {"id", body.value(
+                                                      "id", nlohmann::json(nullptr))},
+                                           {"error",
+                                            {{"code", -32601},
+                                             {"message", "method not found"}}}};
+                 } else {
+                   output = response_item(body, 0U);
+                 }
+                 res.set_header("X-Balance-Remaining", "4.230000");
+                 res.set_header("X-Venice-RPC-Credits", "20");
+                 res.set_header("X-Venice-RPC-Cost-USD", "0.00001400");
+                 res.set_header("X-Request-ID", "fixture-request-id");
+                 res.set_header("Idempotent-Replayed", "true");
+                 res.set_content(output.dump(), "application/json");
+               });
+
     m_svr.Get("/api/v1/billing/balance",
               [this](const httplib::Request& req, httplib::Response& res) {
                 ++m_billing_hits;
@@ -1731,6 +1841,12 @@ class TestServer {
   [[nodiscard]] auto augment_stall_hits() const -> int {
     return m_augment_stall_hits.load();
   }
+  [[nodiscard]] auto crypto_rpc_hits() const -> int {
+    return m_crypto_rpc_hits.load();
+  }
+  [[nodiscard]] auto crypto_rpc_stall_hits() const -> int {
+    return m_crypto_rpc_stall_hits.load();
+  }
   [[nodiscard]] auto last_transform() const -> CapturedTransform {
     const std::lock_guard<std::mutex> lock{m_transform_mu};
     return m_last_transform;
@@ -1786,6 +1902,8 @@ class TestServer {
   std::atomic<int> m_video_stall_hits{0};
   std::atomic<int> m_augment_hits{0};
   std::atomic<int> m_augment_stall_hits{0};
+  std::atomic<int> m_crypto_rpc_hits{0};
+  std::atomic<int> m_crypto_rpc_stall_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
   mutable std::mutex m_transform_mu;
   CapturedTransform m_last_transform{};
@@ -4762,4 +4880,183 @@ TEST_CASE("cancellation interrupts a stalled document parse",
   REQUIRE(elapsed < kPromptly);
   REQUIRE(server.augment_stall_hits() == 1);
   REQUIRE(server.augment_hits() == 1);
+}
+
+TEST_CASE("crypto RPC rejects impossible auth and structure before the socket",
+          "[transport][crypto-rpc][auth][failure]") {
+  const TestServer server;
+  const auto request = venice::crypto_rpc_input::request(
+      "eth_chainId", nlohmann::json::array(), nlohmann::json(1));
+  const Client public_client{Authentication::public_access(), server.base_url()};
+  const Client payment_client{Authentication::x402_payment("signed-payment"),
+                              server.base_url()};
+  const Client bearer{"rpc-key", server.base_url()};
+
+  REQUIRE_FALSE(public_client.crypto_rpc("ethereum-mainnet", request));
+  REQUIRE_FALSE(payment_client.crypto_rpc("ethereum-mainnet", request));
+  REQUIRE_FALSE(bearer.crypto_rpc("", request));
+  REQUIRE_FALSE(bearer.crypto_rpc("ethereum-mainnet", nlohmann::json("bad")));
+  REQUIRE(server.crypto_rpc_hits() == 0);
+}
+
+TEST_CASE("crypto RPC discovery is public tolerant and metadata-preserving",
+          "[transport][crypto-rpc][networks]") {
+  const TestServer server;
+  const Client public_client{Authentication::public_access(), server.base_url()};
+  const Client bearer{"rpc-key", server.base_url()};
+
+  const auto public_networks = public_client.crypto_rpc_networks();
+  REQUIRE(public_networks.has_value());
+  REQUIRE(public_networks->networks ==
+          std::vector<std::string>{"ethereum-mainnet", "solana-mainnet"});
+  REQUIRE(public_networks->raw["seen_authorization"] == "");
+  REQUIRE(public_networks->metadata.header("x-protocol-trace") ==
+          "crypto-networks");
+
+  const auto bearer_networks = bearer.crypto_rpc_networks();
+  REQUIRE(bearer_networks.has_value());
+  REQUIRE(bearer_networks->raw["seen_authorization"] == "Bearer rpc-key");
+
+  for (const std::string control : {"wrong-media", "invalid-json", "malformed"}) {
+    const auto result = public_client.crypto_rpc_networks(
+        {.idempotency_key = control});
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().is(ErrorKind::Parse));
+  }
+}
+
+TEST_CASE("crypto RPC sends exact path body auth and idempotency header",
+          "[transport][crypto-rpc][request]") {
+  const TestServer server;
+  const Client bearer{"rpc-key", server.base_url()};
+  const Client wallet{Authentication::sign_in_with_x("signed-rpc-wallet"),
+                      server.base_url()};
+  const auto request = venice::crypto_rpc_input::request(
+      "future_method", nlohmann::json{{"future", true}},
+      nlohmann::json("request-a"));
+
+  const auto response = bearer.crypto_rpc(
+      "future/net?x#%", request, {.idempotency_key = "fixture-key_1"});
+  REQUIRE(response.has_value());
+  const auto* item =
+      std::get_if<venice::CryptoRpcResponseItem>(&response->payload);
+  REQUIRE(item != nullptr);
+  REQUIRE(item->id == "request-a");
+  REQUIRE(item->result.has_value());
+  REQUIRE(item->result->at("seen_target") ==
+          "/api/v1/crypto/rpc/future%2Fnet%3Fx%23%25");
+  REQUIRE(item->result->at("seen_body") == request);
+  REQUIRE(item->result->at("seen_raw_body") == request.dump());
+  REQUIRE(item->result->at("seen_authorization") == "Bearer rpc-key");
+  REQUIRE(item->result->at("seen_siwx") == "");
+  REQUIRE(item->result->at("seen_idempotency") == "fixture-key_1");
+  REQUIRE_FALSE(request.contains("Idempotency-Key"));
+  REQUIRE(response->metadata.x_balance_remaining == "4.230000");
+  REQUIRE(response->metadata.header("X-Venice-RPC-Credits") == "20");
+  REQUIRE(response->metadata.header("X-Venice-RPC-Cost-USD") ==
+          "0.00001400");
+  REQUIRE(response->metadata.header("X-Request-ID") == "fixture-request-id");
+  REQUIRE(response->metadata.header("Idempotent-Replayed") == "true");
+
+  const auto wallet_response = wallet.crypto_rpc("ethereum-mainnet", request);
+  REQUIRE(wallet_response.has_value());
+  const auto* wallet_item =
+      std::get_if<venice::CryptoRpcResponseItem>(&wallet_response->payload);
+  REQUIRE(wallet_item != nullptr);
+  REQUIRE(wallet_item->result->at("seen_authorization") == "");
+  REQUIRE(wallet_item->result->at("seen_siwx") == "signed-rpc-wallet");
+}
+
+TEST_CASE("crypto RPC preserves batch order and HTTP-200 application errors",
+          "[transport][crypto-rpc][response]") {
+  const TestServer server;
+  const Client client{"rpc-key", server.base_url()};
+  const auto first = venice::crypto_rpc_input::request(
+      "eth_chainId", nlohmann::json::array(), nlohmann::json(1));
+  const auto second = venice::crypto_rpc_input::request(
+      "future_method", nlohmann::json::array(), nlohmann::json("two"));
+
+  const auto batch = client.crypto_rpc(
+      "ethereum-mainnet", venice::crypto_rpc_input::batch({first, second}));
+  REQUIRE(batch.has_value());
+  const auto* items =
+      std::get_if<std::vector<venice::CryptoRpcResponseItem>>(&batch->payload);
+  REQUIRE(items != nullptr);
+  REQUIRE(items->size() == 2);
+  REQUIRE(items->at(0).id == 1);
+  REQUIRE(items->at(0).result.has_value());
+  REQUIRE(items->at(0).result->at("seen_raw_body") ==
+          venice::crypto_rpc_input::batch({first, second}).dump());
+  REQUIRE(items->at(1).id == "two");
+  REQUIRE(items->at(1).error->at("code") == -32602);
+
+  const auto rpc_error = client.crypto_rpc("rpc-error", first);
+  REQUIRE(rpc_error.has_value());
+  const auto* error_item =
+      std::get_if<venice::CryptoRpcResponseItem>(&rpc_error->payload);
+  REQUIRE(error_item != nullptr);
+  REQUIRE(error_item->error->at("code") == -32601);
+}
+
+TEST_CASE("crypto RPC status errors win over media and shape failures parse",
+          "[transport][crypto-rpc][failure]") {
+  const TestServer server;
+  const Client client{"rpc-key", server.base_url()};
+  const auto request = venice::crypto_rpc_input::request(
+      "eth_chainId", nlohmann::json::array(), nlohmann::json(1));
+  struct StatusCase {
+    int status;
+    ErrorKind kind;
+  };
+  const std::array statuses{StatusCase{400, ErrorKind::Http},
+                            StatusCase{401, ErrorKind::Auth},
+                            StatusCase{402, ErrorKind::PaymentRequired},
+                            StatusCase{429, ErrorKind::RateLimited},
+                            StatusCase{500, ErrorKind::Http}};
+  for (const auto& test : statuses) {
+    const auto result = client.crypto_rpc(
+        "status-" + std::to_string(test.status), request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == test.kind);
+    REQUIRE(result.error().status == test.status);
+    REQUIRE(result.error().body == R"({"error":"proxy refused"})");
+    REQUIRE(result.error().metadata.header("x-protocol-trace") ==
+            "crypto-rpc-error");
+    if (test.status == 402)
+      REQUIRE(result.error().metadata.payment_required ==
+              "crypto-payment-requirements");
+  }
+
+  for (const std::string network : {"wrong-media", "invalid-json", "malformed"}) {
+    const auto result = client.crypto_rpc(network, request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().is(ErrorKind::Parse));
+    REQUIRE(result.error().status == 200);
+  }
+}
+
+TEST_CASE("cancellation interrupts a stalled crypto RPC call",
+          "[transport][crypto-rpc][cancel][failure]") {
+  const TestServer server;
+  const Client client{"rpc-key", server.base_url()};
+  venice::CancelToken token;
+  std::thread canceller{[&] {
+    while (server.crypto_rpc_stall_hits() == 0)
+      std::this_thread::sleep_for(5ms);
+    token.cancel();
+  }};
+
+  std::expected<venice::CryptoRpcResponse, venice::Error> result;
+  const auto elapsed = timed([&] {
+    result = client.crypto_rpc(
+        "stall",
+        venice::crypto_rpc_input::request(
+            "eth_chainId", nlohmann::json::array(), nlohmann::json(1)),
+        {.cancel = &token});
+  });
+  canceller.join();
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().is(ErrorKind::Cancelled));
+  REQUIRE(elapsed < kPromptly);
+  REQUIRE(server.crypto_rpc_stall_hits() == 1);
 }

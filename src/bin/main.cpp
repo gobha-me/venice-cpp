@@ -801,7 +801,76 @@ auto augment_report(const venice::Client &client) -> int {
   return agrees ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-// ── image transformations (VC-41, #66) ──────────────────────────────────
+// ── crypto RPC (VC-33, #48) ──────────────────────────────────
+//
+// This first proves public discovery with a per-call auth override, then makes
+// one minimal read-only EVM call and an identical idempotent replay. The first
+// call is billed; no transaction is signed or submitted.
+auto crypto_rpc_report(const venice::Client& client) -> int {
+  const auto networks = client.crypto_rpc_networks(
+      {.authentication = venice::Authentication::public_access()});
+  if (!networks) {
+    std::cerr << "crypto RPC network discovery failed ["
+              << venice::to_string(networks.error().kind) << "] "
+              << networks.error().message << '\n';
+    return EXIT_FAILURE;
+  }
+
+  constexpr std::string_view kNetwork = "ethereum-mainnet";
+  if (std::find(networks->networks.begin(), networks->networks.end(), kNetwork) ==
+      networks->networks.end()) {
+    std::cerr << kNetwork << " is absent from " << networks->networks.size()
+              << " advertised crypto RPC networks\n";
+    return EXIT_FAILURE;
+  }
+  std::cerr << "crypto RPC networks: " << networks->networks.size()
+            << "; selected " << kNetwork << '\n';
+
+  const auto request = venice::crypto_rpc_input::request(
+      "eth_chainId", nlohmann::json::array(), nlohmann::json(1));
+  const venice::RequestOptions opts{
+      .idempotency_key = "vc33-crypto-rpc-chain-id-smoke"};
+  const auto first = client.crypto_rpc(kNetwork, request, opts);
+  if (!first) {
+    std::cerr << "crypto RPC failed [" << venice::to_string(first.error().kind)
+              << "] " << first.error().message << '\n';
+    if (!first.error().body.empty()) std::cerr << first.error().body << '\n';
+    return EXIT_FAILURE;
+  }
+  const auto replay = client.crypto_rpc(kNetwork, request, opts);
+  if (!replay) {
+    std::cerr << "crypto RPC replay failed ["
+              << venice::to_string(replay.error().kind) << "] "
+              << replay.error().message << '\n';
+    return EXIT_FAILURE;
+  }
+
+  const auto* item = std::get_if<venice::CryptoRpcResponseItem>(&first->payload);
+  const auto* replay_item =
+      std::get_if<venice::CryptoRpcResponseItem>(&replay->payload);
+  if (item == nullptr || replay_item == nullptr || !item->result ||
+      !replay_item->result || item->id != nlohmann::json(1) ||
+      replay_item->id != item->id || replay_item->result != item->result ||
+      item->raw != first->raw) {
+    std::cerr << "crypto RPC raw/typed or replay mismatch\n";
+    return EXIT_FAILURE;
+  }
+  if (replay->metadata.header("Idempotent-Replayed") != "true") {
+    std::cerr << "crypto RPC replay lacked Idempotent-Replayed: true\n";
+    return EXIT_FAILURE;
+  }
+
+  std::cerr << "eth_chainId result: " << item->result->dump()
+            << "; raw/typed=agree; replay=confirmed";
+  if (const auto credits = first->metadata.header("X-Venice-RPC-Credits"))
+    std::cerr << "; credits=" << *credits;
+  if (const auto cost = first->metadata.header("X-Venice-RPC-Cost-USD"))
+    std::cerr << "; cost_usd=" << *cost;
+  std::cerr << '\n';
+  return EXIT_SUCCESS;
+}
+
+// ── image transformations (VC-41, #66) ─────────────────────────────────
 //
 // A valid 256x256 solid-colour PNG, kept as base64 so the smoke leg performs
 // no decode and no filesystem I/O. Every operation receives the same owned
@@ -2618,7 +2687,7 @@ auto main(int argc, char** argv) -> int {
     std::cerr << "VENICE_API_KEY not set; nothing to call with a credential.\n"
                  "(--traits, --compat, --modality and --styles need no key;\n"
                  " --embeddings, --image, --image-transform, --audio, --video, "
-                 "--augment,\n"
+                 "--augment, --crypto-rpc,\n"
                  " --billing and\n"
                  " --api-keys need a key.)\n";
     return EXIT_SUCCESS;
@@ -2645,6 +2714,7 @@ auto main(int argc, char** argv) -> int {
   if (leg == "--video") return video_report(client, arg);
   if (leg == "--augment")
     return augment_report(client);
+  if (leg == "--crypto-rpc") return crypto_rpc_report(client);
   if (leg == "--billing") return billing_report(client, arg);
   if (leg == "--api-keys") return api_keys_report(client);
 

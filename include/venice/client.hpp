@@ -29,6 +29,8 @@
 //   * parse_document(req)           -> expected<DocumentParseResult>
 //   * scrape_web(req)               -> expected<WebScrapeResponse>
 //   * search_web(req)               -> expected<WebSearchResponse>
+//   * crypto_rpc_networks()         -> expected<CryptoRpcNetworks>
+//   * crypto_rpc(network, payload)  -> expected<CryptoRpcResponse>
 //   * models()                      -> expected<vector<Model>>
 //   * model_traits(type)            -> expected<ModelTraits>
 //   * model_compatibility_mapping(type)
@@ -1497,7 +1499,54 @@ class Client {
     }
   }
 
-  // ── models ────────────────────────────────────────────────────────────
+  // ── crypto RPC ────────────────────────────────────────────────────────────
+  //
+  // Discovery is public and remains usable from a Bearer-configured client;
+  // the proxy itself accepts Bearer or pre-signed SIWX authentication. JSON-RPC
+  // application errors remain successful values when HTTP itself succeeded.
+  [[nodiscard]] auto crypto_rpc_networks(const RequestOptions& opts = {}) const
+      -> std::expected<CryptoRpcNetworks, Error> {
+    auto response = get_json_response("/crypto/rpc/networks",
+                                      detail::AuthPolicy::PublicOrBearer, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    try {
+      auto parsed = crypto_rpc_networks_from_json_body(response->body);
+      parsed.metadata = std::move(response->metadata);
+      return parsed;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"crypto RPC networks parse: "} + e.what(),
+                                   response->raw_body, std::move(response->metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto crypto_rpc(std::string_view network,
+                                const nlohmann::json& payload,
+                                const RequestOptions& opts = {}) const
+      -> std::expected<CryptoRpcResponse, Error> {
+    if (network.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "crypto RPC network must not be empty", {}}};
+    if (!payload.is_object() && !payload.is_array())
+      return std::unexpected{Error{ErrorKind::InvalidArg, 0,
+                                   "crypto RPC payload must be an object or array", {}}};
+
+    auto response = post_json_response(
+        detail::with_path_segment("/crypto/rpc", network), payload,
+        detail::AuthPolicy::BearerOrSignInWithX, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    try {
+      auto parsed = crypto_rpc_from_json_body(response->body);
+      parsed.metadata = std::move(response->metadata);
+      return parsed;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{ErrorKind::Parse, response->status,
+                                   std::string{"crypto RPC parse: "} + e.what(),
+                                   response->raw_body, std::move(response->metadata)}};
+    }
+  }
+
+  // ── models ────────────────────────────────────────────────────────────────────
   //
   // Only the shape of the *response* can fail here; individual entries degrade
   // instead. The parse itself is venice::models_from_json_body, deliberately
@@ -2565,7 +2614,11 @@ class Client {
               " authentication",
           {}}};
     }
-    return detail::authentication_headers(authentication);
+    auto headers = detail::authentication_headers(authentication);
+    if (!headers) return std::unexpected{std::move(headers.error())};
+    if (opts.idempotency_key)
+      headers->emplace("Idempotency-Key", *opts.idempotency_key);
+    return headers;
   }
 
   // Both typed JSON helpers route through detail::send_buffered and retain the

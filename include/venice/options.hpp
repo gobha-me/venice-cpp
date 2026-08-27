@@ -107,7 +107,7 @@ class CancelToken {
 // allocation and an atomic refcount on every caller to model an ownership
 // transfer that never happens.
 //
-// Every member carries an explicit default initializer, including the four
+// Every member carries an explicit default initializer, including the five
 // std::optionals that would default-construct empty anyway. That is not
 // redundancy — it is what makes the designated-initializer spelling this type
 // is designed for usable at all. Without them, GCC's
@@ -125,6 +125,10 @@ struct RequestOptions {
   // timeout and cancel fields above, this is transport state and is never
   // serialized into a request body.
   std::optional<Authentication> authentication = std::nullopt;
+  // Optional request identity for endpoints that support safe replay. This is
+  // emitted only as Idempotency-Key; Venice owns its accepted syntax and the
+  // library never copies it into a JSON body or diagnostic.
+  std::optional<std::string> idempotency_key = std::nullopt;
 };
 
 namespace detail {

@@ -51,6 +51,9 @@ AGENTS.md (which holds standing conventions, not state).
 - `parse_document`, `scrape_web` and `search_web` — the complete Augment
   family, with owned multipart bytes, actual-media JSON/text selection, ordered
   tolerant search results and verbatim provider metadata (VC-32).
+- `crypto_rpc_networks` and `crypto_rpc` — public ordered network discovery and
+  a Bearer/SIWX JSON-RPC proxy with exact single/batch correlation, header-only
+  idempotency and response metadata (VC-33).
 - `billing_balance`, `billing_usage_analytics` and `billing_usage_history` —
   typed account balances and aggregates plus ordered cursor history in JSON or
   byte-exact CSV, routed by actual response media type (VC-42). Verified with an
@@ -74,8 +77,8 @@ AGENTS.md (which holds standing conventions, not state).
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 42/49 operations implemented. One retired operation is
-  explicitly unsupported and the other 6 are assigned to family issues and
+- OpenAPI coverage: 44/49 operations implemented. One retired operation is
+  explicitly unsupported and the other 4 are assigned to family issues and
   checked in `cmake/openapi_manifest.json` (VC-35). Characters
   and Models are both 3/3 on operations, and since VC-39 the `Model` metadata
   half is done too. Audio now consumes a typed music policy view; ASR carries
@@ -118,6 +121,28 @@ a single-family run.
    retries/backoff, high-level async). Driven by real use, not speculatively.
 3. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-33 (#48) is implemented for v0.27.0.** Public network discovery accepts a
+Public or Bearer client and preserves the observed `networks` envelope while
+tolerating junk listing entries. The proxy accepts open JSON-RPC request objects
+or ordered batches, encodes the caller's network as one path segment and allows
+Bearer or pre-signed SIWX authentication. Method-specific params, results and
+application errors remain raw JSON; HTTP-200 `error` items are successful
+transport results rather than `venice::Error`.
+
+`RequestOptions::idempotency_key` emits only the audited `Idempotency-Key`
+header. Exact response IDs, batch order, charge/cost/request/replay headers and
+x402 metadata remain reachable. Offline matrices cover builders, tolerant
+discovery, loud response parsing, auth and structure guards, encoding, status
+precedence, media/JSON failures, application errors, cancellation and metadata.
+The checked OpenAPI source remains `20260826.105305` / `0daa64c8…`; coverage is
+44/49.
+
+Live on 2026-08-27, public discovery returned 27 ordered networks. The safe
+`--crypto-rpc` leg selected `ethereum-mainnet`, received chain id `0x1` from a
+read-only `eth_chainId` request, and confirmed the identical cached replay via
+`Idempotent-Replayed: true`. The first response reported 20 credits and
+$0.00001400; no transaction was signed or submitted.
 
 **VC-32 (#47) is implemented for v0.26.0.** All three Augment operations are
 typed. `parse_document` owns multipart bytes plus filename/media type and routes
