@@ -206,6 +206,14 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   normalized `Content-Type`; transcription is typed JSON or exact plain text.
   Provider-shaped `elements`, keyframes and legal `consents` stay raw JSON, and
   a smoke leg may consult the catalogue and quote but must never enqueue work.
+- **Augment returns source material directly; it is not a chat flag.** Document
+  parsing owns multipart bytes and selects typed JSON versus exact text from the
+  actual successful Content-Type. Scrape and search keep separate request and
+  response types, ordered tolerant result fields and verbatim provider objects.
+  Provider names, limits, response formats and URL policy stay server-owned.
+  Never print uploaded or returned content in the live leg, and describe
+  Venice's retention statement as server behavior rather than a local
+  secure-erasure guarantee.
 - **Braces build arrays, parentheses build scalars.** `nlohmann::json{"auto"}` is
   `["auto"]`; `nlohmann::json("auto")` is `"auto"`. Both compile, so only an
   `is_string()`-style assertion catches the wrong one. The *object* builders

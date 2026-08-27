@@ -591,8 +591,11 @@
       "method": "POST",
       "path": "/augment/scrape",
       "family": "augment",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 47,
+      "public_api": [
+        "Client::scrape_web"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -632,8 +635,11 @@
       "method": "POST",
       "path": "/augment/search",
       "family": "augment",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 47,
+      "public_api": [
+        "Client::search_web"
+      ],
       "security": [
         [
           "BearerAuth"
@@ -673,8 +679,11 @@
       "method": "POST",
       "path": "/augment/text-parser",
       "family": "augment",
-      "state": "planned",
+      "state": "implemented",
       "tracking_issue": 47,
+      "public_api": [
+        "Client::parse_document"
+      ],
       "security": [
         [
           "BearerAuth"

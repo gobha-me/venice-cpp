@@ -48,6 +48,9 @@ AGENTS.md (which holds standing conventions, not state).
   `transcribe_video` — the complete Video family, with explicit paid-work and
   deletion boundaries, JSON/MP4 and JSON/text result unions, and no hidden
   polling or media I/O (VC-29).
+- `parse_document`, `scrape_web` and `search_web` — the complete Augment
+  family, with owned multipart bytes, actual-media JSON/text selection, ordered
+  tolerant search results and verbatim provider metadata (VC-32).
 - `billing_balance`, `billing_usage_analytics` and `billing_usage_history` —
   typed account balances and aggregates plus ordered cursor history in JSON or
   byte-exact CSV, routed by actual response media type (VC-42). Verified with an
@@ -71,8 +74,8 @@ AGENTS.md (which holds standing conventions, not state).
   raw body and response metadata when a response exists.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
-- OpenAPI coverage: 39/49 operations implemented. One retired operation is
-  explicitly unsupported and the other 9 are assigned to family issues and
+- OpenAPI coverage: 42/49 operations implemented. One retired operation is
+  explicitly unsupported and the other 6 are assigned to family issues and
   checked in `cmake/openapi_manifest.json` (VC-35). Characters
   and Models are both 3/3 on operations, and since VC-39 the `Model` metadata
   half is done too. Audio now consumes a typed music policy view; ASR carries
@@ -115,6 +118,28 @@ a single-family run.
    retries/backoff, high-level async). Driven by real use, not speculatively.
 3. KDE integration (later leg) — a D-Bus/Qt service layer on top of this
    client (KRunner plugin first). Qt types stay OUT of this library.
+
+**VC-32 (#47) is implemented for v0.26.0.** All three Augment operations are
+typed. `parse_document` owns multipart bytes plus filename/media type and routes
+successful JSON versus exact plain text from the actual normalized Content-Type.
+`scrape_web` types URL/content/format; `search_web` keeps ordered results with
+tolerant optional display fields and a verbatim object per result.
+
+Bearer and SIWX auth, cancellation, timeouts, payment metadata and response
+metadata use the shared buffered transport. Local guards reject only empty
+required upload/URL/query structure; response formats, providers, limits and URL
+policy remain server-owned. The OpenAPI content pin remains
+`20260826.105305` / `0daa64c8…`, and coverage is 42/49.
+
+Offline matrices cover modeled-wins JSON, byte-exact multipart data, all three
+targets, auth boundaries, documented status families plus 415, status-before-
+media classification, malformed JSON/shapes, wrong or missing success media,
+metadata and cancellation. `--augment` uses synthetic/public inputs and prints
+only sizes, counts and raw/typed agreement; it never prints or saves source
+content and does not claim local secure erasure from Venice's retention policy.
+Live on 2026-08-27, its three minimal calls passed with raw/typed agreement:
+document JSON (31 chars / 10 tokens), markdown scrape (167 chars), and one usable
+search result of one returned.
 
 **VC-29 (#44) is implemented for v0.25.0.** All five Video operations are
 typed: Bearer-only quote, Bearer/SIWX queue/retrieve/cleanup, and URL
