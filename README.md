@@ -82,6 +82,10 @@ right bridge.
   plus direct web scrape and ordered web search calls. Stable render fields are
   typed, provider metadata remains in `raw`, and the client never writes or
   retains uploaded documents.
+- **Crypto RPC** — public supported-network discovery plus a Bearer/SIWX
+  JSON-RPC 2.0 proxy for single calls or ordered batches. Method-specific
+  params/results stay raw and forward-compatible; HTTP-200 JSON-RPC errors,
+  billing headers and x402 balance metadata remain directly inspectable.
 - **Account billing** (`/billing/balance`, `/billing/usage-analytics`,
   `/billing/usage-history`) — typed balance and aggregate views plus ordered,
   cursor-paged ledger history. History can return typed JSON or byte-exact CSV,
@@ -101,7 +105,7 @@ right bridge.
   `RequestOptions` with connect/read/write timeout overrides and a
   `CancelToken` that aborts an in-flight request from another thread, including
   one that has received nothing at all, plus an optional authentication
-  override for that call.
+  override and header-only idempotency key for that call.
 - **Error model** — `std::expected<T, venice::Error>`; network / HTTP / parse /
   auth / payment-required / rate-limit / invalid-arg / cancelled. Response
   failures carry status, raw body and response metadata, including x402 headers.
@@ -111,7 +115,7 @@ workflow helpers.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 42/49 operations implemented.
+OpenAPI coverage: 44/49 operations implemented.
 
 One additional published operation is explicitly unsupported:
 `GET /billing/usage` already returns 410 for every request and points callers
@@ -469,6 +473,35 @@ local secure-erasure guarantee.
 Live on 2026-08-27, `--augment` parsed the synthetic document as JSON, scraped
 `example.com` as markdown and returned one search result; all three typed views
 agreed with their retained raw responses. The leg printed no source content.
+
+### Crypto RPC
+
+Network discovery is public. The proxy accepts arbitrary JSON-RPC method
+parameters and returns a typed single/batch discriminator while preserving each
+method-specific result or error as raw JSON:
+
+```cpp
+const auto networks = client.crypto_rpc_networks(
+    {.authentication = venice::Authentication::public_access()});
+
+const auto call = venice::crypto_rpc_input::request(
+    "eth_chainId", nlohmann::json::array(), nlohmann::json(1));
+const auto response = client.crypto_rpc(
+    "ethereum-mainnet", call, {.idempotency_key = "chain-id-check-1"});
+if (!response) return;
+```
+
+An HTTP 200 item containing `error` is a successful proxy transport result and
+remains inspectable beside `result`; HTTP failures still use `venice::Error`.
+IDs and batch ordering are exact. `ResponseMetadata` retains RPC charge, cost,
+request/replay and x402 balance headers. Network and method names, the maximum
+batch size and idempotency-key syntax remain Venice policy rather than client
+enums or duplicated range guards.
+
+Live on 2026-08-27, public discovery returned 27 ordered networks. The smoke leg
+selected `ethereum-mainnet`, received `0x1` from `eth_chainId`, and confirmed an
+identical replay through `Idempotent-Replayed: true`; the first call reported 20
+credits and $0.00001400. It submitted no transaction.
 
 **`response_format` is raw JSON, not an enum.** The API accepts both
 `{"type":"json_object"}` and a full `{"type":"json_schema", …}` block, and no
@@ -1032,6 +1065,9 @@ using namespace std::chrono_literals;
 auto models = client.models("all", {.connect_timeout = 5s, .read_timeout = 10s});
 ```
 
+`RequestOptions::idempotency_key` is emitted only as `Idempotency-Key`. It is
+never serialized into request JSON or copied into an error message.
+
 Cancellation needs a second thread, necessarily: the calling thread is blocked
 inside the transport, so nothing on it can run.
 
@@ -1243,7 +1279,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.26.0)
+  GIT_TAG        v0.27.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -1420,6 +1456,7 @@ VENICE_API_KEY=... venice-cpp --image-transform [model] # v0.20.0: four transfor
 VENICE_API_KEY=... venice-cpp --audio [tts] [asr] [music] # v0.24.0: speech + transcription + quote
 VENICE_API_KEY=... venice-cpp --video [model]             # v0.25.0: catalogue + quote only
 VENICE_API_KEY=... venice-cpp --augment                   # v0.26.0: three minimal billed calls
+VENICE_API_KEY=... venice-cpp --crypto-rpc                # v0.27.0: discovery + read-only RPC/replay
 VENICE_API_KEY=... venice-cpp --billing [lookback] # v0.21.0: balance + analytics + history
 VENICE_API_KEY=... venice-cpp --api-keys          # v0.22.0: read-only keys + rate limits
 

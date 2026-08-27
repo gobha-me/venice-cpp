@@ -2272,6 +2272,131 @@ namespace detail {
   return response;
 }
 
+// ── crypto RPC ─────────────────────────────────────────────────────────────────
+//
+// Method-specific JSON-RPC params and results are caller/provider-authored, so
+// raw json is the forward-compatible floor. The builders below make the fixed
+// JSON-RPC 2.0 envelope easy to spell without closing the method universe.
+
+namespace crypto_rpc_input {
+
+[[nodiscard]] inline auto request(
+    std::string method, nlohmann::json params = nlohmann::json::array(),
+    std::optional<nlohmann::json> id = std::nullopt) -> nlohmann::json {
+  auto body = nlohmann::json::object();
+  body["jsonrpc"] = "2.0";
+  body["method"] = std::move(method);
+  body["params"] = std::move(params);
+  if (id) body["id"] = std::move(*id);
+  return body;
+}
+
+[[nodiscard]] inline auto batch(std::vector<nlohmann::json> requests)
+    -> nlohmann::json {
+  return nlohmann::json(std::move(requests));
+}
+
+}  // namespace crypto_rpc_input
+
+struct CryptoRpcNetworks {
+  std::vector<std::string> networks{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+struct CryptoRpcResponseItem {
+  std::string jsonrpc{};
+  nlohmann::json id{};
+  std::optional<nlohmann::json> result{};
+  std::optional<nlohmann::json> error{};
+  nlohmann::json raw{};
+};
+
+using CryptoRpcPayload =
+    std::variant<CryptoRpcResponseItem, std::vector<CryptoRpcResponseItem>>;
+
+struct CryptoRpcResponse {
+  CryptoRpcPayload payload{};
+  ResponseMetadata metadata{};
+  nlohmann::json raw{};
+};
+
+[[nodiscard]] inline auto crypto_rpc_networks_from_json_body(
+    const nlohmann::json& j) -> CryptoRpcNetworks {
+  const nlohmann::json* values = nullptr;
+  if (j.is_array()) {
+    values = &j;
+  } else if (j.is_object()) {
+    const auto it = j.find("networks");
+    if (it != j.end() && it->is_array()) values = &*it;
+  }
+  if (values == nullptr)
+    throw std::runtime_error{"crypto RPC networks: response has no networks array"};
+
+  CryptoRpcNetworks response;
+  response.raw = j;
+  response.networks.reserve(values->size());
+  for (const auto& value : *values)
+    if (value.is_string()) response.networks.push_back(value.get<std::string>());
+  return response;
+}
+
+namespace detail {
+
+[[nodiscard]] inline auto crypto_rpc_response_item_from_json(
+    const nlohmann::json& j) -> CryptoRpcResponseItem {
+  if (!j.is_object())
+    throw std::runtime_error{"crypto RPC response item must be an object"};
+
+  const auto version = j.find("jsonrpc");
+  if (version == j.end() || !version->is_string() ||
+      version->get_ref<const std::string&>() != "2.0")
+    throw std::runtime_error{"crypto RPC response jsonrpc must be \"2.0\""};
+
+  const auto id = j.find("id");
+  if (id == j.end() ||
+      !(id->is_string() || id->is_number_integer() || id->is_null()))
+    throw std::runtime_error{
+        "crypto RPC response id must be a string, integer or null"};
+
+  const auto result = j.find("result");
+  const auto error = j.find("error");
+  if ((result == j.end()) == (error == j.end()))
+    throw std::runtime_error{
+        "crypto RPC response item must contain exactly one of result or error"};
+  if (error != j.end() && !error->is_object())
+    throw std::runtime_error{"crypto RPC response error must be an object"};
+
+  CryptoRpcResponseItem item;
+  item.jsonrpc = version->get<std::string>();
+  item.id = *id;
+  if (result != j.end()) item.result = *result;
+  if (error != j.end()) item.error = *error;
+  item.raw = j;
+  return item;
+}
+
+}  // namespace detail
+
+[[nodiscard]] inline auto crypto_rpc_from_json_body(const nlohmann::json& j)
+    -> CryptoRpcResponse {
+  CryptoRpcResponse response;
+  response.raw = j;
+  if (j.is_object()) {
+    response.payload = detail::crypto_rpc_response_item_from_json(j);
+    return response;
+  }
+  if (!j.is_array())
+    throw std::runtime_error{"crypto RPC response must be an object or array"};
+
+  std::vector<CryptoRpcResponseItem> items;
+  items.reserve(j.size());
+  for (const auto& item : j)
+    items.push_back(detail::crypto_rpc_response_item_from_json(item));
+  response.payload = std::move(items);
+  return response;
+}
+
 // ── money ─────────────────────────────────────────────────────────────────
 //
 // Venice quotes every amount in two currencies at once: USD and `diem`, its
