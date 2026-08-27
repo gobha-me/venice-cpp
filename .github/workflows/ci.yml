@@ -81,7 +81,10 @@ jobs:
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
 
       - name: Build
-        run: cmake --build build --parallel
+        # Sanitized header-heavy translation units can exhaust the 16 GiB
+        # runner when CMake fans out to every reported CPU. Keep the matrix
+        # parallel across jobs, but bound each individual build.
+        run: cmake --build build --parallel 2
 
       - name: Test
         # Runs the offline Catch2 suites (01client, 30sanitizer-smoke), the
@@ -128,6 +131,7 @@ jobs:
       - name: Verify all three consumption modes
         env:
           CXX: ${{ matrix.cxx }}
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
           # VENICE_DEPS_CACHE is deliberately unset: fetching the dependencies for
           # real is part of what this job tests.
         run: ./example/consumer/verify.sh
