@@ -31,6 +31,9 @@
 //   * search_web(req)               -> expected<WebSearchResponse>
 //   * crypto_rpc_networks()         -> expected<CryptoRpcNetworks>
 //   * crypto_rpc(network, payload)  -> expected<CryptoRpcResponse>
+//   * x402_balance(wallet)          -> expected<X402Balance>
+//   * x402_top_up()                 -> expected<X402TopUpResult>
+//   * x402_transactions(wallet)     -> expected<X402TransactionPage>
 //   * models()                      -> expected<vector<Model>>
 //   * model_traits(type)            -> expected<ModelTraits>
 //   * model_compatibility_mapping(type)
@@ -403,7 +406,14 @@ struct JsonResponse {
   ResponseMetadata metadata = {};
 };
 
-enum class AuthPolicy { PublicOnly, PublicOrBearer, BearerOnly, BearerOrSignInWithX };
+enum class AuthPolicy {
+  PublicOnly,
+  PublicOrBearer,
+  BearerOnly,
+  BearerOrSignInWithX,
+  SignInWithXOnly,
+  PublicOrX402Payment,
+};
 
 [[nodiscard]] inline auto authentication_headers(const Authentication& authentication)
     -> std::expected<httplib::Headers, Error> {
@@ -436,6 +446,10 @@ enum class AuthPolicy { PublicOnly, PublicOrBearer, BearerOnly, BearerOrSignInWi
     case AuthPolicy::BearerOnly: return kind == AuthenticationKind::Bearer;
     case AuthPolicy::BearerOrSignInWithX:
       return kind == AuthenticationKind::Bearer || kind == AuthenticationKind::SignInWithX;
+    case AuthPolicy::SignInWithXOnly:
+      return kind == AuthenticationKind::SignInWithX;
+    case AuthPolicy::PublicOrX402Payment:
+      return kind == AuthenticationKind::Public || kind == AuthenticationKind::X402Payment;
   }
   return false;
 }
@@ -446,6 +460,8 @@ enum class AuthPolicy { PublicOnly, PublicOrBearer, BearerOnly, BearerOrSignInWi
     case AuthPolicy::PublicOrBearer: return "public or Bearer";
     case AuthPolicy::BearerOnly: return "Bearer";
     case AuthPolicy::BearerOrSignInWithX: return "Bearer or Sign-In-With-X";
+    case AuthPolicy::SignInWithXOnly: return "Sign-In-With-X";
+    case AuthPolicy::PublicOrX402Payment: return "public or x402 payment";
   }
   return "supported";
 }
@@ -620,11 +636,8 @@ template <std::size_t N>
                                metadata_from_headers(response.headers)}};
 }
 
-[[nodiscard]] inline auto decode_json(const BufferedResponse& response)
+[[nodiscard]] inline auto decode_json_content(const BufferedResponse& response)
     -> std::expected<nlohmann::json, Error> {
-  if (response.status < 200 || response.status >= 300)
-    return std::unexpected{
-        http_error(response.status, response.body, metadata_from_headers(response.headers))};
   if (!is_json_media_type(response.content_type)) {
     const std::string actual = response.content_type.empty() ? "<missing>" : response.content_type;
     return std::unexpected{Error{ErrorKind::Parse, response.status,
@@ -638,6 +651,14 @@ template <std::size_t N>
                                  std::string{"json parse: "} + e.what(), response.body,
                                  metadata_from_headers(response.headers)}};
   }
+}
+
+[[nodiscard]] inline auto decode_json(const BufferedResponse& response)
+    -> std::expected<nlohmann::json, Error> {
+  if (response.status < 200 || response.status >= 300)
+    return std::unexpected{
+        http_error(response.status, response.body, metadata_from_headers(response.headers))};
+  return decode_json_content(response);
 }
 
 [[nodiscard]] inline auto decode_json_response(const BufferedResponse& response)
@@ -1543,6 +1564,101 @@ class Client {
       return std::unexpected{Error{ErrorKind::Parse, response->status,
                                    std::string{"crypto RPC parse: "} + e.what(),
                                    response->raw_body, std::move(response->metadata)}};
+    }
+  }
+
+  // ── x402 wallet balance, top-up and transactions ─────────────────────
+  //
+  // Balance and transaction history require a caller-produced SIWX proof for
+  // the same wallet named in the path. The client sends the proof but does not
+  // verify that relationship locally; Venice owns EVM/Solana address policy and
+  // the cryptographic check. An empty address is the only structural path error
+  // that cannot be sent meaningfully.
+  [[nodiscard]] auto x402_balance(
+      std::string_view wallet_address,
+      const RequestOptions& opts = {}) const
+      -> std::expected<X402Balance, Error> {
+    if (wallet_address.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "x402 wallet address must not be empty", {}}};
+
+    auto response = get_json_response(
+        detail::with_path_segment("/x402/balance", wallet_address),
+        detail::AuthPolicy::SignInWithXOnly, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    try {
+      auto parsed = x402_balance_from_json_body(response->body);
+      parsed.metadata = std::move(response->metadata);
+      return parsed;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{
+          ErrorKind::Parse, response->status,
+          std::string{"x402 balance parse: "} + e.what(), response->raw_body,
+          std::move(response->metadata)}};
+    }
+  }
+
+  // One method owns both intentional top-up outcomes. Public authentication
+  // sends a genuinely empty POST and a 402 is a successful requirements value;
+  // Authentication::x402_payment sends only PAYMENT-SIGNATURE and a 200 is a
+  // receipt. Status, not the selected auth mode, chooses the result so a paid
+  // attempt that needs new requirements remains actionable without becoming an
+  // opaque Error. Every other non-2xx status keeps the shared error semantics.
+  [[nodiscard]] auto x402_top_up(const RequestOptions& opts = {}) const
+      -> std::expected<X402TopUpResult, Error> {
+    auto response = request_json_raw_response(
+        detail::HttpMethod::Post, "/x402/top-up", nullptr,
+        detail::AuthPolicy::PublicOrX402Payment, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    if (response->status != 200 && response->status != 402)
+      return std::unexpected{detail::http_error(
+          response->status, response->body,
+          detail::metadata_from_headers(response->headers))};
+
+    auto body = detail::decode_json_content(*response);
+    if (!body) return std::unexpected{std::move(body.error())};
+    auto metadata = detail::metadata_from_headers(response->headers);
+    try {
+      if (response->status == 402) {
+        auto parsed = x402_payment_requirements_from_json_body(*body);
+        parsed.metadata = std::move(metadata);
+        return X402TopUpResult{std::move(parsed)};
+      }
+      auto parsed = x402_top_up_receipt_from_json_body(*body);
+      parsed.metadata = std::move(metadata);
+      return X402TopUpResult{std::move(parsed)};
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{
+          ErrorKind::Parse, response->status,
+          std::string{"x402 top-up parse: "} + e.what(), response->body,
+          std::move(metadata)}};
+    }
+  }
+
+  [[nodiscard]] auto x402_transactions(
+      std::string_view wallet_address,
+      const X402TransactionsQuery& query = {},
+      const RequestOptions& opts = {}) const
+      -> std::expected<X402TransactionPage, Error> {
+    if (wallet_address.empty())
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0, "x402 wallet address must not be empty", {}}};
+
+    const auto path =
+        detail::with_path_segment("/x402/transactions", wallet_address);
+    auto response = get_json_response(
+        detail::with_query(path, x402_transactions_query_params(query)),
+        detail::AuthPolicy::SignInWithXOnly, opts);
+    if (!response) return std::unexpected{std::move(response.error())};
+    try {
+      auto parsed = x402_transactions_from_json_body(response->body);
+      parsed.metadata = std::move(response->metadata);
+      return parsed;
+    } catch (const std::exception& e) {
+      return std::unexpected{Error{
+          ErrorKind::Parse, response->status,
+          std::string{"x402 transactions parse: "} + e.what(),
+          response->raw_body, std::move(response->metadata)}};
     }
   }
 

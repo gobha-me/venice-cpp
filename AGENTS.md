@@ -223,6 +223,18 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   `RequestOptions`, never request JSON or diagnostics; response IDs, batch order,
   charge headers and x402 metadata stay exact. The client hardcodes neither
   supported networks/methods nor Venice's batch and idempotency policy.
+- **x402 wallet operations transport proofs; they never own them.** Balance and
+  transaction history require caller-produced SIWX for the wallet encoded in
+  the path; top-up accepts Public discovery or a caller-produced payment
+  signature. An empty public POST intentionally returns 402 requirements as a
+  typed success, while every unrelated 402 remains `PaymentRequired` and every
+  other non-2xx is classified before media validation. Canonical headers are
+  `SIGN-IN-WITH-X`, `PAYMENT-SIGNATURE`, `PAYMENT-REQUIRED` and
+  `PAYMENT-RESPONSE`; legacy migration aliases are never emitted. Base-unit
+  amounts remain strings, response money follows the wire's JSON numbers, and
+  the library never signs, decodes opaque payment envelopes, constructs USDC
+  transactions, polls or retries a payment. A committed live leg may discover
+  requirements but must never submit a payment or expose a proof.
 - **Braces build arrays, parentheses build scalars.** `nlohmann::json{"auto"}` is
   `["auto"]`; `nlohmann::json("auto")` is `"auto"`. Both compile, so only an
   `is_string()`-style assertion catches the wrong one. The *object* builders

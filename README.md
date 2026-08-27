@@ -86,6 +86,10 @@ right bridge.
   JSON-RPC 2.0 proxy for single calls or ordered batches. Method-specific
   params/results stay raw and forward-compatible; HTTP-200 JSON-RPC errors,
   billing headers and x402 balance metadata remain directly inspectable.
+- **x402 wallets** — SIWX-authenticated balance and paginated transaction
+  reads plus explicit public payment discovery and signed top-up. Requirements
+  and receipts are distinct typed outcomes; base-unit amounts remain exact
+  strings, and the client never owns wallet keys or constructs a payment.
 - **Account billing** (`/billing/balance`, `/billing/usage-analytics`,
   `/billing/usage-history`) — typed balance and aggregate views plus ordered,
   cursor-paged ledger history. History can return typed JSON or byte-exact CSV,
@@ -115,7 +119,7 @@ workflow helpers.
 
 ## OpenAPI coverage
 
-OpenAPI coverage: 44/49 operations implemented.
+OpenAPI coverage: 47/49 operations implemented.
 
 One additional published operation is explicitly unsupported:
 `GET /billing/usage` already returns 410 for every request and points callers
@@ -230,9 +234,36 @@ const auto wallet_reply = client.chat(
 Venice's current canonical wallet header is `SIGN-IN-WITH-X`; the library does
 not emit its migration alias `X-Sign-In-With-X`. Likewise,
 `Authentication::x402_payment(payload)` emits the canonical
-`PAYMENT-SIGNATURE`, not the legacy `X-402-Payment` spelling. That mode is the
-transport foundation for the x402 top-up endpoint; no endpoint currently
-exposed accepts a payment signature.
+`PAYMENT-SIGNATURE`, not the legacy `X-402-Payment` spelling. The x402 methods
+use those modes directly:
+
+```cpp
+// Discovery is an empty public POST. HTTP 402 is the expected typed result.
+const auto discovery = public_client.x402_top_up();
+if (discovery) {
+  if (const auto* requirements =
+          std::get_if<venice::X402PaymentRequirements>(&*discovery)) {
+    // Select one of requirements->accepts and sign outside this library.
+    // `amount` is exact base-unit text; metadata.payment_required is opaque.
+  }
+}
+
+const std::string signed_payment = "base64 payload signed outside venice-cpp";
+const auto receipt = public_client.x402_top_up(
+    {.authentication = venice::Authentication::x402_payment(signed_payment)});
+
+const auto balance = wallet_client.x402_balance("0xYOUR_WALLET_ADDRESS");
+venice::X402TransactionsQuery page;
+page.limit = 50;
+page.offset = 0;
+const auto transactions =
+    wallet_client.x402_transactions("0xYOUR_WALLET_ADDRESS", page);
+```
+
+Balance and transactions require a caller-produced SIWX proof for the same
+wallet named in the path. Venice verifies that relationship and the accepted
+EVM/Solana address syntax; the client only encodes the address as one path
+segment. A paid top-up never polls or retries implicitly.
 
 Successful SIWX inference exposes the balance string exactly as Venice sent it.
 A 402 is distinct from bad credentials and retains both the JSON body and the
@@ -1279,7 +1310,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.27.0)
+  GIT_TAG        v0.28.0)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -1464,6 +1495,7 @@ venice-cpp --traits [type]                     # v0.16.0: no key needed
 venice-cpp --compat [type]                     # v0.16.0: no key needed
 venice-cpp --modality [type]                   # v0.17.0: no key needed
 venice-cpp --styles                             # v0.19.0: no key needed
+venice-cpp --x402                               # v0.28.0: no key/no-spend payment discovery
 ```
 
 `--modality` walks **every** entry of every modality rather than picking one,
