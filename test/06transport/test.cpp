@@ -690,6 +690,7 @@ class TestServer {
 
     m_svr.Get("/api/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
       ++m_models_hits;
+      note_header_injection(req);
       const nlohmann::json model{{"id", "test-model"},
                                  {"type", "text"},
                                  {"authorization", req.get_header_value("Authorization")},
@@ -1758,6 +1759,7 @@ class TestServer {
                [this, x402_error](const httplib::Request& req,
                                   httplib::Response& res) {
                  ++m_x402_hits;
+                 note_header_injection(req);
                  capture_x402(req);
                  const std::string control =
                      req.get_header_value("Idempotency-Key");
@@ -2006,6 +2008,7 @@ class TestServer {
     m_svr.Post("/api/v1/chat/completions",
                [this](const httplib::Request& req, httplib::Response& res) {
                  ++m_chat_hits;
+                 note_header_injection(req);
                  const auto bearer = req.get_header_value("Authorization");
                  const auto siwx = req.get_header_value("SIGN-IN-WITH-X");
                  if (bearer.empty() && siwx.empty()) {
@@ -2189,6 +2192,9 @@ class TestServer {
   [[nodiscard]] auto x402_stall_hits() const -> int {
     return m_x402_stall_hits.load();
   }
+  [[nodiscard]] auto header_injection_hits() const -> int {
+    return m_header_injection_hits.load();
+  }
   [[nodiscard]] auto last_transform() const -> CapturedTransform {
     const std::lock_guard<std::mutex> lock{m_transform_mu};
     return m_last_transform;
@@ -2207,6 +2213,10 @@ class TestServer {
   static constexpr const char* kDelta[kFrames] = {"hel", "lo"};
 
  private:
+  void note_header_injection(const httplib::Request& req) {
+    if (req.has_header("X-Injected")) ++m_header_injection_hits;
+  }
+
   void capture_web3(const httplib::Request& req) {
     const std::lock_guard<std::mutex> lock{m_web3_mu};
     m_last_web3 = CapturedWeb3Request{
@@ -2266,6 +2276,7 @@ class TestServer {
   std::atomic<int> m_crypto_rpc_stall_hits{0};
   std::atomic<int> m_x402_hits{0};
   std::atomic<int> m_x402_stall_hits{0};
+  std::atomic<int> m_header_injection_hits{0};
   std::atomic<int> m_multipart_stall_hits{0};
   mutable std::mutex m_transform_mu;
   CapturedTransform m_last_transform{};
@@ -2432,6 +2443,122 @@ TEST_CASE("endpoint authentication policies reject impossible modes before the s
   REQUIRE_FALSE(empty_models.has_value());
   REQUIRE(empty_models.error().kind == ErrorKind::InvalidArg);
   REQUIRE(server.models_hits() == 0);
+}
+
+TEST_CASE("caller-controlled header values cannot inject another field",
+          "[transport][auth][failure]") {
+  const TestServer server;
+  const std::string injected = "synthetic-secret\r\nX-Injected: reached-wire";
+
+  const auto require_rejected = [&](const auto& result) {
+    REQUIRE(server.header_injection_hits() == 0);
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(result.error().status == 0);
+    REQUIRE(result.error().message.find("synthetic-secret") == std::string::npos);
+    REQUIRE(result.error().body.empty());
+    REQUIRE(result.error().metadata.headers.empty());
+  };
+
+  SECTION("client-default Bearer") {
+    const Client client{injected, server.base_url()};
+    const auto result = client.models();
+    require_rejected(result);
+    REQUIRE(server.models_hits() == 0);
+  }
+
+  SECTION("per-call Bearer override") {
+    const Client client{"safe-default", server.base_url()};
+    const auto result = client.models(
+        {}, {.authentication = Authentication::bearer(injected)});
+    require_rejected(result);
+    REQUIRE(server.models_hits() == 0);
+  }
+
+  SECTION("SIWX proof") {
+    const Client client{Authentication::sign_in_with_x(injected),
+                        server.base_url()};
+    const auto result = client.chat(minimal_chat());
+    require_rejected(result);
+    REQUIRE(server.chat_hits() == 0);
+  }
+
+  SECTION("x402 payment signature") {
+    const Client client{Authentication::x402_payment(injected),
+                        server.base_url()};
+    const auto result = client.x402_top_up();
+    require_rejected(result);
+    REQUIRE(server.x402_hits() == 0);
+  }
+
+  SECTION("idempotency key") {
+    const Client client{Authentication::public_access(), server.base_url()};
+    const auto result = client.models({}, {.idempotency_key = injected});
+    require_rejected(result);
+    REQUIRE(server.models_hits() == 0);
+  }
+}
+
+TEST_CASE("forbidden HTTP field controls fail before every caller-owned header path",
+          "[transport][auth][failure]") {
+  const TestServer server;
+  std::vector<unsigned int> forbidden;
+  for (unsigned int byte = 0; byte < 0x20U; ++byte)
+    if (byte != static_cast<unsigned int>('\t')) forbidden.push_back(byte);
+  forbidden.push_back(0x7FU);
+
+  const auto require_invalid = [](const auto& result) {
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(result.error().status == 0);
+    REQUIRE(result.error().message.find("synthetic-secret") == std::string::npos);
+    REQUIRE(result.error().body.empty());
+    REQUIRE(result.error().metadata.headers.empty());
+  };
+
+  for (const unsigned int byte : forbidden) {
+    CAPTURE(byte);
+    std::string value = "synthetic-secret";
+    value.push_back(static_cast<char>(byte));
+    value += "tail";
+
+    const Client bearer{value, server.base_url()};
+    require_invalid(bearer.models());
+
+    const Client override_client{"safe-default", server.base_url()};
+    require_invalid(override_client.models(
+        {}, {.authentication = Authentication::bearer(value)}));
+
+    const Client siwx{Authentication::sign_in_with_x(value), server.base_url()};
+    require_invalid(siwx.chat(minimal_chat()));
+
+    const Client payment{Authentication::x402_payment(value), server.base_url()};
+    require_invalid(payment.x402_top_up());
+
+    const Client public_client{Authentication::public_access(), server.base_url()};
+    require_invalid(public_client.models({}, {.idempotency_key = value}));
+  }
+
+  REQUIRE(server.models_hits() == 0);
+  REQUIRE(server.chat_hits() == 0);
+  REQUIRE(server.x402_hits() == 0);
+  REQUIRE(server.header_injection_hits() == 0);
+}
+
+TEST_CASE("HTTP field validation preserves the open value syntax",
+          "[transport][auth]") {
+  std::string allowed(1, '\t');
+  for (unsigned int byte = 0x20U; byte <= 0xFFU; ++byte)
+    if (byte != 0x7FU) allowed.push_back(static_cast<char>(byte));
+
+  REQUIRE(venice::detail::validate_http_field_value({}, "test field").has_value());
+  REQUIRE(venice::detail::validate_http_field_value(allowed, "test field").has_value());
+
+  const auto bearer = venice::detail::authentication_headers(
+      Authentication::bearer(allowed));
+  REQUIRE(bearer.has_value());
+  REQUIRE(bearer->find("Authorization") != bearer->end());
+  REQUIRE(bearer->find("Authorization")->second == "Bearer " + allowed);
 }
 
 TEST_CASE("all four authentication modes traverse the buffered fixture independently",

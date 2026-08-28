@@ -338,7 +338,11 @@ looks one up case-insensitively. `x_balance_remaining`, `payment_required`, and
 `payment_response` are convenience fields but deliberately remain strings:
 balances are decimal protocol values and payment envelopes are opaque base64.
 Empty credentials and endpoint/mode mismatches return `InvalidArg` before a
-socket is opened. Credentials are never copied into an `Error`.
+socket is opened. Caller-owned credential/proof values containing NUL, DEL or
+forbidden C0 controls likewise fail before transport, so they cannot change the
+request's header structure. Their semantic formats remain server-owned and
+otherwise pass through byte-exact. Credentials are never copied into an
+`Error`.
 
 The client does not follow HTTP redirects. Venice publishes no 3xx contract,
 and replaying an authenticated, paid or multipart request to a response-provided
@@ -1156,7 +1160,9 @@ auto models = client.models("all", {.connect_timeout = 5s, .read_timeout = 10s})
 ```
 
 `RequestOptions::idempotency_key` is emitted only as `Idempotency-Key`. It is
-never serialized into request JSON or copied into an error message.
+never serialized into request JSON or copied into an error message. The same
+field-value representability check used for credentials rejects structural
+control bytes before a socket without imposing a Venice-specific key syntax.
 
 Cancellation needs a second thread, necessarily: the calling thread is blocked
 inside the transport, so nothing on it can run.
@@ -1390,7 +1396,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.1)
+  GIT_TAG        v0.29.2)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
