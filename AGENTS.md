@@ -49,6 +49,13 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   Multipart uses cpp-httplib's public encoder and is POST-only because every
   multipart operation in the audited contract is POST. SSE remains specialized
   but shares transport construction and error helpers.
+- **Redirects are untrusted responses, not transport instructions.** Venice's
+  audited contract publishes no 3xx response, so the shared transport never
+  follows `Location`, even on the same origin. A 3xx is `ErrorKind::Http` with
+  its exact status, body, headers and `ResponseMetadata`. This stronger rule is
+  shared by buffered JSON/binary/multipart, Chat SSE and streamed speech; it
+  prevents valid credentials, payment proofs, idempotency keys and request
+  bodies from being replayed across origins or onto a downgraded scheme (VC-47).
 
 ## Conventions that matter
 

@@ -482,7 +482,10 @@ enum class AuthPolicy {
 [[nodiscard]] inline auto make_transport(std::string_view base_url, const RequestOptions& opts)
     -> httplib::Client {
   httplib::Client cli{host_from_base_url(base_url)};
-  cli.set_follow_location(true);
+  // Venice publishes no redirect contract. Keep 3xx responses at their origin
+  // so credentials, payment proofs, idempotency keys and request bodies cannot
+  // be replayed to a Location chosen by that response (VC-47).
+  cli.set_follow_location(false);
   cli.set_read_timeout(opts.read_timeout.value_or(std::chrono::seconds{300}));
   cli.set_connection_timeout(opts.connect_timeout.value_or(std::chrono::seconds{30}));
   if (opts.write_timeout) cli.set_write_timeout(*opts.write_timeout);
