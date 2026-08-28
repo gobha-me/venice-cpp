@@ -340,6 +340,12 @@ balances are decimal protocol values and payment envelopes are opaque base64.
 Empty credentials and endpoint/mode mismatches return `InvalidArg` before a
 socket is opened. Credentials are never copied into an `Error`.
 
+The client does not follow HTTP redirects. Venice publishes no 3xx contract,
+and replaying an authenticated, paid or multipart request to a response-provided
+`Location` would cross a security boundary. A 3xx therefore reaches the caller
+as `ErrorKind::Http` with its original status, body and response metadata,
+whether the target is same-origin or cross-origin.
+
 Whether a request streams is decided by the method you call, not by a field on
 `ChatRequest`. If you build the wire body yourself, say so explicitly:
 `req.to_json_body(/*stream=*/false)`.
@@ -1384,7 +1390,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.0)
+  GIT_TAG        v0.29.1)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

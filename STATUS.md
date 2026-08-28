@@ -82,6 +82,9 @@ AGENTS.md (which holds standing conventions, not state).
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
   payment_required/rate_limited/invalid_arg/cancelled, each carrying status +
   raw body and response metadata when a response exists.
+- HTTP redirects are never followed (VC-47). A 3xx remains an `Http` error from
+  its original server, so authentication/payment/idempotency headers and JSON,
+  multipart or streaming request bodies cannot be replayed to `Location`.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
 - OpenAPI coverage: 48/49 operations implemented. The sole remainder is the
@@ -107,6 +110,19 @@ was blinded by any comment mentioning a package name. Both were upstream bugs an
 have since landed there as CT-14.
 
 ## Next up
+
+**VC-47 (#82) is implemented for v0.29.1.** The shared cpp-httplib transport now
+explicitly disables redirects for buffered JSON/binary/multipart, Chat SSE and
+streamed speech. Venice publishes no 3xx contract, so same-origin and
+cross-origin `Location` values are both inert; the original 3xx status, body,
+headers and response metadata reach the caller as `ErrorKind::Http`.
+
+An offline two-origin failure matrix first reproduced valid Bearer/payment/
+idempotency headers and POST bodies reaching a second server, including a 307
+multipart replay and a redirected Chat stream reported as success. The fixed
+matrix covers 301/302/303/307/308, same-origin redirects, buffered bytes,
+multipart uploads and both streaming APIs, and asserts that no redirect target
+receives a request. No live API call or credential is needed.
 
 **The live captures are done.** A key was available on 2026-08-09 and all of
 `--models`, `--stream`, `--tools`, `--characters` and (since VC-17) `--usage`

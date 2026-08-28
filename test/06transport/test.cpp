@@ -144,6 +144,100 @@ struct CapturedX402Request {
   std::string body{};
 };
 
+// Two independent origins make redirect leakage observable without touching the
+// internet. The first origin returns only 3xx responses; the second counts every
+// request that reaches it. A separate same-origin target pins the stronger
+// policy: Venice publishes no redirect contract, so no Location is followed.
+class RedirectFixture {
+ public:
+  RedirectFixture() {
+    const auto capture_destination = [this](const httplib::Request&,
+                                            httplib::Response& res) {
+      ++m_destination_hits;
+      res.set_content("destination must not be reached", "text/plain");
+    };
+    m_destination.Get("/captured", capture_destination);
+    m_destination.Post("/captured", capture_destination);
+    m_destination_port = m_destination.bind_to_any_port("127.0.0.1");
+    m_destination_thread =
+        std::thread{[this] { m_destination.listen_after_bind(); }};
+    m_destination.wait_until_ready();
+
+    const auto redirect = [this](const httplib::Request& req,
+                                 httplib::Response& res) {
+      const int status = req.has_param("status")
+                             ? std::stoi(req.get_param_value("status"))
+                             : 307;
+      const bool same_origin = req.has_param("same-origin");
+      res.status = status;
+      res.set_header("Location", same_origin
+                                     ? "/api/v1/transport/followed"
+                                     : destination_url() + "/captured");
+      res.set_header("X-Protocol-Trace", "origin-redirect");
+      res.set_content("redirect blocked", "text/plain");
+    };
+    m_origin.Get("/api/v1/transport/redirect", redirect);
+    m_origin.Post("/api/v1/transport/redirect", redirect);
+    m_origin.Get("/api/v1/models", redirect);
+    m_origin.Post("/api/v1/chat/completions", redirect);
+    m_origin.Post("/api/v1/audio/speech",
+                  [this](const httplib::Request&, httplib::Response& res) {
+                    res.status = 308;
+                    res.set_header("Location", destination_url() + "/captured");
+                    res.set_header("X-Protocol-Trace", "origin-redirect");
+                    res.set_content("redirect blocked", "text/plain");
+                  });
+    const auto capture_same_origin = [this](const httplib::Request&,
+                                            httplib::Response& res) {
+      ++m_same_origin_hits;
+      res.set_content("same origin must not be reached", "text/plain");
+    };
+    m_origin.Get("/api/v1/transport/followed", capture_same_origin);
+    m_origin.Post("/api/v1/transport/followed", capture_same_origin);
+    m_origin_port = m_origin.bind_to_any_port("127.0.0.1");
+    m_origin_thread = std::thread{[this] { m_origin.listen_after_bind(); }};
+    m_origin.wait_until_ready();
+  }
+
+  ~RedirectFixture() {
+    m_origin.stop();
+    m_destination.stop();
+    m_origin_thread.join();
+    m_destination_thread.join();
+  }
+
+  RedirectFixture(const RedirectFixture&) = delete;
+  auto operator=(const RedirectFixture&) -> RedirectFixture& = delete;
+  RedirectFixture(RedirectFixture&&) = delete;
+  auto operator=(RedirectFixture&&) -> RedirectFixture& = delete;
+
+  [[nodiscard]] auto origin_base_url() const -> std::string {
+    return "http://127.0.0.1:" + std::to_string(m_origin_port) + "/api/v1";
+  }
+
+  [[nodiscard]] auto destination_hits() const -> int {
+    return m_destination_hits.load();
+  }
+
+  [[nodiscard]] auto same_origin_hits() const -> int {
+    return m_same_origin_hits.load();
+  }
+
+ private:
+  [[nodiscard]] auto destination_url() const -> std::string {
+    return "http://127.0.0.1:" + std::to_string(m_destination_port);
+  }
+
+  httplib::Server m_origin;
+  httplib::Server m_destination;
+  std::thread m_origin_thread;
+  std::thread m_destination_thread;
+  int m_origin_port = 0;
+  int m_destination_port = 0;
+  std::atomic<int> m_destination_hits{0};
+  std::atomic<int> m_same_origin_hits{0};
+};
+
 // A peer that can be made to stop answering.
 //
 //   GET  /api/v1/api_keys/rate_limits — accepts, then never answers (until
@@ -3847,6 +3941,111 @@ TEST_CASE("402 is payment-required and preserves body and headers on both chat p
 }
 
 // ── buffered substrate: failure matrix first (VC-22) ──────────────────────────
+
+TEST_CASE("redirect responses are returned without contacting another origin",
+          "[transport][redirect][buffered][failure]") {
+  const RedirectFixture fixture;
+  const std::array statuses{301, 302, 303, 307, 308};
+
+  for (const int status : statuses) {
+    const auto response = venice::detail::send_buffered(
+        fixture.origin_base_url(),
+        {.method = venice::detail::HttpMethod::Post,
+         .endpoint = "/transport/redirect?status=" + std::to_string(status),
+         .headers = {{"Authorization", "Bearer redirect-secret"},
+                     {"SIGN-IN-WITH-X", "redirect-siwx"},
+                     {"PAYMENT-SIGNATURE", "redirect-payment"},
+                     {"Idempotency-Key", "redirect-idempotency"}},
+         .body = venice::detail::ByteBody{"paid request body", "application/json"}});
+
+    REQUIRE(response.has_value());
+    REQUIRE(response->status == status);
+    REQUIRE(response->body == "redirect blocked");
+    REQUIRE(response->headers.find("Location") != response->headers.end());
+    REQUIRE(fixture.destination_hits() == 0);
+
+    constexpr std::array<std::string_view, 1> kJson{"application/json"};
+    const auto classified = venice::detail::require_media_type(*response, kJson);
+    REQUIRE_FALSE(classified.has_value());
+    REQUIRE(classified.error().kind == ErrorKind::Http);
+    REQUIRE(classified.error().status == status);
+    REQUIRE(classified.error().body == "redirect blocked");
+    REQUIRE(classified.error().metadata.header("x-protocol-trace") ==
+            "origin-redirect");
+  }
+
+  const Client client{"redirect-secret", fixture.origin_base_url()};
+  const auto models = client.models();
+  REQUIRE_FALSE(models.has_value());
+  REQUIRE(models.error().kind == ErrorKind::Http);
+  REQUIRE(models.error().status == 307);
+  REQUIRE(models.error().body == "redirect blocked");
+  REQUIRE(models.error().metadata.header("location").has_value());
+  REQUIRE(models.error().metadata.header("x-protocol-trace") ==
+          "origin-redirect");
+  REQUIRE(fixture.destination_hits() == 0);
+}
+
+TEST_CASE("redirects cannot replay multipart bodies or remain enabled on one origin",
+          "[transport][redirect][multipart][failure]") {
+  const RedirectFixture fixture;
+
+  const auto multipart = venice::detail::send_buffered(
+      fixture.origin_base_url(),
+      {.method = venice::detail::HttpMethod::Post,
+       .endpoint = "/transport/redirect?status=307",
+       .headers = {{"Authorization", "Bearer redirect-secret"}},
+       .body = venice::detail::MultipartBody{{
+           {.name = "file",
+            .bytes = std::string{"owned\0upload", 12},
+            .filename = "private.bin",
+            .content_type = "application/octet-stream"},
+       }}});
+  REQUIRE(multipart.has_value());
+  REQUIRE(multipart->status == 307);
+  REQUIRE(multipart->body == "redirect blocked");
+  REQUIRE(fixture.destination_hits() == 0);
+
+  const auto same_origin = venice::detail::send_buffered(
+      fixture.origin_base_url(),
+      {.method = venice::detail::HttpMethod::Get,
+       .endpoint = "/transport/redirect?status=302&same-origin=1",
+       .headers = {{"Authorization", "Bearer redirect-secret"}}});
+  REQUIRE(same_origin.has_value());
+  REQUIRE(same_origin->status == 302);
+  REQUIRE(same_origin->body == "redirect blocked");
+  REQUIRE(fixture.same_origin_hits() == 0);
+}
+
+TEST_CASE("streaming APIs classify origin redirects without following them",
+          "[transport][redirect][stream][failure]") {
+  const RedirectFixture fixture;
+  const Client client{"redirect-secret", fixture.origin_base_url()};
+
+  venice::StreamAccumulator acc;
+  const auto chat = client.chat_stream(
+      minimal_chat(), acc, {}, {.idempotency_key = "redirect-idempotency"});
+  REQUIRE_FALSE(chat.has_value());
+  REQUIRE(chat.error().kind == ErrorKind::Http);
+  REQUIRE(chat.error().status == 307);
+  REQUIRE(chat.error().body == "redirect blocked");
+  REQUIRE(chat.error().metadata.header("location").has_value());
+  REQUIRE(chat.error().metadata.header("x-protocol-trace") ==
+          "origin-redirect");
+  REQUIRE(acc.empty());
+
+  const auto speech = client.generate_speech_stream(
+      venice::SpeechRequest{.input = "private speech input"}, {});
+  REQUIRE_FALSE(speech.has_value());
+  REQUIRE(speech.error().kind == ErrorKind::Http);
+  REQUIRE(speech.error().status == 308);
+  REQUIRE(speech.error().body == "redirect blocked");
+  REQUIRE(speech.error().metadata.header("location").has_value());
+  REQUIRE(speech.error().metadata.header("x-protocol-trace") ==
+          "origin-redirect");
+
+  REQUIRE(fixture.destination_hits() == 0);
+}
 
 TEST_CASE("buffered JSON decoding rejects missing and wrong success content types",
           "[transport][buffered][failure]") {
