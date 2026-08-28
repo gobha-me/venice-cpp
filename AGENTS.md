@@ -85,8 +85,12 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   `InvalidArg` before a socket. `RequestOptions::authentication` overrides the
   client default for one call. Emit the audited canonical headers
   (`Authorization: Bearer`, `SIGN-IN-WITH-X`, `PAYMENT-SIGNATURE`), not Venice's
-  legacy migration aliases. This library does not own wallet keys, sign SIWX,
-  decode payment requirements, or construct USDC transactions.
+  legacy migration aliases. Caller-owned values are checked for HTTP field-value
+  representability before insertion: NUL, DEL and C0 controls other than HTAB
+  are `InvalidArg` before a socket, while all server-owned semantic formats stay
+  open and diagnostics never echo the value (VC-45). This library does not own
+  wallet keys, sign SIWX, decode payment requirements, or construct USDC
+  transactions.
 - **Response protocol metadata stays owned and exact.** `ResponseMetadata`
   preserves all response headers and extracts `X-Balance-Remaining`,
   `PAYMENT-REQUIRED` and `PAYMENT-RESPONSE` as strings. It is attached to every
@@ -246,8 +250,10 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   non-2xx status remains `venice::Error`. Network slugs are open strings encoded
   as one path segment. `Idempotency-Key` is per-call header state in
   `RequestOptions`, never request JSON or diagnostics; response IDs, batch order,
-  charge headers and x402 metadata stay exact. The client hardcodes neither
-  supported networks/methods nor Venice's batch and idempotency policy.
+  charge headers and x402 metadata stay exact. It shares authentication's
+  structural field-value check without growing a local key syntax. The client
+  hardcodes neither supported networks/methods nor Venice's batch and
+  idempotency policy.
 - **x402 wallet operations transport proofs; they never own them.** Balance and
   transaction history require caller-produced SIWX for the wallet encoded in
   the path; top-up accepts Public discovery or a caller-produced payment

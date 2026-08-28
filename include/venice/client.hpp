@@ -416,6 +416,25 @@ enum class AuthPolicy {
   PublicOrX402Payment,
 };
 
+// Caller-owned header values enter httplib::Headers directly rather than
+// Request::set_header(), so cpp-httplib's CR/LF guard does not run. Validate the
+// HTTP field-value structure before constructing that map. HTAB, visible ASCII
+// and obs-text remain available because Venice owns credential, proof and
+// idempotency syntax; only bytes that can make the field structurally invalid
+// are a local representability error (VC-45).
+[[nodiscard]] inline auto validate_http_field_value(std::string_view value,
+                                                    std::string_view name)
+    -> std::expected<void, Error> {
+  for (const unsigned char byte : value) {
+    if ((byte < 0x20U && byte != '\t') || byte == 0x7FU) {
+      return std::unexpected{
+          Error{ErrorKind::InvalidArg, 0,
+                std::string{name} + " contains a forbidden HTTP field-value byte", {}}};
+    }
+  }
+  return {};
+}
+
 [[nodiscard]] inline auto authentication_headers(const Authentication& authentication)
     -> std::expected<httplib::Headers, Error> {
   const auto invalid = [](std::string_view name) {
@@ -427,12 +446,23 @@ enum class AuthPolicy {
     case AuthenticationKind::Public: return httplib::Headers{};
     case AuthenticationKind::Bearer:
       if (authentication.value().empty()) return invalid("Bearer");
+      if (auto ok = validate_http_field_value(authentication.value(), "Bearer credential");
+          !ok)
+        return std::unexpected{std::move(ok.error())};
       return httplib::Headers{{"Authorization", "Bearer " + std::string{authentication.value()}}};
     case AuthenticationKind::SignInWithX:
       if (authentication.value().empty()) return invalid("Sign-In-With-X");
+      if (auto ok =
+              validate_http_field_value(authentication.value(), "Sign-In-With-X credential");
+          !ok)
+        return std::unexpected{std::move(ok.error())};
       return httplib::Headers{{"SIGN-IN-WITH-X", std::string{authentication.value()}}};
     case AuthenticationKind::X402Payment:
       if (authentication.value().empty()) return invalid("x402 payment");
+      if (auto ok =
+              validate_http_field_value(authentication.value(), "x402 payment credential");
+          !ok)
+        return std::unexpected{std::move(ok.error())};
       return httplib::Headers{{"PAYMENT-SIGNATURE", std::string{authentication.value()}}};
   }
   return std::unexpected{Error{ErrorKind::InvalidArg, 0, "unknown authentication mode", {}}};
@@ -2787,8 +2817,13 @@ class Client {
     }
     auto headers = detail::authentication_headers(authentication);
     if (!headers) return std::unexpected{std::move(headers.error())};
-    if (opts.idempotency_key)
+    if (opts.idempotency_key) {
+      if (auto ok = detail::validate_http_field_value(*opts.idempotency_key,
+                                                      "Idempotency-Key");
+          !ok)
+        return std::unexpected{std::move(ok.error())};
       headers->emplace("Idempotency-Key", *opts.idempotency_key);
+    }
     return headers;
   }
 

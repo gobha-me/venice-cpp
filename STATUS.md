@@ -111,6 +111,19 @@ have since landed there as CT-14.
 
 ## Next up
 
+**VC-45 (#80) is implemented for v0.29.2.** Bearer credentials, SIWX proofs,
+x402 payment signatures and per-call idempotency keys now pass one shared HTTP
+field-value representability check before entering cpp-httplib's raw header map.
+NUL, DEL and forbidden C0 controls return `InvalidArg` before a socket without
+echoing caller-owned values; HTAB, visible ASCII, obs-text and Venice-owned
+semantic formats remain open.
+
+The failure-first loopback matrix demonstrated all five paths injecting a
+synthetic second header on v0.29.1, including client-default and per-call Bearer
+forms. The fixed matrix covers every forbidden control byte, requires zero
+server hits and preserves ordinary values byte-exact. No live API call or real
+credential is involved.
+
 **VC-47 (#82) is implemented for v0.29.1.** The shared cpp-httplib transport now
 explicitly disables redirects for buffered JSON/binary/multipart, Chat SSE and
 streamed speech. Venice publishes no 3xx contract, so same-origin and
