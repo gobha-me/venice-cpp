@@ -79,6 +79,25 @@ TEST_CASE("Web3 challenge parsing exposes one secret field and redacts every raw
           "[REDACTED: non-JSON Web3 API-key response]");
 }
 
+TEST_CASE(
+    "API-key response-body redaction fails closed for non-JSON diagnostics",
+    "[api-keys][parse][security]") {
+  const auto redacted = venice::detail::redacted_api_key_body(
+      R"({"apiKey":"SYNTHETIC_TOP_LEVEL_SECRET","error":"useful diagnostic","nested":[{"apiKey":"SYNTHETIC_NESTED_SECRET"}]})");
+  const auto parsed = nlohmann::json::parse(redacted);
+  REQUIRE(parsed["error"] == "useful diagnostic");
+  REQUIRE(parsed["apiKey"] == "[REDACTED]");
+  REQUIRE(parsed["nested"][0]["apiKey"] == "[REDACTED]");
+  REQUIRE(redacted.find("SYNTHETIC_") == std::string::npos);
+  REQUIRE(venice::detail::redacted_api_key_body(
+              "plain text containing SYNTHETIC_API_KEY_SECRET") ==
+          "[REDACTED: non-JSON API-key response]");
+  REQUIRE(venice::detail::redacted_api_key_body("").empty());
+  REQUIRE(venice::detail::redacted_web3_api_key_body(
+              "plain text containing SYNTHETIC_API_KEY_SECRET") ==
+          "[REDACTED: non-JSON Web3 API-key response]");
+}
+
 TEST_CASE("API-key listings retain absent zero malformed and raw states", "[api-keys][parse]") {
   const nlohmann::json body{
       {"data", nlohmann::json::array({key_object(), "future-entry"})},

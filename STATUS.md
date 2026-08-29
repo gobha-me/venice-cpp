@@ -111,6 +111,19 @@ have since landed there as CT-14.
 
 ## Next up
 
+**VC-46 (#81) is implemented for v0.29.3.** Regular API-key creation now fails
+closed when an error or malformed successful response is not valid JSON. Rather
+than copying potentially one-time credential material into `Error::body`, the
+client emits a generic redacted marker; valid JSON still retains useful
+diagnostics while recursively replacing every nested `apiKey` value.
+
+The failure-first unit and loopback matrix reproduced the complete synthetic key
+in plain-text HTTP errors, wrong-media successes and malformed JSON on v0.29.2.
+The fixed matrix covers those paths plus valid-JSON shape failures, checks both
+error body and message, preserves status and classification, and keeps successful
+one-time delivery restricted to `ApiKeyCreated::api_key`. Empty transport-error
+bodies remain empty. No live API call or real credential is involved.
+
 **VC-45 (#80) is implemented for v0.29.2.** Bearer credentials, SIWX proofs,
 x402 payment signatures and per-call idempotency keys now pass one shared HTTP
 field-value representability check before entering cpp-httplib's raw header map.

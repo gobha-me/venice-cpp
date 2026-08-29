@@ -431,6 +431,22 @@ class TestServer {
                    res.set_content(secret_error.dump(), "application/json");
                    return;
                  }
+                 if (body.value("forcePlainHttpError", false)) {
+                   res.status = 400;
+                   res.set_content("plain text SYNTHETIC_SECRET_RETURNED_ONCE",
+                                   "text/plain");
+                   return;
+                 }
+                 if (body.value("forceWrongMedia", false)) {
+                   res.set_content("wrong media SYNTHETIC_SECRET_RETURNED_ONCE",
+                                   "text/plain");
+                   return;
+                 }
+                 if (body.value("forceMalformedJson", false)) {
+                   res.set_content("{SYNTHETIC_SECRET_RETURNED_ONCE",
+                                   "application/json");
+                   return;
+                 }
                  if (body.value("forceMalformed", false)) {
                    res.set_content(secret_error.dump(), "application/json");
                    return;
@@ -3536,6 +3552,15 @@ TEST_CASE("API-key creation errors redact returned key material",
   const TestServer server;
   const Client client{"api-key-fixture", server.base_url()};
 
+  constexpr std::string_view kSecret = "SYNTHETIC_SECRET_RETURNED_ONCE";
+  constexpr std::string_view kNonJsonMarker =
+      "[REDACTED: non-JSON API-key response]";
+
+  const auto require_secret_absent = [kSecret](const venice::Error &error) {
+    REQUIRE(error.body.find(kSecret) == std::string::npos);
+    REQUIRE(error.message.find(kSecret) == std::string::npos);
+  };
+
   const auto malformed = client.create_api_key({
       .api_key_type = "INFERENCE",
       .description = "fixture",
@@ -3543,8 +3568,10 @@ TEST_CASE("API-key creation errors redact returned key material",
   });
   REQUIRE_FALSE(malformed);
   REQUIRE(malformed.error().kind == ErrorKind::Parse);
-  REQUIRE(malformed.error().body.find("SYNTHETIC_SECRET_RETURNED_ONCE") ==
-          std::string::npos);
+  REQUIRE(malformed.error().status == 200);
+  REQUIRE(malformed.error().metadata.header("x-test-response") ==
+          "api-key-create");
+  require_secret_absent(malformed.error());
   REQUIRE(malformed.error().body.find("[REDACTED]") != std::string::npos);
 
   const auto rejected = client.create_api_key({
@@ -3554,9 +3581,50 @@ TEST_CASE("API-key creation errors redact returned key material",
   });
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().kind == ErrorKind::Http);
-  REQUIRE(rejected.error().body.find("SYNTHETIC_SECRET_RETURNED_ONCE") ==
-          std::string::npos);
+  REQUIRE(rejected.error().status == 400);
+  REQUIRE(rejected.error().metadata.header("x-test-response") ==
+          "api-key-create");
+  require_secret_absent(rejected.error());
   REQUIRE(rejected.error().body.find("[REDACTED]") != std::string::npos);
+
+  const auto plain_http = client.create_api_key({
+      .api_key_type = "INFERENCE",
+      .description = "fixture",
+      .extra = {{"forcePlainHttpError", true}},
+  });
+  REQUIRE_FALSE(plain_http);
+  REQUIRE(plain_http.error().kind == ErrorKind::Http);
+  REQUIRE(plain_http.error().status == 400);
+  REQUIRE(plain_http.error().metadata.header("x-test-response") ==
+          "api-key-create");
+  require_secret_absent(plain_http.error());
+  REQUIRE(plain_http.error().body == kNonJsonMarker);
+
+  const auto wrong_media = client.create_api_key({
+      .api_key_type = "INFERENCE",
+      .description = "fixture",
+      .extra = {{"forceWrongMedia", true}},
+  });
+  REQUIRE_FALSE(wrong_media);
+  REQUIRE(wrong_media.error().kind == ErrorKind::Parse);
+  REQUIRE(wrong_media.error().status == 200);
+  REQUIRE(wrong_media.error().metadata.header("x-test-response") ==
+          "api-key-create");
+  require_secret_absent(wrong_media.error());
+  REQUIRE(wrong_media.error().body == kNonJsonMarker);
+
+  const auto malformed_json = client.create_api_key({
+      .api_key_type = "INFERENCE",
+      .description = "fixture",
+      .extra = {{"forceMalformedJson", true}},
+  });
+  REQUIRE_FALSE(malformed_json);
+  REQUIRE(malformed_json.error().kind == ErrorKind::Parse);
+  REQUIRE(malformed_json.error().status == 200);
+  REQUIRE(malformed_json.error().metadata.header("x-test-response") ==
+          "api-key-create");
+  require_secret_absent(malformed_json.error());
+  REQUIRE(malformed_json.error().body == kNonJsonMarker);
 }
 
 TEST_CASE("balance remains the raw compatibility view of typed rate limits",

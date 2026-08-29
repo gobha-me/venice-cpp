@@ -5095,8 +5095,11 @@ inline void redact_api_key_material(nlohmann::json& value) {
 }
 
 [[nodiscard]] inline auto redacted_api_key_body(std::string_view body) -> std::string {
+  if (body.empty())
+    return {};
   auto parsed = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-  if (parsed.is_discarded()) return std::string{body};
+  if (parsed.is_discarded())
+    return "[REDACTED: non-JSON API-key response]";
   redact_api_key_material(parsed);
   return parsed.dump();
 }

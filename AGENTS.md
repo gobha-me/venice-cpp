@@ -470,7 +470,10 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
 - **API-key administration never turns a returned key into diagnostics.**
   `ApiKeyCreated::api_key` is the one public field that can contain complete
   one-time credential material. Its `raw` tree and create-error bodies replace
-  every nested `apiKey` value with `[REDACTED]`; it has no display/stream helper and the
+  every nested `apiKey` value with `[REDACTED]`. A non-empty body that is not
+  valid JSON becomes a generic redacted marker rather than being copied into an
+  error; this is the same fail-closed boundary as Web3 creation, whose wider
+  proof material has its own marker. It has no display/stream helper and the
   committed `--api-keys` leg is read-only: list/detail expose only Venice's
   last-six suffix, while create/update/delete stay in offline loopback tests.
   API-key usage totals remain decimal strings because that is the wire's exact
