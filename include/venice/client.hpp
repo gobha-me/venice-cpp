@@ -907,10 +907,20 @@ class Client {
     if (!payload)
       return std::unexpected{std::move(payload.error())};
 
-    bool early_stop = false;  // on_delta said stop — NOT opts.cancel; see above
+    enum class StreamTerminal {
+      None,
+      Done,
+      EarlyStop,
+      ParseFailure,
+      CallbackFailure,
+    };
+
+    StreamTerminal terminal = StreamTerminal::None;
     bool response_is_success = false;
+    bool media_is_sse = false;
+    std::string response_media_type;
     std::string error_body;
-    std::string parse_err;
+    std::string terminal_error;
     detail::SseFramer framer;
 
     auto cli = detail::make_transport(m_base_url, opts);
@@ -930,6 +940,9 @@ class Client {
     hreq.set_header("Content-Type", "application/json");
     hreq.response_handler = [&](const httplib::Response& response) {
       response_is_success = response.status >= 200 && response.status < 300;
+      if (const auto it = response.headers.find("Content-Type"); it != response.headers.end())
+        response_media_type = detail::normalize_media_type(it->second);
+      media_is_sse = response_media_type == "text/event-stream";
       return true;
     };
 
@@ -937,29 +950,58 @@ class Client {
     // observer. Ingest happens before each callback on purpose: a callback that
     // stops the stream must not cost the caller the choice that made it decide
     // to stop.
-    const auto on_payload = [&](std::string_view line) {
-      if (early_stop) return;  // stop at the frame, not at the end of the chunk
-      if (line == "[DONE]") return;
+    const auto on_payload = [&](std::string_view payload) {
+      if (terminal != StreamTerminal::None) return;
+      if (payload == "[DONE]") {
+        terminal = StreamTerminal::Done;
+        return;
+      }
       try {
-        const auto j = nlohmann::json::parse(line);
+        const auto j = nlohmann::json::parse(payload);
         acc.note_envelope(j);
         for_each_delta_from_chunk(j, [&](const StreamDelta& d) {
-          if (early_stop) return;
+          if (terminal != StreamTerminal::None) return;
           acc.ingest(d);
-          if (on_delta && !on_delta(d)) early_stop = true;
+          if (!on_delta) return;
+          try {
+            if (!on_delta(d)) terminal = StreamTerminal::EarlyStop;
+          } catch (const std::exception& e) {
+            terminal = StreamTerminal::CallbackFailure;
+            terminal_error = e.what();
+          } catch (...) {
+            terminal = StreamTerminal::CallbackFailure;
+            terminal_error = "unknown exception";
+          }
         });
       } catch (const std::exception& e) {
-        if (parse_err.empty()) parse_err = e.what();
+        terminal = StreamTerminal::ParseFailure;
+        terminal_error = e.what();
+      } catch (...) {
+        terminal = StreamTerminal::ParseFailure;
+        terminal_error = "unknown exception";
       }
     };
 
     hreq.content_receiver = [&](const char* data, size_t len, size_t /*off*/, uint64_t /*total*/) {
-      if (!response_is_success) {
+      if (!response_is_success || !media_is_sse) {
         error_body.append(data, len);
         return true;
       }
-      framer.feed(std::string_view{data, len}, on_payload);
-      return !early_stop;  // false stops the transfer
+      if (terminal != StreamTerminal::None) return false;
+      try {
+        if (!framer.feed(std::string_view{data, len}, on_payload) &&
+            terminal == StreamTerminal::None) {
+          terminal = StreamTerminal::ParseFailure;
+          terminal_error = "SSE event exceeds the 8 MiB limit";
+        }
+      } catch (const std::exception& e) {
+        terminal = StreamTerminal::ParseFailure;
+        terminal_error = e.what();
+      } catch (...) {
+        terminal = StreamTerminal::ParseFailure;
+        terminal_error = "unknown exception";
+      }
+      return terminal == StreamTerminal::None;
     };
 
     httplib::Response hres;
@@ -968,9 +1010,19 @@ class Client {
 
     // Flush the tail. A final event not terminated by a blank line used to be
     // dropped on the floor here, and it is frequently the usage frame — so the
-    // loss was a billing bug. Not flushed after an early stop or a cancel:
+    // loss was a billing bug. Not flushed after any terminal state or a cancel:
     // both mean nobody wants more frames.
-    if (sent && !early_stop && !guard.cancelled()) framer.finish(on_payload);
+    if (sent && terminal == StreamTerminal::None && !guard.cancelled()) {
+      try {
+        framer.finish(on_payload);
+      } catch (const std::exception& e) {
+        terminal = StreamTerminal::ParseFailure;
+        terminal_error = e.what();
+      } catch (...) {
+        terminal = StreamTerminal::ParseFailure;
+        terminal_error = "unknown exception";
+      }
+    }
 
     auto metadata = detail::metadata_from_headers(hres.headers);
     const auto assembled_response = [&] {
@@ -980,26 +1032,36 @@ class Client {
     };
 
     // The token is tested first, ahead of both the transport error and the
-    // early stop. It has to be: a cancel is delivered by shutting the socket
+    // terminal state. It has to be: a cancel is delivered by shutting the socket
     // down, so it *arrives* as a transport failure and would otherwise be
-    // reported as a dead network. Ahead of early_stop as well, because a cancel
+    // reported as a dead network. Ahead of early stop as well, because a cancel
     // racing an on_delta stop is a caller who has abandoned the call — reading
     // that as "here is your partial answer" would hand back a response nobody
     // is waiting for. What `acc` holds is unaffected either way, which is the
     // whole point of it belonging to the caller.
     if (guard.cancelled()) return std::unexpected{detail::cancel_error()};
-    if (!sent && !early_stop)
+    if (terminal == StreamTerminal::CallbackFailure)
+      return std::unexpected{Error{ErrorKind::InvalidArg, hres.status,
+                                   "chat callback: " + terminal_error, {},
+                                   std::move(metadata)}};
+    if (terminal == StreamTerminal::ParseFailure)
+      return std::unexpected{Error{ErrorKind::Parse, hres.status,
+                                   "stream parse: " + terminal_error, {},
+                                   std::move(metadata)}};
+    if (terminal == StreamTerminal::Done || terminal == StreamTerminal::EarlyStop)
+      return assembled_response();
+    if (!sent)
       return std::unexpected{detail::transport_error(herr)};
-    if (early_stop) return assembled_response();  // deliberate early stop
     if (hres.status < 200 || hres.status >= 300)
       return std::unexpected{
           detail::http_error(hres.status, error_body, std::move(metadata))};
-    // "nothing arrived at all", not "no content arrived". The old test was
-    // assembled.content.empty(), which reported ErrorKind::Parse on a
-    // reasoning-only stream that had in fact been received perfectly.
-    if (!parse_err.empty() && acc.empty())
-      return std::unexpected{Error{ErrorKind::Parse, hres.status, "stream parse: " + parse_err,
-                                   {}, std::move(metadata)}};
+    if (!media_is_sse) {
+      const auto actual = response_media_type.empty() ? std::string{"<missing>"}
+                                                       : response_media_type;
+      return std::unexpected{Error{ErrorKind::Parse, hres.status,
+                                   "unexpected response content type: " + actual,
+                                   std::move(error_body), std::move(metadata)}};
+    }
     return assembled_response();
   }
 

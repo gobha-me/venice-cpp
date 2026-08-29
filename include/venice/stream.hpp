@@ -72,14 +72,17 @@ class SseFramer {
   // the worse failure of the two.
   static constexpr std::size_t kMaxEvent = 8U * 1024U * 1024U;
 
-  // Feed a chunk of body bytes; fn is invoked once per "data:" payload, in
-  // order. Returns false if the buffer cap was hit and the buffer was dropped.
+  // Feed a chunk of body bytes; fn is invoked once per SSE event carrying one
+  // or more data fields, in order. Multiple data fields are joined with '\n',
+  // as required by the SSE event-stream algorithm. Returns false if the event
+  // cap was hit. Overflow is terminal until reset(): once an event has been
+  // dropped, later bytes cannot safely be interpreted as a new event boundary.
   auto feed(std::string_view bytes, const std::function<void(std::string_view)>& fn) -> bool {
+    if (m_overflowed) return false;
     m_buf.append(bytes);
-    dispatch_complete(fn);
+    if (!dispatch_complete(fn)) return false;
     if (m_buf.size() > kMaxEvent) {
-      m_buf.clear();
-      m_overflowed = true;
+      mark_overflowed();
       return false;
     }
     return true;
@@ -89,7 +92,7 @@ class SseFramer {
   // still an event — dropping it is the defect this exists to fix — and the
   // blank-line separator is a *separator*, not a terminator.
   void finish(const std::function<void(std::string_view)>& fn) {
-    if (m_buf.empty()) return;
+    if (m_overflowed || m_buf.empty()) return;
     std::string tail;
     tail.swap(m_buf);
     emit_data_lines(tail, fn);
@@ -121,20 +124,32 @@ class SseFramer {
     return std::nullopt;
   }
 
-  void dispatch_complete(const std::function<void(std::string_view)>& fn) {
+  auto dispatch_complete(const std::function<void(std::string_view)>& fn) -> bool {
     while (const auto found = next_event(0)) {
       const auto [len, sep] = *found;
+      if (len > kMaxEvent) {
+        mark_overflowed();
+        return false;
+      }
       const std::string event = m_buf.substr(0, len);
       m_buf.erase(0, len + sep);
       emit_data_lines(event, fn);
     }
+    return true;
   }
 
-  // Invoke fn for each "data:" payload in one event block. A trailing \r is
-  // stripped: with CRLF endings every line inside the event carries one, and a
-  // payload of `{"a":1}\r` is not parseable json.
+  void mark_overflowed() {
+    m_buf.clear();
+    m_overflowed = true;
+  }
+
+  // Join every "data:" field in one event block, then invoke fn once. A
+  // trailing \r is stripped: with CRLF endings every line inside the event
+  // carries one, and a payload of `{"a":1}\r` is not parseable json.
   static void emit_data_lines(std::string_view event,
                               const std::function<void(std::string_view)>& fn) {
+    std::string joined;
+    bool saw_data = false;
     std::size_t start = 0;
     while (start <= event.size()) {
       const auto nl = event.find('\n', start);
@@ -142,15 +157,19 @@ class SseFramer {
                                                : event.substr(start, nl - start);
       if (line.ends_with('\r')) line.remove_suffix(1);
       if (line.starts_with("data:")) {
-        auto payload = line.substr(5);
+        auto line_payload = line.substr(5);
         // Exactly one optional leading space, per the SSE spec. Not a trim:
         // whitespace beyond that first space belongs to the payload.
-        if (!payload.empty() && payload.front() == ' ') payload.remove_prefix(1);
-        fn(payload);
+        if (!line_payload.empty() && line_payload.front() == ' ')
+          line_payload.remove_prefix(1);
+        if (saw_data) joined.push_back('\n');
+        joined.append(line_payload.data(), line_payload.size());
+        saw_data = true;
       }
       if (nl == std::string_view::npos) break;
       start = nl + 1;
     }
+    if (saw_data) fn(joined);
   }
 
   std::string m_buf;
@@ -375,12 +394,12 @@ class StreamAccumulator {
     }
     // Cost BEFORE usage, and the order is load bearing. Cost rides on the usage
     // frame — one object, both keys — and `get<Usage>()` below is loud, so a
-    // wrong-typed token count throws out of this function. chat_stream catches
-    // that into `parse_err` and surfaces it only when the accumulator is empty,
-    // which a stream carrying content never is: the throw is silent. Read the
-    // other way round, a corrupt `usage` would take the billing figure with it,
-    // which is exactly what ChatResponse::cost's tolerant parse exists to
-    // prevent, undone one file over. test/07stream/ §9 pins it.
+    // wrong-typed token count throws out of this function. chat_stream turns
+    // that into a terminal Parse result while leaving accepted state in the
+    // caller-owned accumulator. Read the other way round, a corrupt `usage`
+    // would take the billing figure with it, which is exactly what
+    // ChatResponse::cost's tolerant parse exists to prevent, undone one file
+    // over. test/07stream/ §9 pins it.
     //
     // Last wins, mirroring usage. Every stream swept for VC-20 carried exactly
     // one cost frame, so no capture discriminates last-wins from first-wins or
