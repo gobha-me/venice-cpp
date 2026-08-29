@@ -6014,3 +6014,75 @@ TEST_CASE("Responses rejects unsupported authentication before a socket",
   REQUIRE(result.error().kind == ErrorKind::InvalidArg);
   REQUIRE(server.responses_hits() == 0);
 }
+
+TEST_CASE("unrepresentable JSON requests fail before every transport path",
+          "[transport][json-encoding][failure]") {
+  const TestServer server;
+  const Client client{"test-key", server.base_url()};
+  const std::string invalid(1, static_cast<char>(0xff));
+
+  SECTION("shared buffered JSON") {
+    ChatRequest request;
+    request.model = "m";
+    request.messages = {Message::user(invalid)};
+    const auto result = client.chat(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(result.error().status == 0);
+    REQUIRE(result.error().body.empty());
+    REQUIRE(server.chat_hits() == 0);
+  }
+
+  SECTION("discarded raw tree") {
+    ChatRequest request;
+    request.model = "m";
+    request.messages = {Message::user("hi")};
+    request.extra = nlohmann::json::object();
+    request.extra["future"] =
+        nlohmann::json::parse("{", nullptr, /*allow_exceptions=*/false);
+    REQUIRE(request.extra["future"].is_discarded());
+    const auto result = client.chat(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(server.chat_hits() == 0);
+  }
+
+  SECTION("JSON image transformation") {
+    venice::ImageUpscaleRequest request;
+    request.image = venice::image_input::base64(invalid);
+    const auto result = client.upscale_image(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(server.image_transform_hits() == 0);
+  }
+
+  SECTION("Chat SSE") {
+    ChatRequest request;
+    request.model = "m";
+    request.messages = {Message::user(invalid)};
+    bool invoked = false;
+    const auto result = client.chat_stream(request, [&](std::string_view) {
+      invoked = true;
+      return true;
+    });
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE_FALSE(invoked);
+    REQUIRE(server.chat_hits() == 0);
+  }
+
+  SECTION("streamed speech") {
+    venice::SpeechRequest request;
+    request.input = invalid;
+    bool invoked = false;
+    const auto result =
+        client.generate_speech_stream(request, [&](std::string_view) {
+          invoked = true;
+          return true;
+        });
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE_FALSE(invoked);
+    REQUIRE(server.audio_hits() == 0);
+  }
+}

@@ -111,6 +111,17 @@ have since landed there as CT-14.
 
 ## Next up
 
+**VC-48 (#83) is implemented for v0.29.4.** Every request-side JSON body now
+passes through one expected-returning encoder. Invalid UTF-8 and discarded JSON
+nodes at any depth return `InvalidArg` before transport without echoing caller
+content; nothing is repaired into replacement text or `null`.
+
+The failure-first matrix covers buffered JSON, JSON image transformations, Chat
+SSE, streamed speech and JSON-valued multipart fields. Loopback hit counts prove
+the rejected bodies emit no partial request, while valid Unicode and arbitrary
+raw JSON retain the byte representation produced by the previous strict
+serializer. No live API call or credential is needed.
+
 **VC-46 (#81) is implemented for v0.29.3.** Regular API-key creation now fails
 closed when an error or malformed successful response is not valid JSON. Rather
 than copying potentially one-time credential material into `Error::body`, the

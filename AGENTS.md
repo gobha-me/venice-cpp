@@ -121,6 +121,16 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   one bool, and it leaves no second source of truth for that bit. The parameter
   has no default, on purpose: a defaulted `stream` would rebuild the very defect
   it retires, a bit that looks set and silently never reaches the wire.
+- **JSON encoding fails closed through one expected-returning helper.** Strict
+  nlohmann serialization rejects invalid UTF-8, while a discarded node would
+  otherwise emit the syntactically invalid token `<discarded>`; both are
+  `InvalidArg` before transport and diagnostics name only the library-owned
+  field class. The discarded check is recursive because the invalid token can
+  hide in any raw array/object, but it is representability checking only: do not
+  turn it into a schema, range or item-universe walk. Buffered JSON, Chat SSE,
+  streamed speech, JSON image transformations and JSON-valued multipart fields
+  all route through `detail::encode_json`. Never repair bytes with replacement
+  characters or silently substitute `null` (VC-48).
 - **Chat stream options do not own the stream bit.** `ChatRequest::stream_options`
   is emitted only by `chat_stream()`; buffered `chat()` erases even an
   `extra["stream_options"]`, while the streaming path preserves an extra-supplied
