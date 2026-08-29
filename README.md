@@ -825,7 +825,10 @@ Usage totals remain decimal strings, while configured limits are the JSON
 numbers the server publishes. Missing and explicit zero never collapse.
 The one exception is `ApiKeyCreated::raw`: every nested `apiKey` value is
 replaced with `[REDACTED]`, so the complete one-time secret exists only in
-`ApiKeyCreated::api_key`. Create-error bodies receive the same redaction.
+`ApiKeyCreated::api_key`. Valid-JSON create errors receive the same recursive
+redaction; a non-JSON body becomes a generic redacted marker because its bytes
+cannot be inspected safely. Web3 creation applies the same fail-closed policy
+while additionally redacting challenge tokens and signatures.
 
 ```cpp
 const auto keys = client.api_keys();
@@ -1396,7 +1399,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.2)
+  GIT_TAG        v0.29.3)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
