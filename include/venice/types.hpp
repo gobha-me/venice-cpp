@@ -2777,11 +2777,10 @@ struct ChatResponse {
   //
   // Two consequences of a loud read, both checkable rather than rhetorical: on
   // the non-streamed path it turns a metadata field into ErrorKind::Parse for a
-  // completion already paid for; and on the streamed path client.hpp's SSE
-  // lambda catches the throw into `parse_err`, which is surfaced only when the
-  // accumulator is empty, so a loud parse there yields a half-ingested frame
-  // with on_delta silently skipped. Reasoning, not measurement — no corrupt
-  // cost has ever been observed.
+  // completion already paid for; and on the streamed path it fails the call
+  // after cost has already been retained but before the malformed usage delta
+  // reaches on_delta. Reasoning, not measurement — no corrupt cost has ever
+  // been observed.
   std::optional<Price> cost{};
 
   // HTTP response metadata, populated by Client rather than from the JSON body.

@@ -139,6 +139,14 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   conveniences. `StreamDelta::logprobs` borrows the current choice fragment;
   the accumulator does not invent a merge for provider-shaped logprobs whose
   published schema defines no cross-frame composition.
+- **Chat SSE failures are terminal, but accepted deltas remain caller-owned.**
+  A 2xx must be `text/event-stream`; missing or wrong media, event overflow,
+  malformed JSON and typed-ingest failures are `Parse` even after earlier valid
+  content. Standard and nonstandard observer exceptions stop callbacks and
+  become `InvalidArg`. Multiple `data:` fields form one newline-joined event,
+  and `[DONE]` makes later frames inert. Cancellation still wins every race and
+  callback `false` remains deliberate partial success. The caller's
+  `StreamAccumulator` retains every delta ingested before any failure (VC-49).
 - **Range checking: none, deliberately — representability checking: yes.**
   Structural preconditions that make a request unsendable by construction are
   `ErrorKind::InvalidArg`, checked in `Client::validate` before any socket: an
@@ -314,17 +322,13 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   and sits on the tolerant side of it; `Usage`'s counts sit on the loud side.
   Two further consequences of a loud read, both checkable: it would turn a
   metadata field into `ErrorKind::Parse` for a completion already paid for; and
-  on the streamed path `chat_stream`'s SSE lambda catches the throw into
-  `parse_err`, which is surfaced only when the accumulator is empty — so a loud
-  parse there is a half-ingested frame with `on_delta` silently skipped, not a
-  loud failure. `test/07stream/` §3's wrong-typed-cost case is where the choice
-  is pinned.
+  on the streamed path it fails the whole call after cost has already been
+  retained but before the malformed usage delta reaches `on_delta`.
+  `test/07stream/` §3's wrong-typed-cost case is where the ordering is pinned.
 
-  (Noted while measuring that: `StreamAccumulator::ingest`'s
-  `d.usage->get<Usage>()` has the same exposure today — a wrong-typed
-  `prompt_tokens` on a streamed usage frame half-ingests and reports nothing,
-  where the non-streamed path fails loudly on the same body. A streamed/
-  non-streamed asymmetry in `Usage`, and its own ticket.)
+  (`StreamAccumulator::ingest`'s `d.usage->get<Usage>()` still has the same
+  half-ingest ordering: cost is retained before malformed usage throws. VC-49
+  made that throw terminal and visible; VC-52 owns the integer reader itself.)
 - **The `data` envelope fallback is only safe when the inner container's JSON
   type differs from the envelope's.** Three parsers in `types.hpp` open with
   `const auto* data = opt_array(j, "data"); const json& arr = data ? *data : j;`

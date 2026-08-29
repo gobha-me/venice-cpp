@@ -954,11 +954,14 @@ TEST_CASE("lines that are not data: are ignored", "[stream][framer][failure]") {
   SECTION("only one leading space is stripped, the rest is payload") {
     REQUIRE(framed({"data:   x\n\n"}).at(0) == "  x");
   }
-  SECTION("multiple data lines in one event each dispatch") {
+  SECTION("multiple data lines in one event are newline-joined and dispatch once") {
     const auto seen = framed({"data: one\ndata: two\n\n"});
-    REQUIRE(seen.size() == 2);
-    REQUIRE(seen.at(0) == "one");
-    REQUIRE(seen.at(1) == "two");
+    REQUIRE(seen.size() == 1);
+    REQUIRE(seen.at(0) == "one\ntwo");
+  }
+  SECTION("empty data fields retain their newline position") {
+    const auto seen = framed({"data: one\ndata:\ndata: three\n\n"});
+    REQUIRE(seen == std::vector<std::string>{"one\n\nthree"});
   }
   SECTION("an empty stream yields nothing and does not fault") {
     REQUIRE(framed({}).empty());
@@ -970,9 +973,40 @@ TEST_CASE("the buffer is bounded", "[stream][framer][failure]") {
   // A peer that never sends a blank line used to buffer its entire response.
   venice::detail::SseFramer f;
   const std::string big(venice::detail::SseFramer::kMaxEvent + 1, 'x');
-  const auto ok = f.feed(big, [](std::string_view) {});
+  std::vector<std::string> seen;
+  const auto sink = [&](std::string_view payload) { seen.emplace_back(payload); };
+  const auto ok = f.feed(big, sink);
   REQUIRE_FALSE(ok);
   REQUIRE(f.overflowed());
+
+  SECTION("overflow is terminal until reset") {
+    REQUIRE_FALSE(f.feed("data: must-not-resume\n\n", sink));
+    f.finish(sink);
+    REQUIRE(seen.empty());
+
+    f.reset();
+    REQUIRE(f.feed("data: resumed-after-reset\n\n", sink));
+    REQUIRE(seen == std::vector<std::string>{"resumed-after-reset"});
+  }
+
+  SECTION("a complete oversized event is rejected before dispatch") {
+    venice::detail::SseFramer complete;
+    const std::string event =
+        std::string(venice::detail::SseFramer::kMaxEvent + 1, 'x') + "\n\n";
+    REQUIRE_FALSE(complete.feed(event, sink));
+    REQUIRE(complete.overflowed());
+    REQUIRE(seen.empty());
+  }
+
+  SECTION("an event exactly at the cap remains representable") {
+    venice::detail::SseFramer exact;
+    const std::string event =
+        std::string(venice::detail::SseFramer::kMaxEvent, 'x') + "\n\n";
+    REQUIRE(exact.feed(event, sink));
+    REQUIRE_FALSE(exact.overflowed());
+    // No data field: the event is structurally valid but has no dispatch.
+    REQUIRE(seen.empty());
+  }
 }
 
 // ── §8 delta_from_chunk ───────────────────────────────────────────────────
@@ -1356,12 +1390,11 @@ TEST_CASE("the last cost frame wins", "[stream][accumulator][cost][failure]") {
 TEST_CASE("a corrupt usage does not take the cost with it", "[stream][accumulator][cost][failure]") {
   // CONSTRUCTED, and the ordering inside ingest is the whole subject. Cost rides
   // on the usage frame — one object, both keys — and the usage read is loud, so
-  // it throws out of ingest on a wrong-typed count. chat_stream catches that
-  // into parse_err and surfaces it only when the accumulator is empty, which a
-  // stream carrying content never is: the throw is silent. If the cost read sat
-  // after the usage read, a corrupt token count would silently cost the caller
-  // the billing figure — exactly what ChatResponse::cost's tolerant parse exists
-  // to prevent, undone one file over.
+  // it throws out of ingest on a wrong-typed count. chat_stream now surfaces
+  // that as a terminal Parse result, but the mutation ordering remains: if the
+  // cost read sat after the usage read, a corrupt token count would cost the
+  // caller the billing figure. That is exactly what ChatResponse::cost's
+  // tolerant parse exists to prevent, undone one file over.
   venice::StreamAccumulator acc;
   acc.ingest(nlohmann::json::parse(R"({"choices":[{"delta":{"content":"a"}}]})"));
   REQUIRE_THROWS(acc.ingest(nlohmann::json::parse(

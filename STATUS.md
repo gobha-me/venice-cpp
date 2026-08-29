@@ -111,6 +111,20 @@ have since landed there as CT-14.
 
 ## Next up
 
+**VC-49 (#84) is implemented for v0.29.5.** Chat SSE now has explicit terminal
+outcomes instead of allowing protocol and observer failures to fall through to
+success. A 2xx requires normalized `text/event-stream`; event overflow,
+malformed JSON and typed-ingest failures are `Parse` even after earlier content,
+and standard or nonstandard observer exceptions are `InvalidArg`. `[DONE]` is
+terminal and multiple `data:` fields are newline-joined once per event.
+
+The caller-owned accumulator retains every accepted delta on failure.
+Cancellation still wins races, callback `false` remains deliberate partial
+success, non-2xx bodies keep their existing HTTP classification, and wrong-media
+successes preserve body and response metadata. The offline failure matrix covers
+all of those paths, including a corrupt usage frame after valid content and an
+8 MiB overflow; no live API call or credential is needed.
+
 **VC-48 (#83) is implemented for v0.29.4.** Every request-side JSON body now
 passes through one expected-returning encoder. Invalid UTF-8 and discarded JSON
 nodes at any depth return `InvalidArg` before transport without echoing caller
@@ -874,12 +888,14 @@ Six things are worth knowing, five measured rather than reasoned:
   *no representation for "unknown"* —
   `prompt_tokens` is `int{0}` — while both members here are `optional<double>`
   whose disengaged state already means unknown. The sharper half of the reason
-  is structural and was found by reading rather than assumed: a throw out of
-  `StreamAccumulator::ingest` is caught into `parse_err`, which `chat_stream`
-  surfaces only when the accumulator is empty, so a loud parse on the streamed
-  path is a **half-ingested frame with `on_delta` silently skipped** — not a
-  loud failure. Break B7 makes `Price::from_json` loud and reddens five cases
-  across two binaries, so the tolerance is load bearing rather than decorative.
+  is structural and was found by reading rather than assumed: before VC-49, a
+  throw out of `StreamAccumulator::ingest` was caught into `parse_err` and
+  surfaced only when the accumulator was empty, so a loud parse on the streamed
+  path was a **half-ingested frame with `on_delta` silently skipped** rather
+  than a loud failure. VC-49 made that state terminal and visible while
+  preserving the accepted partial accumulator. Break B7 makes
+  `Price::from_json` loud and reddens five cases across two binaries, so the
+  tolerance is load bearing rather than decorative.
   A distinct `Cost` struct was considered and rejected: it would say the
   rate-vs-amount difference in the type system, but two structs differing only
   in a two-line `from_json` is the second convention #34 warned against, and the

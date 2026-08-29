@@ -1255,6 +1255,15 @@ of them; an `n > 1` frame produces one callback per choice with the same
 additive instead of an ABI break. **It is a view** — valid only for the duration
 of the callback. Anything worth keeping is already in the accumulator.
 
+The stream boundary fails closed. A successful response must carry
+`text/event-stream`; malformed or oversized events and typed-ingest failures
+return `ErrorKind::Parse`, while an exception from either callback shape returns
+`ErrorKind::InvalidArg` without escaping. In every case, a caller-supplied
+`StreamAccumulator` still owns the valid deltas accepted before the failure.
+Multiple SSE `data:` fields are newline-joined into one event, and `[DONE]` is
+terminal. Callback `false` remains deliberate partial success, and cancellation
+still takes precedence over every competing outcome.
+
 ### Round-tripping a turn
 
 A reply is a `Message`, and a `Message` is what you send. That is the whole
@@ -1407,7 +1416,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.4)
+  GIT_TAG        v0.29.5)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

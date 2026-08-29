@@ -2048,6 +2048,7 @@ class TestServer {
                    return;
                  }
                  const auto body = nlohmann::json::parse(req.body);
+                 const auto model = body.at("model").get<std::string>();
                  res.set_header("x-balance-remaining", "4.230000");
                  res.set_header("X-Protocol-Trace", "retained-on-success");
                  if (!body.at("stream").get<bool>()) {
@@ -2059,6 +2060,61 @@ class TestServer {
                                                             {{"role", "assistant"},
                                                              {"content", "ok"}}}}})}};
                    res.set_content(response.dump(), "application/json");
+                   return;
+                 }
+
+                 const std::string first_frame =
+                     "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n";
+                 if (model == "stream-wrong-media") {
+                   res.set_content("not an event stream", "text/plain");
+                   return;
+                 }
+                 if (model == "stream-missing-media") {
+                   res.body = "missing event-stream media type";
+                   return;
+                 }
+                 if (model == "stream-overflow") {
+                   res.set_content(first_frame + "data: " +
+                                       std::string(venice::detail::SseFramer::kMaxEvent, 'x'),
+                                   "text/event-stream");
+                   return;
+                 }
+                 if (model == "stream-malformed-after-content") {
+                   res.set_content(first_frame + "data: {\n\n", "text/event-stream");
+                   return;
+                 }
+                 if (model == "stream-bad-usage-after-content") {
+                   res.set_content(
+                       first_frame +
+                           "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":\"ten\","
+                           "\"completion_tokens\":2,\"total_tokens\":3}}\n\n",
+                       "text/event-stream");
+                   return;
+                 }
+                 if (model == "stream-done-after-usage") {
+                   res.set_content(
+                       first_frame +
+                           "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,"
+                           "\"completion_tokens\":2,\"total_tokens\":3}}\n\n"
+                           "data: [DONE]\n\n"
+                           "data: {\"choices\":[{\"delta\":{\"content\":\"ignored\"}}]}\n\n",
+                       "Text/Event-Stream; charset=UTF-8");
+                   return;
+                 }
+                 if (model == "stream-multiline-data") {
+                   res.set_content(
+                       "data: {\"choices\":[\n"
+                       "data: {\"delta\":{\"content\":\"joined\"}}]}\n\n"
+                       "data: [DONE]\n\n",
+                       "text/event-stream");
+                   return;
+                 }
+                 if (model == "stream-complete") {
+                   res.set_content(
+                       first_frame +
+                           "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n"
+                           "data: [DONE]\n\n",
+                       "text/event-stream");
                    return;
                  }
                  // Per-request, not per-server: two tests drive this endpoint,
@@ -4133,6 +4189,184 @@ TEST_CASE("402 is payment-required and preserves body and headers on both chat p
   REQUIRE_FALSE(streamed.has_value());
   assert_payment_error(streamed.error());
   REQUIRE(acc.empty());
+}
+
+TEST_CASE("Chat SSE rejects missing and wrong success media with response evidence",
+          "[transport][stream][media][failure]") {
+  const TestServer server;
+  const Client client{"stream-key", server.base_url()};
+
+  const std::array cases{
+      std::pair{"stream-missing-media", "missing event-stream media type"},
+      std::pair{"stream-wrong-media", "not an event stream"},
+  };
+  for (const auto& [model, body] : cases) {
+    DYNAMIC_SECTION(model) {
+      auto request = minimal_chat();
+      request.model = model;
+      venice::StreamAccumulator acc;
+      const auto result = client.chat_stream(request, acc);
+
+      REQUIRE_FALSE(result.has_value());
+      REQUIRE(result.error().kind == ErrorKind::Parse);
+      REQUIRE(result.error().status == 200);
+      REQUIRE(result.error().body == body);
+      REQUIRE(result.error().metadata.x_balance_remaining == "4.230000");
+      REQUIRE(result.error().metadata.header("x-protocol-trace") ==
+              "retained-on-success");
+      REQUIRE(acc.empty());
+    }
+  }
+}
+
+TEST_CASE("Chat SSE protocol failures are terminal and preserve accepted deltas",
+          "[transport][stream][failure]") {
+  const TestServer server;
+  const Client client{"stream-key", server.base_url()};
+
+  for (const std::string model : {"stream-overflow", "stream-malformed-after-content",
+                                  "stream-bad-usage-after-content"}) {
+    DYNAMIC_SECTION(model) {
+      auto request = minimal_chat();
+      request.model = model;
+      venice::StreamAccumulator acc;
+      int callbacks = 0;
+      const auto result = client.chat_stream(
+          request, acc,
+          [&](const venice::StreamDelta&) {
+            ++callbacks;
+            return true;
+          });
+
+      REQUIRE_FALSE(result.has_value());
+      REQUIRE(result.error().kind == ErrorKind::Parse);
+      REQUIRE(result.error().status == 200);
+      REQUIRE(result.error().metadata.x_balance_remaining == "4.230000");
+      REQUIRE(callbacks == 1);
+      REQUIRE(acc.message().text() == "a");
+      REQUIRE_FALSE(acc.empty());
+      if (model == "stream-overflow")
+        REQUIRE(result.error().message.find("8 MiB") != std::string::npos);
+    }
+  }
+}
+
+TEST_CASE("Chat SSE callback exceptions stop observation and cannot escape",
+          "[transport][stream][callback][failure]") {
+  const TestServer server;
+  const Client client{"stream-key", server.base_url()};
+  auto request = minimal_chat();
+  request.model = "stream-complete";
+
+  SECTION("standard exception") {
+    venice::StreamAccumulator acc;
+    int callbacks = 0;
+    const auto result = client.chat_stream(
+        request, acc,
+        [&](const venice::StreamDelta&) -> bool {
+          ++callbacks;
+          throw std::runtime_error{"fixture"};
+        });
+
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(result.error().message == "chat callback: fixture");
+    REQUIRE(callbacks == 1);
+    REQUIRE(acc.message().text() == "a");
+  }
+
+  SECTION("nonstandard exception") {
+    venice::StreamAccumulator acc;
+    int callbacks = 0;
+    const auto result = client.chat_stream(
+        request, acc,
+        [&](const venice::StreamDelta&) -> bool {
+          ++callbacks;
+          throw 7;
+        });
+
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(result.error().message == "chat callback: unknown exception");
+    REQUIRE(callbacks == 1);
+    REQUIRE(acc.message().text() == "a");
+  }
+
+  SECTION("content callback exception follows the same boundary") {
+    int callbacks = 0;
+    const auto result = client.chat_stream(
+        request,
+        [&](std::string_view) -> bool {
+          ++callbacks;
+          throw std::runtime_error{"content fixture"};
+        });
+
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(result.error().message == "chat callback: content fixture");
+    REQUIRE(callbacks == 1);
+  }
+
+  SECTION("cancellation wins a callback-failure race") {
+    venice::CancelToken token;
+    venice::StreamAccumulator acc;
+    const auto result = client.chat_stream(
+        request, acc,
+        [&](const venice::StreamDelta&) -> bool {
+          token.cancel();
+          throw std::runtime_error{"must lose to cancellation"};
+        },
+        {.cancel = &token});
+
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().kind == ErrorKind::Cancelled);
+    REQUIRE(acc.message().text() == "a");
+  }
+}
+
+TEST_CASE("Chat SSE joins data fields and treats DONE as terminal success",
+          "[transport][stream]") {
+  const TestServer server;
+  const Client client{"stream-key", server.base_url()};
+
+  SECTION("multiple data fields form one JSON payload and one delta") {
+    auto request = minimal_chat();
+    request.model = "stream-multiline-data";
+    venice::StreamAccumulator acc;
+    int callbacks = 0;
+    const auto result = client.chat_stream(
+        request, acc,
+        [&](const venice::StreamDelta&) {
+          ++callbacks;
+          return true;
+        });
+
+    REQUIRE(result.has_value());
+    REQUIRE(result->content == "joined");
+    REQUIRE(callbacks == 1);
+  }
+
+  SECTION("frames after DONE are ignored without losing prior usage") {
+    auto request = minimal_chat();
+    request.model = "stream-done-after-usage";
+    venice::StreamAccumulator acc;
+    int callbacks = 0;
+    const auto result = client.chat_stream(
+        request, acc,
+        [&](const venice::StreamDelta&) {
+          ++callbacks;
+          return true;
+        });
+
+    REQUIRE(result.has_value());
+    REQUIRE(result->content == "a");
+    REQUIRE(result->usage.has_value());
+    REQUIRE(result->usage->prompt_tokens == 1);
+    REQUIRE(result->usage->completion_tokens == 2);
+    REQUIRE(result->usage->total_tokens == 3);
+    REQUIRE(callbacks == 2);  // content plus the usage-only envelope
+    REQUIRE(acc.chunks().size() == 2);
+  }
 }
 
 // ── buffered substrate: failure matrix first (VC-22) ──────────────────────────
