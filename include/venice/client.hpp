@@ -71,6 +71,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <exception>
 #include <expected>
 #include <functional>
 #include <initializer_list>
@@ -229,6 +230,41 @@ inline void append_param(std::string& out, char& sep, std::string_view key,
 
 enum class HttpMethod { Get, Post, Patch, Delete };
 
+[[nodiscard]] inline auto contains_discarded_json(const nlohmann::json &value)
+    -> bool {
+  if (value.is_discarded())
+    return true;
+  if (!value.is_array() && !value.is_object())
+    return false;
+  for (const auto &child : value)
+    if (contains_discarded_json(child))
+      return true;
+  return false;
+}
+
+// nlohmann's strict dump rejects malformed UTF-8, but a discarded node emits
+// the non-JSON token <discarded>. Keep both failures behind the expected-based
+// public contract and never copy caller-authored content into the diagnostic.
+[[nodiscard]] inline auto encode_json(const nlohmann::json &value,
+                                      std::string_view field_class)
+    -> std::expected<std::string, Error> {
+  if (contains_discarded_json(value))
+    return std::unexpected{
+        Error{ErrorKind::InvalidArg,
+              0,
+              std::string{field_class} + " contains a discarded JSON value",
+              {}}};
+  try {
+    return value.dump();
+  } catch (const std::exception &) {
+    return std::unexpected{
+        Error{ErrorKind::InvalidArg,
+              0,
+              std::string{field_class} + " cannot be encoded as JSON",
+              {}}};
+  }
+}
+
 struct ByteBody {
   // std::string is the byte container cpp-httplib accepts. Its size, rather
   // than a terminating NUL, is authoritative, so arbitrary binary data is
@@ -254,12 +290,15 @@ inline void append_form_field(MultipartBody& body, std::string name, std::string
   body.parts.push_back({.name = std::move(name), .bytes = std::move(value)});
 }
 
-inline void append_form_field(MultipartBody& body, std::string name, bool value) {
-  append_form_field(body, std::move(name), std::string{value ? "true" : "false"});
-}
-
-inline void append_form_field(MultipartBody& body, std::string name, double value) {
-  append_form_field(body, std::move(name), nlohmann::json(value).dump());
+[[nodiscard]] inline auto append_json_form_field(MultipartBody &body,
+                                                 std::string name,
+                                                 const nlohmann::json &value)
+    -> std::expected<void, Error> {
+  auto encoded = encode_json(value, "multipart JSON field");
+  if (!encoded)
+    return std::unexpected{std::move(encoded.error())};
+  append_form_field(body, std::move(name), std::move(*encoded));
+  return {};
 }
 
 inline void append_image_file(MultipartBody& body, std::string name,
@@ -295,14 +334,20 @@ document_parse_body(const DocumentParseRequest &request) -> MultipartBody {
   return body;
 }
 
-[[nodiscard]] inline auto audio_transcription_body(
-    const AudioTranscriptionRequest& request) -> MultipartBody {
+[[nodiscard]] inline auto
+audio_transcription_body(const AudioTranscriptionRequest &request)
+    -> std::expected<MultipartBody, Error> {
   MultipartBody body;
   append_audio_file(body, "file", request.file);
   if (request.model) append_form_field(body, "model", *request.model);
   if (request.response_format)
     append_form_field(body, "response_format", *request.response_format);
-  if (request.timestamps) append_form_field(body, "timestamps", *request.timestamps);
+  if (request.timestamps) {
+    auto appended =
+        append_json_form_field(body, "timestamps", *request.timestamps);
+    if (!appended)
+      return std::unexpected{std::move(appended.error())};
+  }
   if (request.language) append_form_field(body, "language", *request.language);
   return body;
 }
@@ -315,45 +360,81 @@ document_parse_body(const DocumentParseRequest &request) -> MultipartBody {
   return body;
 }
 
-[[nodiscard]] inline auto image_upscale_body(const ImageUpscaleRequest& request)
-    -> BufferedBody {
+[[nodiscard]] inline auto image_upscale_body(const ImageUpscaleRequest &request)
+    -> std::expected<BufferedBody, Error> {
   const auto* file = std::get_if<ImageFile>(&request.image);
-  if (file == nullptr)
-    return ByteBody{request.to_json_body().dump(), "application/json"};
+  if (file == nullptr) {
+    auto encoded = encode_json(request.to_json_body(), "JSON request body");
+    if (!encoded)
+      return std::unexpected{std::move(encoded.error())};
+    return BufferedBody{ByteBody{std::move(*encoded), "application/json"}};
+  }
 
   MultipartBody body;
   append_image_file(body, "image", *file);
-  if (request.creativity) append_form_field(body, "creativity", *request.creativity);
-  if (request.scale) append_form_field(body, "scale", *request.scale);
-  return body;
+  if (request.creativity) {
+    auto appended =
+        append_json_form_field(body, "creativity", *request.creativity);
+    if (!appended)
+      return std::unexpected{std::move(appended.error())};
+  }
+  if (request.scale) {
+    auto appended = append_json_form_field(body, "scale", *request.scale);
+    if (!appended)
+      return std::unexpected{std::move(appended.error())};
+  }
+  return BufferedBody{std::move(body)};
 }
 
-[[nodiscard]] inline auto image_edit_body(const ImageEditRequest& request) -> BufferedBody {
+[[nodiscard]] inline auto image_edit_body(const ImageEditRequest &request)
+    -> std::expected<BufferedBody, Error> {
   const auto* file = std::get_if<ImageFile>(&request.image);
-  if (file == nullptr)
-    return ByteBody{request.to_json_body().dump(), "application/json"};
+  if (file == nullptr) {
+    auto encoded = encode_json(request.to_json_body(), "JSON request body");
+    if (!encoded)
+      return std::unexpected{std::move(encoded.error())};
+    return BufferedBody{ByteBody{std::move(*encoded), "application/json"}};
+  }
 
   MultipartBody body;
   append_image_file(body, "image", *file);
   append_form_field(body, "prompt", request.prompt);
   if (request.model) append_form_field(body, "model", *request.model);
   if (request.aspect_ratio) append_form_field(body, "aspect_ratio", *request.aspect_ratio);
-  if (request.disable_prompt_optimization_thinking)
-    append_form_field(body, "disable_prompt_optimization_thinking",
-                      *request.disable_prompt_optimization_thinking);
-  if (request.enhance_prompt)
-    append_form_field(body, "enhance_prompt", *request.enhance_prompt);
+  if (request.disable_prompt_optimization_thinking) {
+    auto appended =
+        append_json_form_field(body, "disable_prompt_optimization_thinking",
+                               *request.disable_prompt_optimization_thinking);
+    if (!appended)
+      return std::unexpected{std::move(appended.error())};
+  }
+  if (request.enhance_prompt) {
+    auto appended =
+        append_json_form_field(body, "enhance_prompt", *request.enhance_prompt);
+    if (!appended)
+      return std::unexpected{std::move(appended.error())};
+  }
   if (request.resolution) append_form_field(body, "resolution", *request.resolution);
   if (request.output_format) append_form_field(body, "output_format", *request.output_format);
-  if (request.safe_mode) append_form_field(body, "safe_mode", *request.safe_mode);
-  return body;
+  if (request.safe_mode) {
+    auto appended =
+        append_json_form_field(body, "safe_mode", *request.safe_mode);
+    if (!appended)
+      return std::unexpected{std::move(appended.error())};
+  }
+  return BufferedBody{std::move(body)};
 }
 
-[[nodiscard]] inline auto multi_image_edit_body(const MultiImageEditRequest& request)
-    -> BufferedBody {
+[[nodiscard]] inline auto
+multi_image_edit_body(const MultiImageEditRequest &request)
+    -> std::expected<BufferedBody, Error> {
   if (!request.images.empty() &&
-      std::get_if<ImageFile>(&request.images.front()) == nullptr)
-    return ByteBody{request.to_json_body().dump(), "application/json"};
+      std::get_if<ImageFile>(&request.images.front()) == nullptr) {
+    auto encoded = encode_json(request.to_json_body(), "JSON request body");
+    if (!encoded)
+      return std::unexpected{std::move(encoded.error())};
+    return BufferedBody{ByteBody{std::move(*encoded), "application/json"}};
+  }
 
   MultipartBody body;
   for (const auto& input : request.images)
@@ -364,24 +445,42 @@ document_parse_body(const DocumentParseRequest &request) -> MultipartBody {
   if (request.output_format) append_form_field(body, "output_format", *request.output_format);
   if (request.quality) append_form_field(body, "quality", *request.quality);
   if (request.resolution) append_form_field(body, "resolution", *request.resolution);
-  if (request.safe_mode) append_form_field(body, "safe_mode", *request.safe_mode);
-  if (request.disable_prompt_optimization_thinking)
-    append_form_field(body, "disable_prompt_optimization_thinking",
-                      *request.disable_prompt_optimization_thinking);
-  if (request.enhance_prompt)
-    append_form_field(body, "enhance_prompt", *request.enhance_prompt);
-  return body;
+  if (request.safe_mode) {
+    auto appended =
+        append_json_form_field(body, "safe_mode", *request.safe_mode);
+    if (!appended)
+      return std::unexpected{std::move(appended.error())};
+  }
+  if (request.disable_prompt_optimization_thinking) {
+    auto appended =
+        append_json_form_field(body, "disable_prompt_optimization_thinking",
+                               *request.disable_prompt_optimization_thinking);
+    if (!appended)
+      return std::unexpected{std::move(appended.error())};
+  }
+  if (request.enhance_prompt) {
+    auto appended =
+        append_json_form_field(body, "enhance_prompt", *request.enhance_prompt);
+    if (!appended)
+      return std::unexpected{std::move(appended.error())};
+  }
+  return BufferedBody{std::move(body)};
 }
 
-[[nodiscard]] inline auto image_background_removal_body(
-    const ImageBackgroundRemovalRequest& request) -> BufferedBody {
+[[nodiscard]] inline auto
+image_background_removal_body(const ImageBackgroundRemovalRequest &request)
+    -> std::expected<BufferedBody, Error> {
   const auto* file = std::get_if<ImageFile>(&request.image);
-  if (file == nullptr)
-    return ByteBody{request.to_json_body().dump(), "application/json"};
+  if (file == nullptr) {
+    auto encoded = encode_json(request.to_json_body(), "JSON request body");
+    if (!encoded)
+      return std::unexpected{std::move(encoded.error())};
+    return BufferedBody{ByteBody{std::move(*encoded), "application/json"}};
+  }
 
   MultipartBody body;
   append_image_file(body, "image", *file);
-  return body;
+  return BufferedBody{std::move(body)};
 }
 
 struct BufferedRequest {
@@ -803,7 +902,10 @@ class Client {
     if (!headers) return std::unexpected{std::move(headers.error())};
     acc.reset();
 
-    const std::string payload = req.to_json_body(/*stream=*/true).dump();
+    auto payload = detail::encode_json(req.to_json_body(/*stream=*/true),
+                                       "JSON request body");
+    if (!payload)
+      return std::unexpected{std::move(payload.error())};
 
     bool early_stop = false;  // on_delta said stop — NOT opts.cancel; see above
     bool response_is_success = false;
@@ -824,7 +926,7 @@ class Client {
     hreq.method = "POST";
     hreq.path = detail::request_path(m_base_url, "/chat/completions");
     hreq.headers = *headers;
-    hreq.body = payload;
+    hreq.body = std::move(*payload);
     hreq.set_header("Content-Type", "application/json");
     hreq.response_handler = [&](const httplib::Response& response) {
       response_is_success = response.status >= 200 && response.status < 300;
@@ -1040,7 +1142,10 @@ class Client {
       -> std::expected<GeneratedImageMedia, Error> {
     if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
     static constexpr std::array<std::string_view, 1> kAllowed{"image/png"};
-    return post_image_media_response("/image/upscale", detail::image_upscale_body(req),
+    auto body = detail::image_upscale_body(req);
+    if (!body)
+      return std::unexpected{std::move(body.error())};
+    return post_image_media_response("/image/upscale", std::move(*body),
                                      kAllowed, opts);
   }
 
@@ -1050,8 +1155,11 @@ class Client {
     if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
     static constexpr std::array<std::string_view, 3> kAllowed{
         "image/jpeg", "image/png", "image/webp"};
-    return post_image_media_response("/image/edit", detail::image_edit_body(req),
-                                     kAllowed, opts);
+    auto body = detail::image_edit_body(req);
+    if (!body)
+      return std::unexpected{std::move(body.error())};
+    return post_image_media_response("/image/edit", std::move(*body), kAllowed,
+                                     opts);
   }
 
   [[nodiscard]] auto multi_edit_image(const MultiImageEditRequest& req,
@@ -1060,8 +1168,11 @@ class Client {
     if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
     static constexpr std::array<std::string_view, 3> kAllowed{
         "image/jpeg", "image/png", "image/webp"};
-    return post_image_media_response("/image/multi-edit",
-                                     detail::multi_image_edit_body(req), kAllowed, opts);
+    auto body = detail::multi_image_edit_body(req);
+    if (!body)
+      return std::unexpected{std::move(body.error())};
+    return post_image_media_response("/image/multi-edit", std::move(*body),
+                                     kAllowed, opts);
   }
 
   [[nodiscard]] auto remove_image_background(
@@ -1070,9 +1181,11 @@ class Client {
       -> std::expected<GeneratedImageMedia, Error> {
     if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
     static constexpr std::array<std::string_view, 1> kAllowed{"image/png"};
+    auto body = detail::image_background_removal_body(req);
+    if (!body)
+      return std::unexpected{std::move(body.error())};
     return post_image_media_response("/image/background-remove",
-                                     detail::image_background_removal_body(req),
-                                     kAllowed, opts);
+                                     std::move(*body), kAllowed, opts);
   }
 
   // ── audio ────────────────────────────────────────────────────────────
@@ -1103,6 +1216,11 @@ class Client {
     auto headers = request_headers(detail::AuthPolicy::BearerOrSignInWithX, opts);
     if (!headers) return std::unexpected{std::move(headers.error())};
 
+    auto payload =
+        detail::encode_json(req.to_json_body(true), "JSON request body");
+    if (!payload)
+      return std::unexpected{std::move(payload.error())};
+
     auto cli = detail::make_transport(m_base_url, opts);
     const detail::CancelGuard guard{opts.cancel, cli};
     if (guard.cancelled()) return std::unexpected{detail::cancel_error()};
@@ -1119,7 +1237,7 @@ class Client {
     hreq.method = "POST";
     hreq.path = detail::request_path(m_base_url, "/audio/speech");
     hreq.headers = std::move(*headers);
-    hreq.body = req.to_json_body(true).dump();
+    hreq.body = std::move(*payload);
     hreq.set_header("Content-Type", "application/json");
     hreq.response_handler = [&](const httplib::Response& response) {
       response_is_success = response.status >= 200 && response.status < 300;
@@ -1183,12 +1301,15 @@ class Client {
     if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
     auto headers = request_headers(detail::AuthPolicy::BearerOrSignInWithX, opts);
     if (!headers) return std::unexpected{std::move(headers.error())};
+    auto multipart_body = detail::audio_transcription_body(req);
+    if (!multipart_body)
+      return std::unexpected{std::move(multipart_body.error())};
     auto response = detail::send_buffered(
         m_base_url,
         detail::BufferedRequest{.method = detail::HttpMethod::Post,
                                 .endpoint = "/audio/transcriptions",
                                 .headers = std::move(*headers),
-                                .body = detail::audio_transcription_body(req)},
+                                .body = std::move(*multipart_body)},
         opts);
     if (!response) return std::unexpected{std::move(response.error())};
     if (response->status < 200 || response->status >= 300)
@@ -2854,8 +2975,12 @@ class Client {
     auto headers = request_headers(policy, opts);
     if (!headers) return std::unexpected{std::move(headers.error())};
     detail::BufferedBody encoded{};
-    if (body != nullptr)
-      encoded = detail::ByteBody{body->dump(), "application/json"};
+    if (body != nullptr) {
+      auto bytes = detail::encode_json(*body, "JSON request body");
+      if (!bytes)
+        return std::unexpected{std::move(bytes.error())};
+      encoded = detail::ByteBody{std::move(*bytes), "application/json"};
+    }
     return detail::send_buffered(
         m_base_url,
         detail::BufferedRequest{.method = method,

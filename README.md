@@ -1149,6 +1149,14 @@ offending field, before any HTTP call is made. Value-range policy belongs to the
 server, so `temperature = 5.0` is transmitted and the API decides. Values inside
 `extra` are passthrough and are not inspected, finiteness included.
 
+JSON representation itself does fail closed. Invalid UTF-8 and a discarded
+`nlohmann::json` value at any depth return `ErrorKind::InvalidArg` before a
+socket; the client neither substitutes replacement characters nor turns the
+value into `null`. This applies equally to buffered requests, Chat SSE,
+streamed speech, JSON-form image transformations and JSON-valued multipart
+fields. Diagnostics name the field class without copying prompt, upload or raw
+passthrough content. Valid raw JSON remains unchanged and is not schema-walked.
+
 ### Timeouts and cancellation
 
 Every entry point takes a trailing, defaulted `RequestOptions`. The defaults are
@@ -1399,7 +1407,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.3)
+  GIT_TAG        v0.29.4)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
