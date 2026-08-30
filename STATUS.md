@@ -114,6 +114,17 @@ have since landed there as CT-14.
 
 ## Next up
 
+**VC-51 (#86) is implemented for v0.29.7.** Transport construction is now an
+expected-returning boundary. Unsupported schemes and empty, signed,
+non-decimal, zero, overflowing or out-of-range ports return `InvalidArg` before
+a socket, with generic diagnostics that never echo the caller's base URL.
+
+The failure-first matrix covers buffered JSON, binary and multipart operations
+plus Chat SSE and streamed speech. Scheme-less hosts, HTTP/HTTPS, IPv6
+IPv6, explicit valid ports and `/api/...` prefixes remain supported, while
+post-construction DNS, TLS, connect, timeout and cancellation errors retain
+their existing classifications. No live API call or credential is needed.
+
 **VC-50 (#85) is implemented for v0.29.6.** Every image, audio and document
 upload now crosses one multipart-metadata validation boundary before transport.
 C0 controls and DEL are rejected in filenames and media types; quote and
