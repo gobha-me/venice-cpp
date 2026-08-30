@@ -85,6 +85,9 @@ AGENTS.md (which holds standing conventions, not state).
 - HTTP redirects are never followed (VC-47). A 3xx remains an `Http` error from
   its original server, so authentication/payment/idempotency headers and JSON,
   multipart or streaming request bodies cannot be replayed to `Location`.
+- Multipart filenames and media types are validated before transport (VC-50),
+  so caller-owned upload metadata cannot inject MIME part headers or disposition
+  parameters. File payload bytes remain unrestricted and byte-exact.
 - Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
   OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
 - OpenAPI coverage: 48/49 operations implemented. The sole remainder is the
@@ -110,6 +113,19 @@ was blinded by any comment mentioning a package name. Both were upstream bugs an
 have since landed there as CT-14.
 
 ## Next up
+
+**VC-50 (#85) is implemented for v0.29.6.** Every image, audio and document
+upload now crosses one multipart-metadata validation boundary before transport.
+C0 controls and DEL are rejected in filenames and media types; quote and
+backslash are additionally rejected in quoted filenames. Unsafe values return
+`InvalidArg` without being rewritten or echoed, while visible/high-byte syntax
+and endpoint MIME policy remain server-owned.
+
+The failure-first matrix covers every forbidden control byte, filename quote
+and backslash, CRLF part-header injection, disposition-parameter injection and
+all three owned upload types with zero loopback hits. Existing multipart checks
+also preserve repeated part order and byte-exact binary payloads containing NUL
+and boundary-like text. No live API call or credential is needed.
 
 **VC-49 (#84) is implemented for v0.29.5.** Chat SSE now has explicit terminal
 outcomes instead of allowing protocol and observer failures to fall through to

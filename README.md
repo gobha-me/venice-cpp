@@ -344,6 +344,13 @@ request's header structure. Their semantic formats remain server-owned and
 otherwise pass through byte-exact. Credentials are never copied into an
 `Error`.
 
+Owned multipart filenames and media types are checked at the same structural
+boundary before any image, audio or document upload. Filenames containing C0
+controls, DEL, quote or backslash, and media types containing C0 controls or
+DEL, return `InvalidArg` without echoing the value. The client does not rewrite
+metadata or impose an endpoint MIME allow-list; safe metadata and all payload
+bytes remain byte-exact.
+
 The client does not follow HTTP redirects. Venice publishes no 3xx contract,
 and replaying an authenticated, paid or multipart request to a response-provided
 `Location` would cross a security boundary. A 3xx therefore reaches the caller
@@ -1416,7 +1423,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.5)
+  GIT_TAG        v0.29.6)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

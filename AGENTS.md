@@ -49,6 +49,13 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   Multipart uses cpp-httplib's public encoder and is POST-only because every
   multipart operation in the audited contract is POST. SSE remains specialized
   but shares transport construction and error helpers.
+- **Multipart file metadata is caller-owned transport structure.** cpp-httplib
+  v0.18.x writes filenames and media types directly into MIME part headers, so
+  `detail::send_buffered` validates every multipart body before constructing a
+  transport. Filenames reject all C0 controls, DEL, quote and backslash; media
+  types reject C0 controls and DEL. Values are never rewritten, diagnostics do
+  not echo them, visible/high-byte syntax remains open, and payload bytes stay
+  unrestricted and byte-exact (VC-50).
 - **Redirects are untrusted responses, not transport instructions.** Venice's
   audited contract publishes no 3xx response, so the shared transport never
   follows `Location`, even on the same origin. A 3xx is `ErrorKind::Http` with

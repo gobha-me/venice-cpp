@@ -2633,6 +2633,100 @@ TEST_CASE("HTTP field validation preserves the open value syntax",
   REQUIRE(bearer->find("Authorization")->second == "Bearer " + allowed);
 }
 
+TEST_CASE("multipart metadata rejects MIME structure bytes and preserves open syntax",
+          "[transport][multipart][failure]") {
+  std::vector<unsigned int> controls;
+  for (unsigned int byte = 0; byte < 0x20U; ++byte)
+    controls.push_back(byte);
+  controls.push_back(0x7FU);
+
+  const auto metadata = [](std::string filename, std::string media_type) {
+    return venice::detail::MultipartBody{.parts = {{.name = "file",
+                                                    .bytes = "payload",
+                                                    .filename = std::move(filename),
+                                                    .content_type =
+                                                        std::move(media_type)}}};
+  };
+
+  for (const unsigned int byte : controls) {
+    CAPTURE(byte);
+    std::string filename = "safe";
+    filename.push_back(static_cast<char>(byte));
+    filename += "name.png";
+    const auto bad_filename =
+        venice::detail::validate_multipart_metadata(metadata(filename, "image/png"));
+    REQUIRE_FALSE(bad_filename.has_value());
+    REQUIRE(bad_filename.error().kind == ErrorKind::InvalidArg);
+
+    std::string media_type = "image/png";
+    media_type.push_back(static_cast<char>(byte));
+    media_type += "tail";
+    const auto bad_media =
+        venice::detail::validate_multipart_metadata(metadata("safe.png", media_type));
+    REQUIRE_FALSE(bad_media.has_value());
+    REQUIRE(bad_media.error().kind == ErrorKind::InvalidArg);
+  }
+
+  for (const char byte : std::array<char, 2>{'"', '\\'}) {
+    CAPTURE(byte);
+    const auto result = venice::detail::validate_multipart_metadata(
+        metadata("safe" + std::string(1, byte) + "name.png", "image/png"));
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+  }
+
+  std::string open_filename = "resume; draft-";
+  open_filename.append("\xC3\xA9", 2);
+  open_filename += ".png";
+  std::string open_media = "image/png; profile=fixture-";
+  open_media.push_back(static_cast<char>(0xFF));
+  REQUIRE(venice::detail::validate_multipart_metadata(
+      metadata(std::move(open_filename), std::move(open_media))));
+}
+
+TEST_CASE("injectable multipart metadata never reaches any upload family",
+          "[transport][multipart][failure]") {
+  const TestServer server;
+  const Client client{"multipart-key", server.base_url()};
+  constexpr std::string_view kSentinel = "X-Multipart-Injected";
+
+  const auto require_rejected = [&](const auto &result) {
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(result.error().status == 0);
+    REQUIRE(result.error().message.find(kSentinel) == std::string::npos);
+    REQUIRE(result.error().body.empty());
+    REQUIRE(result.error().metadata.headers.empty());
+  };
+
+  const auto exercise = [&](const std::string &filename,
+                            const std::string &media_type) {
+    ImageUpscaleRequest image;
+    image.image = venice::image_input::file("image-bytes", filename, media_type);
+    require_rejected(client.upscale_image(image));
+
+    venice::AudioTranscriptionRequest audio{
+        .file = {.bytes = "audio-bytes",
+                 .filename = filename,
+                 .media_type = media_type}};
+    require_rejected(client.transcribe_audio(audio));
+
+    venice::DocumentParseRequest document{
+        .file = {.bytes = "document-bytes",
+                 .filename = filename,
+                 .media_type = media_type}};
+    require_rejected(client.parse_document(document));
+  };
+
+  exercise("safe.wav\"\r\nX-Multipart-Injected: filename", "audio/wav");
+  exercise("safe\"; name=\"prompt", "audio/wav");
+  exercise("safe.wav", "audio/wav\r\nX-Multipart-Injected: media-type");
+
+  REQUIRE(server.image_transform_hits() == 0);
+  REQUIRE(server.audio_hits() == 0);
+  REQUIRE(server.augment_hits() == 0);
+}
+
 TEST_CASE("all four authentication modes traverse the buffered fixture independently",
           "[transport][auth]") {
   const TestServer server;
@@ -3085,7 +3179,8 @@ TEST_CASE("image multipart forms keep owned bytes names types and repeated order
           "[transport][images][transform][multipart]") {
   const TestServer server;
   const Client client{"default-token", server.base_url()};
-  const std::string first{{'P', 'N', char{0}, 'G'}};
+  std::string first{{'P', 'N', char{0}, 'G'}};
+  first += "\r\n--venice-boundary-like\r\n";
   const std::string second{{'W', 'E', static_cast<char>(0xFF), 'B', 'P'}};
 
   ImageUpscaleRequest upscale;
