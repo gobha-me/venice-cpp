@@ -286,6 +286,37 @@ struct MultipartBody {
 
 using BufferedBody = std::variant<std::monostate, ByteBody, MultipartBody>;
 
+// cpp-httplib v0.18.x writes filename between quotes and content_type directly
+// into a MIME part header. It does not quote or validate either caller-owned
+// value. Reject bytes that can change that structure rather than rewriting a
+// filename whose eventual server-visible spelling would otherwise be unclear.
+// Visible media-type syntax remains open because endpoint MIME policy belongs
+// to Venice; this is representability checking only (VC-50).
+[[nodiscard]] inline auto validate_multipart_metadata(
+    const MultipartBody &body) -> std::expected<void, Error> {
+  const auto has_control = [](std::string_view value) {
+    for (const unsigned char byte : value)
+      if (byte < 0x20U || byte == 0x7FU)
+        return true;
+    return false;
+  };
+
+  for (const auto &part : body.parts) {
+    if (has_control(part.filename) ||
+        part.filename.find_first_of("\"\\") != std::string::npos) {
+      return std::unexpected{Error{
+          ErrorKind::InvalidArg, 0,
+          "multipart filename contains a forbidden MIME header byte", {}}};
+    }
+    if (has_control(part.content_type)) {
+      return std::unexpected{Error{
+          ErrorKind::InvalidArg, 0,
+          "multipart media type contains a forbidden MIME header byte", {}}};
+    }
+  }
+  return {};
+}
+
 inline void append_form_field(MultipartBody& body, std::string name, std::string value) {
   body.parts.push_back({.name = std::move(name), .bytes = std::move(value)});
 }
@@ -703,6 +734,11 @@ template <std::size_t N>
   if (std::holds_alternative<MultipartBody>(request.body) && request.method != HttpMethod::Post)
     return std::unexpected{
         Error{ErrorKind::InvalidArg, 0, "multipart requests require POST", {}}};
+
+  if (const auto *multipart = std::get_if<MultipartBody>(&request.body)) {
+    if (auto valid = validate_multipart_metadata(*multipart); !valid)
+      return std::unexpected{std::move(valid.error())};
+  }
 
   auto cli = make_transport(base_url, opts);
   // Declared after cli: reverse destruction joins the watcher while the client
