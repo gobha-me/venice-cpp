@@ -70,6 +70,7 @@
 
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <exception>
 #include <expected>
@@ -77,8 +78,10 @@
 #include <initializer_list>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -639,17 +642,105 @@ enum class AuthPolicy {
   return std::string{prefix} + std::string{endpoint};
 }
 
+[[nodiscard]] inline auto invalid_base_url_error() -> Error {
+  return Error{ErrorKind::InvalidArg, 0, "invalid transport base URL", {}};
+}
+
+// cpp-httplib's universal Client constructor throws for an unsupported scheme,
+// but a malformed authority that misses its regex is instead treated as one
+// opaque hostname. Validate the structural pieces it owns before construction
+// so both cases remain values at this library's expected-returning boundary.
+// Hostname policy stays open; only scheme and port representability are local.
+[[nodiscard]] inline auto validate_transport_base_url(std::string_view base_url)
+    -> std::expected<void, Error> {
+  const std::string transport_host = host_from_base_url(base_url);
+  std::string_view authority = transport_host;
+  bool has_scheme = false;
+  if (const auto scheme_end = authority.find("://");
+      scheme_end != std::string_view::npos) {
+    const auto scheme = authority.substr(0, scheme_end);
+    if (scheme != "http" && scheme != "https")
+      return std::unexpected{invalid_base_url_error()};
+    authority.remove_prefix(scheme_end + 3);
+    has_scheme = true;
+  }
+
+  if (authority.empty() ||
+      authority.find_first_of("/?#@") != std::string_view::npos)
+    return std::unexpected{invalid_base_url_error()};
+
+  std::string_view port;
+  bool has_port = false;
+  const auto is_ascii_hex = [](unsigned char byte) {
+    return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f') ||
+           (byte >= 'A' && byte <= 'F');
+  };
+  if (authority.front() == '[') {
+    const auto close = authority.find(']');
+    if (close == std::string_view::npos || close == 1)
+      return std::unexpected{invalid_base_url_error()};
+    for (const unsigned char byte : authority.substr(1, close - 1))
+      if (!is_ascii_hex(byte) && byte != ':')
+        return std::unexpected{invalid_base_url_error()};
+
+    const auto suffix = authority.substr(close + 1);
+    if (!suffix.empty()) {
+      if (suffix.front() != ':')
+        return std::unexpected{invalid_base_url_error()};
+      port = suffix.substr(1);
+      has_port = true;
+    }
+  } else if (const auto colon = authority.rfind(':');
+             colon != std::string_view::npos) {
+    if (authority.substr(0, colon).find(':') != std::string_view::npos) {
+      // cpp-httplib deliberately accepts a scheme-less unbracketed IPv6
+      // literal through its hostname fallback. Preserve that existing form;
+      // an explicit port remains unambiguous only with brackets.
+      if (has_scheme) return std::unexpected{invalid_base_url_error()};
+      for (const unsigned char byte : authority)
+        if (!is_ascii_hex(byte) && byte != ':')
+          return std::unexpected{invalid_base_url_error()};
+      return {};
+    }
+    if (colon == 0)
+      return std::unexpected{invalid_base_url_error()};
+    port = authority.substr(colon + 1);
+    has_port = true;
+  }
+
+  if (!has_port) return {};
+  if (port.empty())
+    return std::unexpected{invalid_base_url_error()};
+
+  unsigned int parsed = 0;
+  const auto [end, status] =
+      std::from_chars(port.data(), port.data() + port.size(), parsed);
+  if (status != std::errc{} || end != port.data() + port.size() || parsed == 0 ||
+      parsed > 65535)
+    return std::unexpected{invalid_base_url_error()};
+  return {};
+}
+
 [[nodiscard]] inline auto make_transport(std::string_view base_url, const RequestOptions& opts)
-    -> httplib::Client {
-  httplib::Client cli{host_from_base_url(base_url)};
-  // Venice publishes no redirect contract. Keep 3xx responses at their origin
-  // so credentials, payment proofs, idempotency keys and request bodies cannot
-  // be replayed to a Location chosen by that response (VC-47).
-  cli.set_follow_location(false);
-  cli.set_read_timeout(opts.read_timeout.value_or(std::chrono::seconds{300}));
-  cli.set_connection_timeout(opts.connect_timeout.value_or(std::chrono::seconds{30}));
-  if (opts.write_timeout) cli.set_write_timeout(*opts.write_timeout);
-  return cli;
+    -> std::expected<httplib::Client, Error> {
+  if (auto valid = validate_transport_base_url(base_url); !valid)
+    return std::unexpected{std::move(valid.error())};
+
+  try {
+    httplib::Client cli{host_from_base_url(base_url)};
+    // Venice publishes no redirect contract. Keep 3xx responses at their origin
+    // so credentials, payment proofs, idempotency keys and request bodies cannot
+    // be replayed to a Location chosen by that response (VC-47).
+    cli.set_follow_location(false);
+    cli.set_read_timeout(opts.read_timeout.value_or(std::chrono::seconds{300}));
+    cli.set_connection_timeout(opts.connect_timeout.value_or(std::chrono::seconds{30}));
+    if (opts.write_timeout) cli.set_write_timeout(*opts.write_timeout);
+    return cli;
+  } catch (const std::invalid_argument&) {
+    return std::unexpected{invalid_base_url_error()};
+  } catch (const std::out_of_range&) {
+    return std::unexpected{invalid_base_url_error()};
+  }
 }
 
 [[nodiscard]] inline auto transport_error(httplib::Error error) -> Error {
@@ -740,9 +831,12 @@ template <std::size_t N>
       return std::unexpected{std::move(valid.error())};
   }
 
-  auto cli = make_transport(base_url, opts);
-  // Declared after cli: reverse destruction joins the watcher while the client
-  // it may stop is still alive. This is the same ordering as the SSE path.
+  auto transport = make_transport(base_url, opts);
+  if (!transport) return std::unexpected{std::move(transport.error())};
+  auto& cli = *transport;
+  // Declared after transport: reverse destruction joins the watcher while the
+  // client it may stop is still alive. This is the same ordering as the SSE
+  // path.
   const CancelGuard guard{opts.cancel, cli};
   if (guard.cancelled()) return std::unexpected{cancel_error()};
 
@@ -959,10 +1053,12 @@ class Client {
     std::string terminal_error;
     detail::SseFramer framer;
 
-    auto cli = detail::make_transport(m_base_url, opts);
-    // Declared after cli and never before: the guard's watcher thread holds a
-    // reference to it, and destruction runs in reverse, so this ordering is what
-    // guarantees the thread is joined while cli is still alive.
+    auto transport = detail::make_transport(m_base_url, opts);
+    if (!transport) return std::unexpected{std::move(transport.error())};
+    auto& cli = *transport;
+    // Declared after transport and never before: the guard's watcher thread
+    // holds a reference to it, and destruction runs in reverse, so this
+    // ordering guarantees the thread is joined while cli is still alive.
     const detail::CancelGuard guard{opts.cancel, cli};
     if (guard.cancelled()) return std::unexpected{detail::cancel_error()};
 
@@ -1319,7 +1415,9 @@ class Client {
     if (!payload)
       return std::unexpected{std::move(payload.error())};
 
-    auto cli = detail::make_transport(m_base_url, opts);
+    auto transport = detail::make_transport(m_base_url, opts);
+    if (!transport) return std::unexpected{std::move(transport.error())};
+    auto& cli = *transport;
     const detail::CancelGuard guard{opts.cancel, cli};
     if (guard.cancelled()) return std::unexpected{detail::cancel_error()};
 

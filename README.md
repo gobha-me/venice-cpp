@@ -357,6 +357,13 @@ and replaying an authenticated, paid or multipart request to a response-provided
 as `ErrorKind::Http` with its original status, body and response metadata,
 whether the target is same-origin or cross-origin.
 
+Custom base URLs are validated before cpp-httplib constructs a transport.
+Unsupported schemes and malformed or out-of-range ports return
+`ErrorKind::InvalidArg` without throwing or copying the URL into diagnostics.
+HTTP/HTTPS hosts, IPv6 literals, explicit valid ports and `/api/...` prefixes
+remain supported; failures after construction, such as DNS, TLS, connection,
+timeout or cancellation failures, keep their existing error kinds.
+
 Whether a request streams is decided by the method you call, not by a field on
 `ChatRequest`. If you build the wire body yourself, say so explicitly:
 `req.to_json_body(/*stream=*/false)`.
@@ -1423,7 +1430,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.6)
+  GIT_TAG        v0.29.7)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

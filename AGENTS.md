@@ -63,6 +63,13 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   shared by buffered JSON/binary/multipart, Chat SSE and streamed speech; it
   prevents valid credentials, payment proofs, idempotency keys and request
   bodies from being replayed across origins or onto a downgraded scheme (VC-47).
+- **Base URLs are caller-owned transport structure.** Validate their authority
+  before constructing cpp-httplib: unsupported schemes and empty, signed,
+  non-decimal, zero or out-of-range ports are `InvalidArg`, never exceptions or
+  accidental DNS names. Keep scheme-less hosts, HTTP/HTTPS, IPv6 literals,
+  explicit valid ports and `/api/...` prefixes working. Diagnostics never echo
+  the base URL, while DNS, TLS, connect, timeout and cancellation failures remain
+  their existing error kinds (VC-51).
 
 ## Conventions that matter
 

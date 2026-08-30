@@ -2452,6 +2452,101 @@ auto timed(F&& fn) -> std::chrono::milliseconds {
 // magnitude below the 300s default it is standing in for.
 constexpr auto kPromptly = 5000ms;
 
+// ── base-URL representability: failure matrix first (VC-51) ──────────────
+
+TEST_CASE("transport construction rejects unsupported schemes and invalid ports",
+          "[transport][base-url][failure]") {
+  static constexpr std::array<std::string_view, 10> kInvalid{
+      "",
+      "ftp://example.test/api/v1",
+      "http://example.test:/api/v1",
+      "http://example.test:-1/api/v1",
+      "http://example.test:+80/api/v1",
+      "http://example.test:eighty/api/v1",
+      "http://example.test:1.5/api/v1",
+      "http://example.test:0/api/v1",
+      "http://example.test:65536/api/v1",
+      "http://example.test:999999999999999999999999/api/v1",
+  };
+
+  for (const auto base_url : kInvalid) {
+    INFO("base URL: " << base_url);
+    const auto transport = venice::detail::make_transport(base_url, {});
+    REQUIRE_FALSE(transport.has_value());
+    REQUIRE(transport.error().is(ErrorKind::InvalidArg));
+    REQUIRE(transport.error().status == 0);
+    REQUIRE(transport.error().message == "invalid transport base URL");
+    REQUIRE(transport.error().body.empty());
+    REQUIRE(transport.error().metadata.headers.empty());
+  }
+}
+
+TEST_CASE("invalid base URLs stay expected values across every transport family",
+          "[transport][base-url][failure]") {
+  constexpr std::string_view kSecret = "BASE_URL_SECRET";
+  const Client client{"request-key",
+                      "http://endpoint-user:BASE_URL_SECRET@example.test/api/v1"};
+  const auto require_invalid = [&](const auto& result) {
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().is(ErrorKind::InvalidArg));
+    REQUIRE(result.error().status == 0);
+    REQUIRE(result.error().message == "invalid transport base URL");
+    REQUIRE(result.error().message.find(kSecret) == std::string::npos);
+    REQUIRE(result.error().body.find(kSecret) == std::string::npos);
+    REQUIRE(result.error().metadata.headers.empty());
+  };
+
+  // JSON, binary-media and multipart public methods all converge on
+  // detail::send_buffered before any socket is created.
+  require_invalid(client.models());
+  require_invalid(client.generate_image(minimal_native_image()));
+  require_invalid(client.parse_document(
+      {.file = {.bytes = "document", .filename = "fixture.txt", .media_type = "text/plain"}}));
+
+  int chat_callbacks = 0;
+  venice::StreamAccumulator accumulator;
+  const auto chat = client.chat_stream(
+      minimal_chat(), accumulator,
+      [&](const venice::StreamDelta&) {
+        ++chat_callbacks;
+        return true;
+      });
+  require_invalid(chat);
+  REQUIRE(chat_callbacks == 0);
+
+  int speech_callbacks = 0;
+  const auto speech = client.generate_speech_stream(
+      {.input = "hello"},
+      [&](std::string_view) {
+        ++speech_callbacks;
+        return true;
+      });
+  require_invalid(speech);
+  REQUIRE(speech_callbacks == 0);
+}
+
+TEST_CASE("transport construction preserves supported custom endpoint authorities",
+          "[transport][base-url]") {
+  static constexpr std::array<std::string_view, 9> kValid{
+      "example.test",
+      "example.test:8080/api/v1",
+      "http://example.test/api/v1",
+      "https://example.test/api/v1",
+      "https://example.test:65535/api/v1",
+      "http://127.0.0.1:8080/api/v1",
+      "::1/api/v1",
+      "http://[::1]/api/v1",
+      "https://[2001:db8::1]:8443/api/v1",
+  };
+
+  for (const auto base_url : kValid) {
+    INFO("base URL: " << base_url);
+    const auto transport = venice::detail::make_transport(base_url, {});
+    REQUIRE(transport.has_value());
+    REQUIRE(transport->is_valid());
+  }
+}
+
 // ── authentication/payment foundation: failure matrix first (VC-23) ─────
 
 TEST_CASE("endpoint authentication policies reject impossible modes before the socket",
