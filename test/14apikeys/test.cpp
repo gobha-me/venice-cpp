@@ -1,6 +1,6 @@
 // API-key request and response contracts (VC-43/#70 and VC-44/#72).
 //
-// Fixtures are synthetic from Venice OpenAPI 20260814.194349. Complete key
+// Fixtures are synthetic from Venice OpenAPI 20260826.105305. Complete key
 // material is represented by an unmistakable non-credential marker and is
 // never printed. Transport method/path/header behavior lives in 06transport.
 
@@ -18,15 +18,19 @@ namespace {
 auto key_object() -> nlohmann::json {
   return nlohmann::json{
       {"apiKeyType", "FUTURE_TYPE"},
-      {"consumptionLimits", {{"usd", 0}, {"diem", nullptr}, {"vcu", 3.5}, {"future", 1}}},
+      {"consumptionLimits",
+       {{"usd", 0}, {"diem", nullptr}, {"vcu", 3.5}, {"future", 1}}},
       {"limitPeriod", "FUTURE_PERIOD"},
+      {"modelPrivacy", "FUTURE_PRIVACY"},
       {"createdAt", "2026-08-16T00:00:00Z"},
       {"description", "synthetic fixture"},
       {"expiresAt", nullptr},
       {"id", "synthetic-id"},
       {"last6Chars", "ABC123"},
       {"lastUsedAt", nullptr},
-      {"usage", {{"trailingSevenDays", {{"usd", "0.0000"}, {"diem", "2.5000"}, {"vcu", "1"}}}}},
+      {"usage",
+       {{"trailingSevenDays",
+         {{"usd", "0.0000"}, {"diem", "2.5000"}, {"vcu", "1"}}}}},
       {"currentPeriodUsage", {{"usd", "0"}, {"diem", "1.25"}}},
       {"future", true},
   };
@@ -112,6 +116,7 @@ TEST_CASE("API-key listings retain absent zero malformed and raw states", "[api-
   const auto& key = page.entries.front();
   REQUIRE(key.api_key_type == "FUTURE_TYPE");
   REQUIRE(key.limit_period == "FUTURE_PERIOD");
+  REQUIRE(key.model_privacy == "FUTURE_PRIVACY");
   REQUIRE(key.consumption_limits);
   REQUIRE(key.consumption_limits->usd == 0.0);
   REQUIRE_FALSE(key.consumption_limits->diem);
@@ -127,6 +132,7 @@ TEST_CASE("API-key listings retain absent zero malformed and raw states", "[api-
   const nlohmann::json detail{{"data", key_object()}, {"futureEnvelope", 7}};
   const auto one = venice::api_key_from_json_body(detail);
   REQUIRE(one.id == "synthetic-id");
+  REQUIRE(one.model_privacy == "FUTURE_PRIVACY");
   REQUIRE(one.raw == detail["data"]);
   REQUIRE(one.envelope_raw == detail);
 }
@@ -135,37 +141,55 @@ TEST_CASE("API-key requests emit engaged fields and modeled fields win", "[api-k
   venice::ApiKeyCreateRequest create{
       .api_key_type = "FUTURE_TYPE",
       .description = "fixture",
-      .consumption_limit = venice::ApiKeyConsumptionLimitRequest{
-          .usd = 0.0,
-          .extra = {{"usd", 999}, {"futureLimit", true}},
-      },
+      .consumption_limit =
+          venice::ApiKeyConsumptionLimitRequest{
+              .usd = 0.0,
+              .extra = {{"usd", 999}, {"futureLimit", true}},
+          },
       .limit_period = "FUTURE_PERIOD",
-      .extra = {{"apiKeyType", "shadow"}, {"description", "shadow"}, {"future", 1}},
+      .extra = {{"apiKeyType", "shadow"},
+                {"description", "shadow"},
+                {"modelPrivacy", "shadow"},
+                {"future", 1}},
+      .model_privacy = "FUTURE_PRIVACY",
   };
   const auto created = create.to_json_body();
   REQUIRE(created["apiKeyType"] == "FUTURE_TYPE");
   REQUIRE(created["description"] == "fixture");
   REQUIRE(created["limitPeriod"] == "FUTURE_PERIOD");
+  REQUIRE(created["modelPrivacy"] == "FUTURE_PRIVACY");
   REQUIRE(created["consumptionLimit"]["usd"] == 0.0);
   REQUIRE(created["consumptionLimit"]["futureLimit"] == true);
   REQUIRE(created["future"] == 1);
   REQUIRE_FALSE(created.contains("expiresAt"));
 
+  create.model_privacy.reset();
+  create.extra.erase("modelPrivacy");
+  REQUIRE_FALSE(create.to_json_body().contains("modelPrivacy"));
+
   venice::ApiKeyUpdateRequest update{
       .id = "synthetic-id",
       .description = "",
       .expires_at = "",
-      .extra = {{"id", "shadow"}, {"expiresAt", nullptr}, {"future", true}},
+      .extra = {{"id", "shadow"},
+                {"expiresAt", nullptr},
+                {"modelPrivacy", "shadow"},
+                {"future", true}},
+      .model_privacy = "FUTURE_PRIVACY",
   };
   const auto cleared = update.to_json_body();
   REQUIRE(cleared["id"] == "synthetic-id");
   REQUIRE(cleared["description"] == "");
   REQUIRE(cleared["expiresAt"] == "");
+  REQUIRE(cleared["modelPrivacy"] == "FUTURE_PRIVACY");
   REQUIRE(cleared["future"] == true);
 
   update.expires_at.reset();
+  update.model_privacy.reset();
+  update.extra.erase("modelPrivacy");
   const auto raw_null = update.to_json_body();
   REQUIRE(raw_null["expiresAt"].is_null());
+  REQUIRE_FALSE(raw_null.contains("modelPrivacy"));
 
   create.extra = nlohmann::json::array({1});
   create.consumption_limit->extra = "not-an-object";
@@ -182,10 +206,11 @@ TEST_CASE("Web3 API-key requests keep wallet proof raw-shaped and modeled-wins",
       .address = "synthetic-address",
       .signature = "SYNTHETIC_SIGNATURE_SECRET",
       .token = "SYNTHETIC_CHALLENGE_SECRET",
-      .consumption_limit = venice::ApiKeyConsumptionLimitRequest{
-          .usd = 0.0,
-          .extra = {{"usd", 999}, {"futureLimit", true}},
-      },
+      .consumption_limit =
+          venice::ApiKeyConsumptionLimitRequest{
+              .usd = 0.0,
+              .extra = {{"usd", 999}, {"futureLimit", true}},
+          },
       .limit_period = "FUTURE_PERIOD",
       .description = "",
       .expires_at = "",
@@ -193,7 +218,9 @@ TEST_CASE("Web3 API-key requests keep wallet proof raw-shaped and modeled-wins",
                 {"address", "shadow"},
                 {"signature", "shadow"},
                 {"token", "shadow"},
+                {"modelPrivacy", "shadow"},
                 {"future", 1}},
+      .model_privacy = "FUTURE_PRIVACY",
   };
   const auto body = request.to_json_body();
   REQUIRE(body["apiKeyType"] == "FUTURE_TYPE");
@@ -205,12 +232,14 @@ TEST_CASE("Web3 API-key requests keep wallet proof raw-shaped and modeled-wins",
   REQUIRE(body["limitPeriod"] == "FUTURE_PERIOD");
   REQUIRE(body["description"] == "");
   REQUIRE(body["expiresAt"] == "");
+  REQUIRE(body["modelPrivacy"] == "FUTURE_PRIVACY");
   REQUIRE(body["future"] == 1);
 
   request.consumption_limit.reset();
   request.limit_period.reset();
   request.description.reset();
   request.expires_at.reset();
+  request.model_privacy.reset();
   request.extra = nlohmann::json::array({1});
   const auto minimal = request.to_json_body();
   REQUIRE(minimal.size() == 4);
@@ -218,17 +247,20 @@ TEST_CASE("Web3 API-key requests keep wallet proof raw-shaped and modeled-wins",
   REQUIRE_FALSE(minimal.contains("limitPeriod"));
   REQUIRE_FALSE(minimal.contains("description"));
   REQUIRE_FALSE(minimal.contains("expiresAt"));
+  REQUIRE_FALSE(minimal.contains("modelPrivacy"));
 }
 
 TEST_CASE("create update and delete results keep success and secret boundaries", "[api-keys][parse]") {
   const nlohmann::json created_body{
-      {"data", {{"apiKey", "SYNTHETIC_SECRET_RETURNED_ONCE"},
-                {"apiKeyType", "INFERENCE"},
-                {"consumptionLimit", {{"usd", 0}}},
-                {"limitPeriod", "EPOCH"},
-                {"expiresAt", nullptr},
-                {"id", "synthetic-created-id"},
-                {"future", 9}}},
+      {"data",
+       {{"apiKey", "SYNTHETIC_SECRET_RETURNED_ONCE"},
+        {"apiKeyType", "INFERENCE"},
+        {"consumptionLimit", {{"usd", 0}}},
+        {"limitPeriod", "EPOCH"},
+        {"modelPrivacy", "FUTURE_PRIVACY"},
+        {"expiresAt", nullptr},
+        {"id", "synthetic-created-id"},
+        {"future", 9}}},
       {"success", true},
       {"futureEnvelope", true},
   };
@@ -237,6 +269,7 @@ TEST_CASE("create update and delete results keep success and secret boundaries",
   REQUIRE(created.id == "synthetic-created-id");
   REQUIRE(created.success);
   REQUIRE(created.consumption_limit->usd == 0.0);
+  REQUIRE(created.model_privacy == "FUTURE_PRIVACY");
   REQUIRE(created.raw["data"]["apiKey"] == "[REDACTED]");
   REQUIRE(created.raw.dump().find("SYNTHETIC_SECRET_RETURNED_ONCE") ==
           std::string::npos);
@@ -246,12 +279,45 @@ TEST_CASE("create update and delete results keep success and secret boundaries",
   const auto updated = venice::api_key_update_from_json_body(updated_body);
   REQUIRE_FALSE(updated.success);
   REQUIRE(updated.key.id == "synthetic-id");
+  REQUIRE(updated.key.model_privacy == "FUTURE_PRIVACY");
   REQUIRE(updated.raw == updated_body);
 
   const auto deleted = venice::api_key_delete_from_json_body(
       nlohmann::json{{"success", false}, {"future", 1}});
   REQUIRE_FALSE(deleted.success);
   REQUIRE(deleted.raw["future"] == 1);
+}
+
+TEST_CASE("API-key model privacy preserves optional unknown states",
+          "[api-keys][parse][model-privacy]") {
+  auto missing = key_object();
+  missing.erase("modelPrivacy");
+  REQUIRE_FALSE(
+      venice::api_key_from_json_body({{"data", missing}}).model_privacy);
+
+  for (const auto& value : {nlohmann::json(nullptr), nlohmann::json(false),
+                            nlohmann::json(7), nlohmann::json::array()}) {
+    auto malformed = key_object();
+    malformed["modelPrivacy"] = value;
+    const auto parsed = venice::api_key_update_from_json_body(
+        {{"data", malformed}, {"success", true}});
+    REQUIRE(parsed.success);
+    REQUIRE(parsed.key.id == "synthetic-id");
+    REQUIRE_FALSE(parsed.key.model_privacy);
+    REQUIRE(parsed.key.raw["modelPrivacy"] == value);
+  }
+
+  const nlohmann::json created_body{
+      {"data",
+       {{"apiKey", "SYNTHETIC_SECRET_RETURNED_ONCE"},
+        {"id", "synthetic-created-id"},
+        {"modelPrivacy", false}}},
+      {"success", true},
+  };
+  const auto created = venice::api_key_created_from_json_body(created_body);
+  REQUIRE_FALSE(created.model_privacy);
+  REQUIRE(created.raw["data"]["modelPrivacy"] == false);
+  REQUIRE(created.raw["data"]["apiKey"] == "[REDACTED]");
 }
 
 TEST_CASE("rate-limit responses retain nested unknown and last-50 log order", "[api-keys][rate-limits]") {

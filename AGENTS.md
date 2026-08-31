@@ -515,9 +515,15 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   API-key usage totals remain decimal strings because that is the wire's exact
   accounting representation; configured limits are optional JSON numbers, so
   absent and zero remain distinct. Type, limit-period and rate-limit values are
-  server-owned strings. `balance()` keeps its historical `expected<json,
-  Error>` source contract by returning `api_key_rate_limits()`'s retained raw
-  envelope rather than preserving a second parser (VC-43).
+  server-owned strings. `model_privacy` is likewise an optional open string on
+  regular create/update and Web3-create requests plus list, detail, create,
+  update and Web3-create results; its literal `modelPrivacy` wire value
+  describes server-owned key policy and is not a privacy guarantee enforced by
+  this client. The read-only CLI reconciles the raw and typed values without
+  printing any complete credential (VC-55).
+  `balance()` keeps its historical `expected<json, Error>` source contract by
+  returning `api_key_rate_limits()`'s retained raw envelope rather than
+  preserving a second parser (VC-43).
 - **Web3 API-key proof is public body authentication, not SIWX.**
   `web3_api_key_challenge()` requires Public transport state and returns its
   token only through the typed field; `create_web3_api_key()` accepts a

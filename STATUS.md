@@ -115,6 +115,19 @@ have since landed there as CT-14.
 
 ## Next up
 
+**VC-55 (#90) is implemented for v0.29.11.** The API-key lifecycle now exposes
+Venice's `modelPrivacy` policy through an optional open string on regular
+create/update and public Web3-create requests plus list/detail/create/update and
+Web3-create results. An engaged modeled request value wins over the additive raw
+hatch; missing, null or wrong-typed response values remain unknown rather than
+invalidating an account inventory or fabricating policy.
+
+The failure-first request, parser and loopback matrix covers every lifecycle
+path, arbitrary future values, modeled/raw collisions, malformed optional
+states, response metadata and the existing one-time-secret redaction boundary.
+The read-only CLI also reconciles raw and typed policy values. No enum, local
+policy validation, privacy guarantee, live API call or credential is introduced.
+
 **VC-53 (#88) is implemented for v0.29.9.** Venice's current published schema
 documents only string and string-array embedding inputs and states that integer
 token arrays return HTTP 400. The named token-array builders are deprecated with
