@@ -169,6 +169,36 @@ TEST_CASE("ResponsesRequest forces non-streaming and preserves its raw escape ha
   REQUIRE(body.at("tools").at(0).at("function").at("name") == "lookup");
 }
 
+TEST_CASE("ResponsesRequest applies modeled precedence to Venice parameters",
+          "[vc54][responses][request][failure]") {
+  SECTION("typed false shadows a nested raw true") {
+    auto request = minimal_response();
+    request.venice_parameters = VeniceParameters{};
+    request.venice_parameters->extra =
+        nlohmann::json::parse(R"({"enable_e2ee":true,"nested_future":7})");
+    request.venice_parameters->enable_e2ee = false;
+
+    const auto body = request.to_json_body();
+    REQUIRE(body.at("venice_parameters").at("enable_e2ee") == false);
+    REQUIRE(body.at("venice_parameters").at("nested_future") == 7);
+  }
+
+  SECTION("an engaged typed object replaces the top-level raw object") {
+    auto request = minimal_response();
+    request.extra["venice_parameters"] =
+        nlohmann::json::parse(R"({"enable_e2ee":true,"top_level_future":1})");
+    request.extra["top_level_future"] = 2;
+    request.venice_parameters = VeniceParameters{};
+    request.venice_parameters->extra["typed_future"] = 3;
+
+    const auto body = request.to_json_body();
+    REQUIRE(body.at("top_level_future") == 2);
+    REQUIRE(body.at("venice_parameters").at("typed_future") == 3);
+    REQUIRE_FALSE(body.at("venice_parameters").contains("enable_e2ee"));
+    REQUIRE_FALSE(body.at("venice_parameters").contains("top_level_future"));
+  }
+}
+
 TEST_CASE("Responses parsing keeps unknown items while exposing calls citations and text",
           "[vc24][responses][response][failure]") {
   const auto body = nlohmann::json::parse(R"({
@@ -526,6 +556,21 @@ TEST_CASE("Responses validation fails before transport", "[vc24][responses][guar
     auto request = minimal_response();
     request.venice_parameters = VeniceParameters{};
     request.venice_parameters->enable_e2ee = true;
+    const auto result = client.create_response(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+  }
+  SECTION("nested raw E2EE") {
+    auto request = minimal_response();
+    request.venice_parameters = VeniceParameters{};
+    request.venice_parameters->extra["enable_e2ee"] = true;
+    const auto result = client.create_response(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+  }
+  SECTION("top-level raw E2EE") {
+    auto request = minimal_response();
+    request.extra["venice_parameters"]["enable_e2ee"] = true;
     const auto result = client.create_response(request);
     REQUIRE_FALSE(result);
     REQUIRE(result.error().kind == ErrorKind::InvalidArg);

@@ -1213,10 +1213,11 @@ class Client {
   [[nodiscard]] auto create_response(const ResponsesRequest& req,
                                      const RequestOptions& opts = {}) const
       -> std::expected<ResponsesResponse, Error> {
-    if (auto ok = validate(req); !ok) return std::unexpected{std::move(ok.error())};
+    auto body = validated_responses_body(req);
+    if (!body) return std::unexpected{std::move(body.error())};
 
-    auto res = post_json_response("/responses", req.to_json_body(),
-                                  detail::AuthPolicy::BearerOrSignInWithX, opts);
+    auto res = post_json_response(
+        "/responses", *body, detail::AuthPolicy::BearerOrSignInWithX, opts);
     if (!res) return std::unexpected{std::move(res.error())};
     try {
       auto response = responses_from_json_body(res->body);
@@ -2693,8 +2694,8 @@ class Client {
     return {};
   }
 
-  [[nodiscard]] static auto validate(const ResponsesRequest& req)
-      -> std::expected<void, Error> {
+  [[nodiscard]] static auto validated_responses_body(
+      const ResponsesRequest& req) -> std::expected<nlohmann::json, Error> {
     if (req.temperature && !std::isfinite(*req.temperature))
       return std::unexpected{
           Error{ErrorKind::InvalidArg, 0, "temperature is not finite", {}}};
@@ -2708,10 +2709,14 @@ class Client {
       return std::unexpected{Error{ErrorKind::InvalidArg, 0, "responses input is empty", {}}};
     if (req.input.is_array() && req.input.empty())
       return std::unexpected{Error{ErrorKind::InvalidArg, 0, "responses input is empty", {}}};
-    if (req.venice_parameters && req.venice_parameters->enable_e2ee.value_or(false))
+    auto body = req.to_json_body();
+    const auto* venice_parameters =
+        detail::opt_object(body, "venice_parameters");
+    if (venice_parameters &&
+        detail::opt_bool(*venice_parameters, "enable_e2ee").value_or(false))
       return std::unexpected{Error{ErrorKind::InvalidArg, 0,
                                    "responses does not support E2EE", {}}};
-    return {};
+    return body;
   }
 
   [[nodiscard]] static auto validate(const EmbeddingRequest& req)
