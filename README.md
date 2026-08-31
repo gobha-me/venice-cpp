@@ -968,6 +968,11 @@ details are **per-family**: five of the
 seven models VC-17 swept report it, two report nothing but the three flat
 counts, so an estimate must treat an absent bucket as unknown rather than as
 zero. Run `venice-cpp --usage <model>` to see what a given family reports.
+The three flat counters are required when a usage object arrives, and every
+reported counter is checked before integer conversion. A fractional or
+unrepresentable value returns `ErrorKind::Parse` on buffered and streamed calls
+rather than becoming a truncated count or a wrapped negative; a streamed caller
+still retains every earlier delta in its `StreamAccumulator`.
 
 `venice::Price` is the type on both sides, and the two are not the same
 quantity: `Model::pricing` is a **rate** (per million tokens), `res->cost` is an
@@ -1430,7 +1435,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.7)
+  GIT_TAG        v0.29.8)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

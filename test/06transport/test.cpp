@@ -2052,6 +2052,14 @@ class TestServer {
                  res.set_header("x-balance-remaining", "4.230000");
                  res.set_header("X-Protocol-Trace", "retained-on-success");
                  if (!body.at("stream").get<bool>()) {
+                   if (model == "buffered-bad-usage") {
+                     res.set_content(
+                         R"({"id":"buffered-chat","choices":[],"usage":{
+                              "prompt_tokens":18446744073709551615,
+                              "completion_tokens":2,"total_tokens":3}})",
+                         "application/json");
+                     return;
+                   }
                    const nlohmann::json response{
                        {"id", "buffered-chat"},
                        {"seen_authorization", bearer},
@@ -2086,7 +2094,8 @@ class TestServer {
                  if (model == "stream-bad-usage-after-content") {
                    res.set_content(
                        first_frame +
-                           "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":\"ten\","
+                           "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":"
+                           "18446744073709551615,"
                            "\"completion_tokens\":2,\"total_tokens\":3}}\n\n",
                        "text/event-stream");
                    return;
@@ -2173,6 +2182,14 @@ class TestServer {
                  }
                  if (model == "malformed") {
                    res.set_content(R"({"id":"resp_1"})", "application/json");
+                   return;
+                 }
+                 if (model == "bad-created-at") {
+                   res.set_content(
+                       R"({"id":"resp_1","object":"response",
+                            "created_at":18446744073709551615,"model":"m",
+                            "status":"completed","output":[]})",
+                       "application/json");
                    return;
                  }
                  res.set_content(
@@ -6391,6 +6408,28 @@ TEST_CASE("Responses API uses buffered JSON transport and preserves metadata",
   REQUIRE(signed_response.has_value());
   REQUIRE(signed_response->raw.at("seen_siwx") == "signed-proof");
   REQUIRE(signed_response->raw.at("seen_authorization") == "");
+}
+
+TEST_CASE("buffered Chat and Responses reject unrepresentable response integers",
+          "[transport][vc52][integer][failure]") {
+  const TestServer server;
+  const Client client{"test-key", server.base_url()};
+
+  auto chat = minimal_chat();
+  chat.model = "buffered-bad-usage";
+  const auto chat_result = client.chat(chat);
+  REQUIRE_FALSE(chat_result);
+  REQUIRE(chat_result.error().kind == ErrorKind::Parse);
+  REQUIRE(chat_result.error().status == 200);
+  REQUIRE(chat_result.error().metadata.x_balance_remaining == "4.230000");
+
+  auto response = minimal_response();
+  response.model = "bad-created-at";
+  const auto response_result = client.create_response(response);
+  REQUIRE_FALSE(response_result);
+  REQUIRE(response_result.error().kind == ErrorKind::Parse);
+  REQUIRE(response_result.error().status == 200);
+  REQUIRE(response_result.error().metadata.x_balance_remaining == "3.210000");
 }
 
 TEST_CASE("Responses status classification precedes media and success parsing stays loud",
