@@ -6,12 +6,12 @@
 // Request-body serialization lives in test/02request/, precondition guards in
 // test/03guards/; nothing here touches either.
 //
-// The two large fixtures below are captured verbatim from the live API on
-// 2026-07-28 (`curl https://api.venice.ai/api/v1/models` and `?type=all`),
-// compact form and key order as received. They are not hand-written, because
-// the things most likely to be wrong in this parse are the things a
-// hand-written fixture would get wrong in the same direction as the code —
-// notably that Venice sends whole prices as JSON integers.
+// The large fixtures below are captured verbatim from the live API on
+// 2026-07-28 and 2026-08-31 (`curl https://api.venice.ai/api/v1/models` and
+// `?type=all`), compact form and key order as received. They are not
+// hand-written, because the things most likely to be wrong in this parse are
+// the things a hand-written fixture would get wrong in the same direction as
+// the code — notably that Venice sends whole prices as JSON integers.
 //
 // One rule this file must not break, the same one test/02request/ states:
 // never hand a std::optional to nlohmann. The pinned fallback is v3.11.3 and
@@ -20,12 +20,13 @@
 //
 // Failure matrix first, happy path last.
 
+#include <algorithm>
+#include <array>
 #include <catch2/catch_test_macros.hpp>
-
 #include <cstdint>
+#include <set>
 #include <string>
 #include <vector>
-
 #include <venice/venice.hpp>
 
 using venice::Model;
@@ -37,6 +38,12 @@ namespace {
 // threshold, a cache_input bucket but no cache_write, reasoning-effort
 // options, maxImages, and all fourteen capability booleans.
 constexpr auto kGrok = R"({"context_length":1000000,"created":1776470400,"id":"grok-4-3","model_spec":{"pricing":{"input":{"usd":1.42,"diem":1.42},"cache_input":{"usd":0.23,"diem":0.23},"output":{"usd":2.83,"diem":2.83},"extended":{"context_token_threshold":200000,"input":{"usd":2.83,"diem":2.83},"output":{"usd":5.67,"diem":5.67},"cache_input":{"usd":0.45,"diem":0.45}}},"availableContextTokens":1000000,"maxCompletionTokens":32000,"capabilities":{"optimizedForCode":false,"quantization":"not-available","supportsAudioInput":false,"supportsFunctionCalling":true,"supportsLogProbs":false,"supportsMultipleImages":true,"maxImages":10,"supportsReasoning":true,"supportsReasoningEffort":true,"reasoningEffortOptions":["none","low","medium","high"],"defaultReasoningEffort":"low","supportsResponseSchema":true,"supportsTeeAttestation":false,"supportsE2EE":false,"supportsVideoInput":false,"supportsVision":true,"supportsWebSearch":true,"supportsXSearch":true},"description":"Grok 4.3 is xAI's most intelligent and fastest reasoning model with function calling, structured outputs, and a 1M-token context window. Suited for agentic workflows, instruction-following tasks, and applications requiring high factual accuracy.","name":"Grok 4.3","modelSource":"https://docs.x.ai/developers/models","offline":false,"privacy":"private","traits":[]},"object":"model","owned_by":"venice.ai","type":"text"})";
+
+// Verbatim keyless capture on 2026-08-31. The one live capability object that
+// carried maxVideos; a hand-built fixture could agree with a typo in the
+// parser.
+constexpr auto kSeedVideoInput =
+    R"({"context_length":256000,"created":1782604800,"id":"seed-2-1-turbo","model_spec":{"pricing":{"input":{"usd":0.625,"diem":0.625},"cache_input":{"usd":0.125,"diem":0.125},"output":{"usd":3.125,"diem":3.125}},"availableContextTokens":256000,"maxCompletionTokens":65536,"capabilities":{"optimizedForCode":true,"quantization":"not-available","supportsAudioInput":false,"supportsFunctionCalling":true,"supportsLogProbs":false,"supportsMultipleImages":true,"maxImages":10,"maxVideos":4,"supportsReasoning":true,"supportsReasoningEffort":false,"supportsResponseSchema":true,"supportsTeeAttestation":false,"supportsE2EE":false,"supportsVideoInput":true,"supportsVision":true,"supportsWebSearch":true,"supportsXSearch":false},"description":"Seed 2.1 Turbo (Dola-Seed-2.1) is ByteDance’s next-generation multimodal model for the coding and agent era, with engineering-grade code delivery, long-horizon agent execution, and upgraded GUI and video understanding. Supports text, image, and video inputs with a 256K context window.","name":"Seed 2.1 Turbo","modelSource":"https://console.byteplus.com/ark/region:ark+ap-southeast-1/model/detail?Id=dola-seed-2-1-turbo","offline":false,"privacy":"anonymized","traits":[]},"object":"model","owned_by":"venice.ai","type":"text"})";
 
 // An image model. Its model_spec shares almost nothing with the text shape —
 // pricing is generation/upscale, there are no capabilities and no context
@@ -263,15 +270,67 @@ TEST_CASE("the extended tier is parsed as a second, whole rate card", "[models][
 // a second list written from the same misreading.
 
 TEST_CASE("every capability key is one the live payload carries", "[models][capabilities]") {
-  const auto entry = nlohmann::json::parse(kGrok);
-  const auto& caps = entry.at("model_spec").at("capabilities");
-  const auto m = one(kGrok);
+  const std::array entries{nlohmann::json::parse(kGrok),
+                           nlohmann::json::parse(kSeedVideoInput)};
 
-  REQUIRE(m.capabilities.has_value());
+  auto seen = [&](std::string_view key) {
+    return std::ranges::any_of(entries, [&](const auto& entry) {
+      return entry.at("model_spec").at("capabilities").contains(key);
+    });
+  };
+
   for (const auto& [field, key] : venice::detail::kCapabilityBoolFields) {
     INFO("capability key not present in the captured payload: " << key);
-    REQUIRE(caps.contains(key));
-    REQUIRE((m.capabilities.value().*field).has_value());
+    REQUIRE(seen(key));
+  }
+  for (const auto& [field, key] : venice::detail::kCapabilityIntFields) {
+    INFO("capability key not present in the captured payload: " << key);
+    REQUIRE(seen(key));
+  }
+  for (const auto& [field, key] : venice::detail::kCapabilityStringFields) {
+    INFO("capability key not present in the captured payload: " << key);
+    REQUIRE(seen(key));
+  }
+  for (const auto& [field, key] : venice::detail::kCapabilityListFields) {
+    INFO("capability key not present in the captured payload: " << key);
+    REQUIRE(seen(key));
+  }
+
+  std::set<std::string_view> modeled;
+  auto collect = [&](const auto& table) {
+    for (const auto& row : table) modeled.insert(row.key);
+  };
+  collect(venice::detail::kCapabilityBoolFields);
+  collect(venice::detail::kCapabilityIntFields);
+  collect(venice::detail::kCapabilityStringFields);
+  collect(venice::detail::kCapabilityListFields);
+  for (const auto& entry : entries) {
+    for (const auto& [key, value] :
+         entry.at("model_spec").at("capabilities").items()) {
+      (void)value;
+      INFO("unmodeled captured capability key: " << key);
+      REQUIRE(modeled.contains(key));
+    }
+  }
+}
+
+TEST_CASE("maxVideos is a tolerant representable capability",
+          "[models][capabilities]") {
+  const auto captured = one(kSeedVideoInput);
+  REQUIRE(captured.capabilities->max_videos == 4);
+  REQUIRE(captured.raw["model_spec"]["capabilities"]["maxVideos"] == 4);
+
+  SECTION("absent is unknown") {
+    REQUIRE_FALSE(one(kGrok).capabilities->max_videos.has_value());
+  }
+  SECTION("wrong-typed and unrepresentable values are unknown field-by-field") {
+    for (const auto* value : {R"("4")", "4.0", "99999999999999", "null"}) {
+      const auto m = one(spec_entry(
+          std::string{R"("capabilities":{"maxImages":10,"maxVideos":)"} +
+          value + "}"));
+      REQUIRE(m.capabilities->max_images == 10);
+      REQUIRE_FALSE(m.capabilities->max_videos.has_value());
+    }
   }
 }
 
@@ -328,6 +387,7 @@ TEST_CASE("a captured text entry parses field for field", "[models]") {
   REQUIRE(c.optimized_for_code == false);
   REQUIRE(c.quantization == "not-available");
   REQUIRE(c.max_images == 10);
+  REQUIRE_FALSE(c.max_videos.has_value());
   REQUIRE(c.default_reasoning_effort == "low");
   REQUIRE(c.reasoning_effort_options ==
           std::vector<std::string>{"none", "low", "medium", "high"});

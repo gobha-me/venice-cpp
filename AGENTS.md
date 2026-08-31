@@ -408,6 +408,15 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   builder must tell from silence. Two calls, opposite ways, on adjacent fields
   — so each comment names the other. `detail::string_array` now delegates to
   `opt_string_array` so the two cannot drift.
+- **Cross-modality catalogue policy lives on `Model`.** `maxVideos` is an
+  optional representable integer inside text-model `capabilities`, while
+  `model_spec.uncensored` is an optional boolean observed across text, image,
+  inpaint, music and video. `Model::uncensored` is authoritative;
+  `MusicModelSpec::uncensored` is retained only as a source-compatible mirror.
+  Neither value creates a client-owned limit, content rule or privacy promise.
+  The keyless modality audit descends into `capabilities`, differences its keys
+  and reconciles scalar/list values against `raw` rather than treating the
+  parent key as complete coverage (VC-56).
 - **A key the document does not have is not thereby absent from the wire, and a
   key it does have is not thereby present.** VC-39 measured seven keys on 100%
   of video models that appear nowhere in the swagger fetched the same day, and

@@ -9,11 +9,11 @@
 // per-modality half.
 //
 // THE FIXTURES AT THE BOTTOM OF THIS FILE ARE CAPTURES, not spec-derived. Each
-// is one verbatim entry from
+// is one verbatim entry from the dated 2026-08-11 or 2026-08-31 capture of
 //
 //   curl -s 'https://api.venice.ai/api/v1/models?type=<modality>'
 //
-// run on 2026-08-11 with NO Authorization header — every modality answers 200
+// run with NO Authorization header — every modality answers 200
 // keyless. Key order, spelling and numeric spelling are as received. That
 // provenance is the point of the file: VC-37 shipped a parser and a fixture
 // built from the same misreading of the same document, and they agreed
@@ -85,7 +85,21 @@ constexpr auto kEmbedding = R"J({"created":1776384000,"id":"text-embedding-qwen3
 // block and that no media view engages.
 constexpr auto kTextConstraints = R"J({"context_length":256000,"created":1771977600,"id":"qwen3-5-35b-a3b","model_spec":{"betaModel":true,"pricing":{"input":{"usd":0.3125,"diem":0.3125},"output":{"usd":1.25,"diem":1.25}},"availableContextTokens":256000,"maxCompletionTokens":16384,"model_sets":["featured"],"constraints":{"temperature":{"default":1},"top_p":{"default":0.95},"repetition_penalty":{"default":1}},"name":"Qwen 3.5 35B A3B","offline":false,"privacy":"private","traits":[]},"object":"model","owned_by":"venice.ai","type":"text"})J";
 
-// music — deliberately not modeled by VC-39. Pricing trimmed.
+// Cross-modality uncensored captures, fetched keyless on 2026-08-31. Five
+// distinct modality families pin that this is model_spec metadata rather than
+// a music-only request-policy field.
+constexpr auto kUncensoredText =
+    R"J({"context_length":128000,"created":1775001600,"id":"venice-uncensored-1-2","model_spec":{"pricing":{"input":{"usd":0.2,"diem":0.2},"output":{"usd":0.9,"diem":0.9}},"model_sets":["venice_recommendations"],"availableContextTokens":128000,"maxCompletionTokens":8192,"capabilities":{"optimizedForCode":false,"quantization":"fp16","supportsAudioInput":false,"supportsFunctionCalling":true,"supportsLogProbs":false,"supportsMultipleImages":true,"maxImages":10,"supportsReasoning":false,"supportsReasoningEffort":false,"supportsResponseSchema":true,"supportsTeeAttestation":false,"supportsE2EE":false,"supportsVideoInput":false,"supportsVision":true,"supportsWebSearch":true,"supportsXSearch":false},"description":"Venice Uncensored 1.2 is designed for maximum creative freedom and authentic interaction. Built for open-ended exploration, roleplay, and unfiltered dialogue with improved capabilities over 1.1.","name":"Venice Uncensored 1.2","modelSource":"https://huggingface.co/cognitivecomputations/Dolphin-Mistral-24B-Venice-Edition","offline":false,"privacy":"private","traits":["most_uncensored"],"uncensored":true},"object":"model","owned_by":"venice.ai","type":"text"})J";
+constexpr auto kUncensoredImage =
+    R"J({"created":1782777600,"id":"krea-2-turbo","model_spec":{"pricing":{"resolutions":{"1K":{"usd":0.04,"diem":0.04},"2K":{"usd":0.06,"diem":0.06}},"upscale":{"2x":{"usd":0.02,"diem":0.02},"4x":{"usd":0.08,"diem":0.08}}},"model_sets":["venice_recommendations"],"constraints":{"promptCharacterLimit":5000,"defaultResolution":"1K","resolutions":["1K","2K"],"aspectRatios":["1:1","3:2","16:9","21:9","9:16","2:3","3:4","4:5"],"defaultAspectRatio":"1:1","steps":{"default":20,"max":50},"widthHeightDivisor":1},"supportsWebSearch":false,"supportsOptimizePromptThinking":false,"supportsStyleReferences":false,"name":"Krea 2 Turbo","offline":false,"privacy":"private","traits":[],"uncensored":true},"object":"model","owned_by":"venice.ai","type":"image"})J";
+constexpr auto kUncensoredInpaint =
+    R"J({"created":1780531200,"id":"qwen-edit-uncensored","model_spec":{"pricing":{"inpaint":{"usd":0.04,"diem":0.04}},"constraints":{"aspectRatios":["auto","1:1","3:2","16:9","21:9","9:16","2:3","3:4","4:5"],"promptCharacterLimit":1500,"combineImages":true,"singleImageAspectRatio":true},"supportsOptimizePromptThinking":false,"name":"Qwen Edit Uncensored","offline":false,"privacy":"private","traits":[],"uncensored":true},"object":"model","owned_by":"venice.ai","type":"inpaint"})J";
+constexpr auto kUncensoredMusic =
+    R"J({"created":1771804800,"id":"ace-step-15","model_spec":{"pricing":{"durations":{"60":{"usd":0.03,"diem":0.03,"min_seconds":60,"max_seconds":60},"90":{"usd":0.04,"diem":0.04,"min_seconds":61,"max_seconds":90},"120":{"usd":0.05,"diem":0.05,"min_seconds":91,"max_seconds":120},"150":{"usd":0.06,"diem":0.06,"min_seconds":121,"max_seconds":150},"180":{"usd":0.07,"diem":0.07,"min_seconds":151,"max_seconds":180},"210":{"usd":0.08,"diem":0.08,"min_seconds":181,"max_seconds":210}}},"supports_lyrics":true,"lyrics_required":false,"supports_force_instrumental":false,"supports_lyrics_optimizer":false,"supports_loop":false,"duration_options":[60,90,120,150,180,210],"min_duration":60,"max_duration":210,"default_duration":60,"supported_formats":["flac"],"default_format":"flac","prompt_character_limit":512,"lyrics_character_limit":4096,"min_prompt_length":10,"supports_custom_voice_id":false,"supports_language_code":false,"supports_speed":false,"description":"Feature-rich song generation with optional lyrics and detailed musical controls.","name":"ACE-Step 1.5","modelSource":"","offline":false,"privacy":"anonymized","traits":[],"uncensored":true},"object":"model","owned_by":"venice.ai","type":"music"})J";
+constexpr auto kUncensoredVideo =
+    R"J({"created":1773964800,"id":"seedance-1-5-pro-image-to-video-basic","model_spec":{"privacy":"anonymized","constraints":{"model_type":"image-to-video","aspect_ratios":[],"resolutions":["1080p","720p","480p"],"durations":["4s","5s","6s","7s","8s","9s","10s","11s","12s"],"audio":true,"audio_configurable":true,"audio_input":false,"per_reference_audio":false,"video_input":false,"prompt_character_limit":3500,"reference_image_min_short_side_pixels":300,"reference_image_min_aspect_ratio":0.4,"reference_image_max_aspect_ratio":2.5},"model_sets":["uncensored","high_resolution","audio","long_duration","cinematic","photorealistic"],"name":"Seedance 1.5 Pro","offline":false,"traits":[],"uncensored":true},"object":"model","owned_by":"venice.ai","type":"video"})J";
+
+// Music request-policy baseline. Pricing trimmed.
 constexpr auto kMusic = R"J({"created":1771804800,"id":"ace-step-15","model_spec":{"supports_lyrics":true,"lyrics_required":false,"supports_force_instrumental":false,"supports_lyrics_optimizer":false,"supports_loop":false,"duration_options":[60,90,120],"min_duration":60,"max_duration":210,"default_duration":60,"supported_formats":["flac"],"default_format":"flac","prompt_character_limit":512,"lyrics_character_limit":4096,"min_prompt_length":10,"supports_custom_voice_id":false,"supports_language_code":false,"supports_speed":false,"name":"ACE-Step 1.5","offline":false,"privacy":"anonymized","traits":[]},"object":"model","owned_by":"venice.ai","type":"music"})J";
 
 // upscale — the whole catalogue's only entry, and it carries no metadata
@@ -475,11 +489,21 @@ TEST_CASE("every key the live payload sends is one some table names", "[modaliti
 TEST_CASE("the modeled spec-level keys cover what each capture carries", "[modalities]") {
   // Same reverse check one level up, where the per-modality views live beside
   // the fields Model has read since VC-03.
-  const std::set<std::string> shared{"name",        "description",           "privacy",
-                                     "modelSource", "offline",               "betaModel",
-                                     "traits",      "availableContextTokens", "maxCompletionTokens",
-                                     "capabilities", "pricing",              "constraints",
-                                     "model_sets",  "deprecation"};
+  std::set<std::string> shared{"name",
+                               "description",
+                               "privacy",
+                               "modelSource",
+                               "offline",
+                               "betaModel",
+                               "traits",
+                               "availableContextTokens",
+                               "maxCompletionTokens",
+                               "capabilities",
+                               "pricing",
+                               "constraints",
+                               "model_sets",
+                               "deprecation"};
+  collect(venice::detail::kModelSpecBoolFields, shared);
 
   auto covered = [&](std::set<std::string> extra) {
     auto all = shared;
@@ -574,7 +598,53 @@ TEST_CASE("model_sets is read for every type", "[modalities]") {
   REQUIRE(one(kTextConstraints).model_sets == std::vector<std::string>{"featured"});
 }
 
-// ── §10 raw is still the whole entry ───────────────────────────────────────
+// ── §10 uncensored, across modalities ─────────────────────────────────────
+
+TEST_CASE("uncensored is canonical cross-modality metadata", "[modalities]") {
+  for (const auto* entry :
+       {kUncensoredText, kUncensoredImage, kUncensoredInpaint, kUncensoredMusic,
+        kUncensoredVideo}) {
+    const auto m = one(entry);
+    INFO("model: " << m.id << ", type: " << m.type);
+    REQUIRE(m.uncensored == true);
+    REQUIRE(m.raw["model_spec"]["uncensored"] == true);
+  }
+
+  const auto music = one(kUncensoredMusic);
+  REQUIRE(music.music.has_value());
+  REQUIRE(music.music->uncensored == music.uncensored);
+
+  // MusicModelSpec is public and ADL-parsable on its own. Keep that older
+  // source contract even though Model::uncensored is now authoritative.
+  const auto standalone =
+      nlohmann::json{{"uncensored", false}}.get<venice::MusicModelSpec>();
+  REQUIRE(standalone.uncensored == false);
+}
+
+TEST_CASE("uncensored preserves unknown, false and malformed states",
+          "[modalities][failure]") {
+  SECTION("absent is unknown for both canonical and compatibility views") {
+    const auto music = one(kMusic);
+    REQUIRE_FALSE(music.uncensored.has_value());
+    REQUIRE_FALSE(music.music->uncensored.has_value());
+  }
+  SECTION("explicit false remains distinct from absent") {
+    const auto m = spec_entry("image", R"({"uncensored":false})");
+    REQUIRE(m.uncensored == false);
+  }
+  SECTION("wrong types degrade without losing the modality view") {
+    for (const auto* value : {R"("true")", "1", "null", "[]"}) {
+      const auto m = spec_entry(
+          "music", std::string{R"({"supports_lyrics":true,"uncensored":)"} +
+                       value + "}");
+      REQUIRE(m.music->supports_lyrics == true);
+      REQUIRE_FALSE(m.uncensored.has_value());
+      REQUIRE_FALSE(m.music->uncensored.has_value());
+    }
+  }
+}
+
+// ── §11 raw is still the whole entry ───────────────────────────────────────
 
 TEST_CASE("every modeled field is still in raw", "[modalities]") {
   // The superset doctrine: a subtractive hatch breaks its readers on every
@@ -598,7 +668,7 @@ TEST_CASE("every modeled field is still in raw", "[modalities]") {
   REQUIRE(image.raw["model_spec"]["supportsStyleReferences"] == true);
 }
 
-// ── §11 happy path, one per modality ───────────────────────────────────────
+// ── §12 happy path, one per modality ───────────────────────────────────────
 
 TEST_CASE("an image model states what an image request must satisfy", "[modalities]") {
   const auto m = one(kImageStyleRefs);

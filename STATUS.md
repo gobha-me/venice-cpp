@@ -19,7 +19,7 @@ AGENTS.md (which holds standing conventions, not state).
 - Per-request timeouts, a `CancelToken`, and an authentication override on every
   entry point (VC-06/VC-23).
 - `models()` list with typed per-model metadata, filterable by modality
-  (106 text / 314 all / 48 code, fetched live 2026-08-11), `balance()`
+  (111 text / 338 all, fetched live 2026-08-31), `balance()`
   rate-limit endpoint.
 - `model_traits(type)` and `model_compatibility_mapping(type)` (VC-38) — the
   catalogue's own answer to "which model", and the first two operations in this
@@ -114,6 +114,22 @@ was blinded by any comment mentioning a package name. Both were upstream bugs an
 have since landed there as CT-14.
 
 ## Next up
+
+**VC-56 (#91) is implemented for v0.29.12.** Text-model capabilities now expose
+the optional representable `maxVideos` limit as `max_videos`, and
+`Model::uncensored` exposes the optional `model_spec` classification across
+text, image, inpaint, music and video. The former music-only member remains a
+source-compatible mirror populated from the canonical Model value; neither
+field turns server metadata into local policy or a content/privacy guarantee.
+
+Failure-first fixtures pin the five uncensored modalities plus the one live
+`maxVideos` capability. Absent, false, malformed, fractional and
+unrepresentable states remain distinguishable without losing neighboring
+metadata, and `Model::raw` remains verbatim. The keyless live audit now descends
+into `capabilities`, differences nested keys, and reconciles scalar/list values
+in both directions. Its 2026-08-31 run covered all 338 models with no unmodeled
+capability key or reconciliation mismatch; `maxVideos` was present on 1/111
+text models and `uncensored` on 63 entries across five modalities.
 
 **VC-55 (#90) is implemented for v0.29.11.** The API-key lifecycle now exposes
 Venice's `modelPrivacy` policy through an optional open string on regular
@@ -647,6 +663,12 @@ Live run 2026-08-11, keyless, all nine modalities: exit 0, no unmodeled key at
 any level, no reconciliation mismatch. The typed surface reproduces all 30
 counts from an independent raw-JSON tabulation, including video
 `aspect_ratios` engaged 111 / non-empty 71.
+
+Live run 2026-08-31, keyless, all 338 entries: exit 0, no unmodeled capability
+key and no reconciliation mismatch. The nested coverage reports
+`capabilities.maxVideos` on 1/111 text entries and shared
+`model_spec.uncensored` on 10/111 text, 11/38 image, 6/21 inpaint, 2/14 music
+and 34/128 video entries.
 
 That run also found the OpenAPI source drift now resolved by VC-26; the current
 snapshot and the audit result are recorded in its entry above.

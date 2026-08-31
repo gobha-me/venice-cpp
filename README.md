@@ -643,6 +643,10 @@ for (const auto& m : *list) {
   if (!m.capabilities || m.capabilities->supports_function_calling != true) continue;
   if (!m.context_length || *m.context_length < 200000) continue;
 
+  // The server says how many video inputs this text model accepts, if any.
+  if (m.capabilities->max_videos)
+    std::cout << m.id << " accepts " << *m.capabilities->max_videos << " videos\n";
+
   // per-million-token input rate, if quoted
   if (m.pricing && m.pricing->base.input && m.pricing->base.input->usd)
     std::cout << m.id << " $" << *m.pricing->base.input->usd << '\n';
@@ -657,18 +661,20 @@ would save it (P2718R0) is GCC 15 / Clang 19 while this library supports GCC
 
 Every field but `id` and `type` is optional, and absent means *the response did
 not say* — not `false` and not zero. `m.capabilities->supports_vision != true`
-above is deliberate: an unset flag is not a "no".
+above is deliberate: an unset flag is not a "no". `max_videos` reads Venice's
+literal `maxVideos` capability as a representable integer; the client does not
+invent a limit when it is absent or malformed.
 
 **The bare call lists text models only** — that is Venice's default for the
-endpoint, not a choice this client makes, and it is 106 of the 314 models the
+endpoint, not a choice this client makes, and it is 111 of the 338 models the
 API actually serves. Pass a type to reach the rest:
 
 ```cpp
 client.models();          // no query string — text, as before
-client.models("image");   // 37
-client.models("all");     // 314: text 106, video 111, image 37, inpaint 20,
+client.models("image");   // 38
+client.models("all");     // 338: text 111, video 128, image 38, inpaint 21,
                           //      music 14, tts 11, embedding 9, asr 5,
-                          //      upscale 1   (measured 2026-08-11)
+                          //      upscale 1   (measured 2026-08-31)
 ```
 
 The type is a plain string, not an enum, for the same reason `response_format`
@@ -728,6 +734,13 @@ specification:
   Music exposes duration, prompt, lyrics, voice, language, speed and format
   constraints. ASR entries currently carry only the common model/pricing fields
   and remain fully available through those fields plus `Model::raw`.
+
+`Model::uncensored` is shared catalogue metadata, not music policy: the
+2026-08-31 keyless listing carried `true` on text, image, inpaint, music and
+video entries. It is optional so absent, explicit false and malformed remain
+distinct. `MusicModelSpec::uncensored` remains a source-compatible mirror for
+older callers; new code reads `Model::uncensored`. Neither field is a local
+content, safety or privacy guarantee.
 
 The wire spelling differs by modality in the same position — image sends
 `aspectRatios` and `promptCharacterLimit`, video sends `aspect_ratios` and
@@ -1004,15 +1017,13 @@ m.raw["model_spec"]["constraints"];                      // per-model defaults
 ```
 
 `model_spec` is polymorphic by model type — image models carry generation
-pricing and no context window, tts carries a voice list — so the typed surface
-is the text shape and `raw` carries the rest. That is worth knowing before
-listing a non-text type: those entries parse, and their `name`, `description`,
-`traits` and `offline` are typed like any other, but `context_length`,
-`capabilities` and `pricing->base` come back empty because the keys behind them
-are text-only. Their rates are in `raw`, as above. Malformed entries degrade rather
-than failing the listing: an entry with no usable `id` is skipped, a
-wrong-typed field reads as absent, and only a response that is not a list at
-all comes back as `ErrorKind::Parse`.
+pricing and no context window, tts carries a voice list — so `Model` combines
+common metadata with one type-selected optional view while `raw` retains every
+shape. `context_length` and `capabilities` remain text-only because the wire
+places them there; per-modality constraints stay on their corresponding view.
+Malformed entries degrade rather than failing the listing: an entry with no
+usable `id` is skipped, a wrong-typed field reads as absent, and only a response
+that is not a list at all comes back as `ErrorKind::Parse`.
 
 ### Picking a character
 
@@ -1449,7 +1460,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.11)
+  GIT_TAG        v0.29.12)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
