@@ -5112,6 +5112,9 @@ struct ApiKey {
   nlohmann::json envelope_raw{};
   ResponseMetadata metadata{};
   nlohmann::json raw{};
+  // Appended to preserve positional aggregate initialization compatibility.
+  // Venice owns this policy's open string value set.
+  std::optional<std::string> model_privacy{};
 };
 
 namespace detail {
@@ -5208,6 +5211,7 @@ inline void redact_web3_api_key_material(nlohmann::json& value) {
   if (const auto* limits = opt_object(j, "consumptionLimits"))
     key.consumption_limits = api_key_consumption_limits_from_json(*limits);
   key.limit_period = opt_string(j, "limitPeriod");
+  key.model_privacy = opt_string(j, "modelPrivacy");
   key.created_at = opt_string(j, "createdAt");
   key.description = opt_string(j, "description");
   key.expires_at = opt_string(j, "expiresAt");
@@ -5304,6 +5308,9 @@ struct ApiKeyConsumptionLimitRequest {
   }
 };
 
+// New optional members in these public request aggregates are appended even
+// after `extra` so positional aggregate initializers keep their existing
+// meaning.
 struct ApiKeyCreateRequest {
   std::string api_key_type{};
   std::string description{};
@@ -5311,6 +5318,7 @@ struct ApiKeyCreateRequest {
   std::optional<std::string> limit_period{};
   std::optional<std::string> expires_at{};
   nlohmann::json extra{};
+  std::optional<std::string> model_privacy{};
 
   [[nodiscard]] auto to_json_body() const -> nlohmann::json {
     nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
@@ -5319,6 +5327,7 @@ struct ApiKeyCreateRequest {
     if (consumption_limit) j["consumptionLimit"] = consumption_limit->to_json_body();
     if (limit_period) j["limitPeriod"] = *limit_period;
     if (expires_at) j["expiresAt"] = *expires_at;
+    if (model_privacy) j["modelPrivacy"] = *model_privacy;
     return j;
   }
 };
@@ -5333,6 +5342,7 @@ struct ApiKeyUpdateRequest {
   // wire's equivalent null spelling.
   std::optional<std::string> expires_at{};
   nlohmann::json extra{};
+  std::optional<std::string> model_privacy{};
 
   [[nodiscard]] auto to_json_body() const -> nlohmann::json {
     nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
@@ -5341,6 +5351,7 @@ struct ApiKeyUpdateRequest {
     if (limit_period) j["limitPeriod"] = *limit_period;
     if (description) j["description"] = *description;
     if (expires_at) j["expiresAt"] = *expires_at;
+    if (model_privacy) j["modelPrivacy"] = *model_privacy;
     return j;
   }
 };
@@ -5355,6 +5366,7 @@ struct Web3ApiKeyCreateRequest {
   std::optional<std::string> description{};
   std::optional<std::string> expires_at{};
   nlohmann::json extra{};
+  std::optional<std::string> model_privacy{};
 
   [[nodiscard]] auto to_json_body() const -> nlohmann::json {
     nlohmann::json j = extra.is_object() ? extra : nlohmann::json::object();
@@ -5366,6 +5378,7 @@ struct Web3ApiKeyCreateRequest {
     if (limit_period) j["limitPeriod"] = *limit_period;
     if (description) j["description"] = *description;
     if (expires_at) j["expiresAt"] = *expires_at;
+    if (model_privacy) j["modelPrivacy"] = *model_privacy;
     return j;
   }
 };
@@ -5383,6 +5396,8 @@ struct ApiKeyCreated {
   std::optional<std::string> expires_at{};
   ResponseMetadata metadata{};
   nlohmann::json raw{};
+  // Appended to preserve positional aggregate initialization compatibility.
+  std::optional<std::string> model_privacy{};
 };
 
 [[nodiscard]] inline auto api_key_created_from_json_body(const nlohmann::json& j)
@@ -5411,6 +5426,7 @@ struct ApiKeyCreated {
   if (const auto* limits = detail::opt_object(data, "consumptionLimit"))
     response.consumption_limit = detail::api_key_consumption_limits_from_json(*limits);
   response.limit_period = detail::opt_string(data, "limitPeriod");
+  response.model_privacy = detail::opt_string(data, "modelPrivacy");
   response.description = detail::opt_string(data, "description");
   response.expires_at = detail::opt_string(data, "expiresAt");
   return response;

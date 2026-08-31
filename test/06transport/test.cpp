@@ -392,18 +392,20 @@ class TestServer {
               });
 
     const auto key_object = [](const httplib::Request& req) {
-      return nlohmann::json{{"apiKeyType", "INFERENCE"},
-                            {"consumptionLimits", {{"usd", 0}, {"diem", nullptr}}},
-                            {"limitPeriod", "EPOCH"},
-                            {"createdAt", "created"},
-                            {"description", "fixture"},
-                            {"expiresAt", nullptr},
-                            {"id", "fixture-id"},
-                            {"last6Chars", "ABC123"},
-                            {"lastUsedAt", nullptr},
-                            {"target", req.target},
-                            {"method", req.method},
-                            {"authorization", req.get_header_value("Authorization")}};
+      return nlohmann::json{
+          {"apiKeyType", "INFERENCE"},
+          {"consumptionLimits", {{"usd", 0}, {"diem", nullptr}}},
+          {"limitPeriod", "EPOCH"},
+          {"modelPrivacy", "PRIVATE_TEXT"},
+          {"createdAt", "created"},
+          {"description", "fixture"},
+          {"expiresAt", nullptr},
+          {"id", "fixture-id"},
+          {"last6Chars", "ABC123"},
+          {"lastUsedAt", nullptr},
+          {"target", req.target},
+          {"method", req.method},
+          {"authorization", req.get_header_value("Authorization")}};
     };
 
     m_svr.Get("/api/v1/api_keys",
@@ -458,11 +460,14 @@ class TestServer {
                            {"apiKeyType", "INFERENCE"},
                            {"consumptionLimit", {{"usd", 0}}},
                            {"limitPeriod", "EPOCH"},
+                           {"modelPrivacy",
+                            body.value("modelPrivacy", "PRIVATE_TEXT")},
                            {"expiresAt", nullptr},
                            {"id", "fixture-created-id"}}},
                          {"success", true},
                          {"seenBody", body},
-                         {"authorization", req.get_header_value("Authorization")}}
+                         {"authorization",
+                          req.get_header_value("Authorization")}}
                          .dump(),
                      "application/json");
                });
@@ -471,12 +476,15 @@ class TestServer {
                 [this, key_object](const httplib::Request& req, httplib::Response& res) {
                   ++m_api_key_hits;
                   res.set_header("X-Test-Response", "api-key-update");
-                  res.set_content(
-                      nlohmann::json{{"data", key_object(req)},
-                                     {"success", true},
-                                     {"seenBody", nlohmann::json::parse(req.body)}}
-                          .dump(),
-                      "application/json");
+                  const auto body = nlohmann::json::parse(req.body);
+                  auto data = key_object(req);
+                  data["modelPrivacy"] =
+                      body.value("modelPrivacy", "PRIVATE_TEXT");
+                  res.set_content(nlohmann::json{{"data", std::move(data)},
+                                                 {"success", true},
+                                                 {"seenBody", body}}
+                                      .dump(),
+                                  "application/json");
                 });
 
     m_svr.Delete("/api/v1/api_keys",
@@ -548,11 +556,16 @@ class TestServer {
                        {"data",
                         {{"apiKey", "SYNTHETIC_WEB3_API_KEY_SECRET"},
                          {"apiKeyType", body.at("apiKeyType")},
-                         {"consumptionLimit", body.value("consumptionLimit",
-                                                         nlohmann::json::object())},
+                         {"consumptionLimit",
+                          body.value("consumptionLimit",
+                                     nlohmann::json::object())},
                          {"limitPeriod", body.value("limitPeriod", "EPOCH")},
-                         {"description", body.value("description", "Web3 API Key")},
-                         {"expiresAt", body.value("expiresAt", nlohmann::json(nullptr))},
+                         {"modelPrivacy",
+                          body.value("modelPrivacy", "PRIVATE_TEXT")},
+                         {"description",
+                          body.value("description", "Web3 API Key")},
+                         {"expiresAt",
+                          body.value("expiresAt", nlohmann::json(nullptr))},
                          {"id", "fixture-web3-key-id"}}},
                        {"success", true},
                        {"seenBody", body},
@@ -3732,12 +3745,14 @@ TEST_CASE("API-key calls preserve exact methods targets bodies and metadata",
   REQUIRE(list);
   REQUIRE(list->entries.front().raw["target"] == "/api/v1/api_keys");
   REQUIRE(list->entries.front().raw["method"] == "GET");
+  REQUIRE(list->entries.front().model_privacy == "PRIVATE_TEXT");
   REQUIRE(list->entries.front().raw["authorization"] == "Bearer api-key-fixture");
   REQUIRE(list->metadata.header("x-test-response") == "api-key-list");
 
   const auto detail = client.api_key("a/b ?");
   REQUIRE(detail);
   REQUIRE(detail->raw["target"] == "/api/v1/api_keys/a%2Fb%20%3F");
+  REQUIRE(detail->model_privacy == "PRIVATE_TEXT");
   REQUIRE(detail->metadata.header("x-test-response") == "api-key-detail");
 
   const auto created = client.create_api_key({
@@ -3745,16 +3760,19 @@ TEST_CASE("API-key calls preserve exact methods targets bodies and metadata",
       .description = "fixture",
       .consumption_limit = venice::ApiKeyConsumptionLimitRequest{.usd = 0.0},
       .limit_period = "EPOCH",
-      .extra = {{"future", true}},
+      .extra = {{"modelPrivacy", "shadow"}, {"future", true}},
+      .model_privacy = "FUTURE_PRIVACY",
   });
   REQUIRE(created);
   REQUIRE(created->id == "fixture-created-id");
   REQUIRE(created->api_key == "SYNTHETIC_SECRET_RETURNED_ONCE");
+  REQUIRE(created->model_privacy == "FUTURE_PRIVACY");
   REQUIRE(created->raw["data"]["apiKey"] == "[REDACTED]");
   REQUIRE(created->raw.dump().find("SYNTHETIC_SECRET_RETURNED_ONCE") ==
           std::string::npos);
   REQUIRE(created->raw["seenBody"]["apiKeyType"] == "INFERENCE");
   REQUIRE(created->raw["seenBody"]["consumptionLimit"]["usd"] == 0.0);
+  REQUIRE(created->raw["seenBody"]["modelPrivacy"] == "FUTURE_PRIVACY");
   REQUIRE(created->raw["seenBody"]["future"] == true);
   REQUIRE(created->raw["authorization"] == "Bearer api-key-fixture");
   REQUIRE(created->metadata.header("x-test-response") == "api-key-create");
@@ -3763,12 +3781,16 @@ TEST_CASE("API-key calls preserve exact methods targets bodies and metadata",
       .id = "fixture-id",
       .description = "updated",
       .expires_at = "",
+      .extra = {{"modelPrivacy", "shadow"}},
+      .model_privacy = "FUTURE_PRIVACY",
   });
   REQUIRE(updated);
   REQUIRE(updated->key.raw["method"] == "PATCH");
   REQUIRE(updated->raw["seenBody"]["id"] == "fixture-id");
   REQUIRE(updated->raw["seenBody"]["description"] == "updated");
   REQUIRE(updated->raw["seenBody"]["expiresAt"] == "");
+  REQUIRE(updated->raw["seenBody"]["modelPrivacy"] == "FUTURE_PRIVACY");
+  REQUIRE(updated->key.model_privacy == "FUTURE_PRIVACY");
   REQUIRE(updated->metadata.header("x-test-response") == "api-key-update");
 
   const auto deleted = client.delete_api_key("a/b ?");
@@ -3993,12 +4015,14 @@ TEST_CASE("Web3 API-key calls send exact public wire contracts and retain metada
       .limit_period = "FUTURE_PERIOD",
       .description = "synthetic key",
       .expires_at = "",
-      .extra = {{"future", true}},
+      .extra = {{"modelPrivacy", "shadow"}, {"future", true}},
+      .model_privacy = "FUTURE_PRIVACY",
   });
   REQUIRE(created);
   REQUIRE(created->success);
   REQUIRE(created->id == "fixture-web3-key-id");
   REQUIRE(created->api_key == "SYNTHETIC_WEB3_API_KEY_SECRET");
+  REQUIRE(created->model_privacy == "FUTURE_PRIVACY");
   REQUIRE(created->raw["data"]["apiKey"] == "[REDACTED]");
   REQUIRE(created->raw["seenBody"]["token"] == "[REDACTED]");
   REQUIRE(created->raw["seenBody"]["signature"] == "[REDACTED]");
@@ -4025,6 +4049,7 @@ TEST_CASE("Web3 API-key calls send exact public wire contracts and retain metada
   REQUIRE(body["consumptionLimit"]["usd"] == 0.0);
   REQUIRE(body["limitPeriod"] == "FUTURE_PERIOD");
   REQUIRE(body["description"] == "synthetic key");
+  REQUIRE(body["modelPrivacy"] == "FUTURE_PRIVACY");
   REQUIRE(body["expiresAt"] == "");
   REQUIRE(body["future"] == true);
   REQUIRE(server.web3_api_key_hits() == 2);

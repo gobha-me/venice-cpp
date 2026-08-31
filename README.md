@@ -841,9 +841,12 @@ names rather than a stable schema.
 ### API-key administration
 
 Administrative API-key inventory and mutation calls are Bearer-only. Value sets
-such as `api_key_type`, `limit_period` and rate-limit types stay strings because
-Venice owns them; response structs retain both typed optionals and their
-verbatim `raw` objects.
+such as `api_key_type`, `limit_period`, `model_privacy` and rate-limit types stay
+strings because Venice owns them; response structs retain both typed optionals
+and their verbatim `raw` objects. `model_privacy` spans regular create/update
+and Web3-create requests plus list, detail, create, update and Web3-create
+results, with the literal wire spelling `modelPrivacy`. It reports server-owned
+key policy, not a privacy guarantee made or enforced by this client.
 Usage totals remain decimal strings, while configured limits are the JSON
 numbers the server publishes. Missing and explicit zero never collapse.
 The one exception is `ApiKeyCreated::raw`: every nested `apiKey` value is
@@ -866,6 +869,7 @@ venice::ApiKeyCreateRequest create;
 create.api_key_type = "INFERENCE";
 create.description = "short-lived worker";
 create.limit_period = "MONTH";
+create.model_privacy = "PRIVATE_ONLY";  // current server-owned policy spelling
 create.consumption_limit = venice::ApiKeyConsumptionLimitRequest{.usd = 10.0};
 auto created = client.create_api_key(create);
 if (!created) return;
@@ -887,7 +891,8 @@ if (!deleted || !deleted->success) return;
 ```
 
 Create and update bodies serialize only engaged fields. Both carry additive
-`extra` JSON for future request keys, with modeled fields winning on collision.
+`extra` JSON for future request keys, with modeled fields winning on collision,
+including `modelPrivacy`.
 An omitted update field remains untouched; an engaged empty `expires_at`
 clears expiration, while `extra["expiresAt"] = nullptr` exposes the wire's
 equivalent null spelling. The client rejects only an empty ID and non-finite
@@ -1444,7 +1449,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.10)
+  GIT_TAG        v0.29.11)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

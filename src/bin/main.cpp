@@ -1231,10 +1231,11 @@ auto billing_report(const venice::Client& client, std::string_view lookback) -> 
 // revoke a credential. None of the four calls below can return complete key
 // material; list/detail expose only the server's last-six display suffix.
 constexpr std::array<std::string_view, 2> kModeledApiKeyListKeys{"data", "object"};
-constexpr std::array<std::string_view, 11> kModeledApiKeyKeys{
-    "apiKeyType",       "consumptionLimits", "limitPeriod", "createdAt",
-    "description",      "expiresAt",         "id",          "last6Chars",
-    "lastUsedAt",       "usage",             "currentPeriodUsage"};
+constexpr std::array<std::string_view, 12> kModeledApiKeyKeys{
+    "apiKeyType", "consumptionLimits",  "limitPeriod",
+    "createdAt",  "description",        "expiresAt",
+    "id",         "last6Chars",         "lastUsedAt",
+    "usage",      "currentPeriodUsage", "modelPrivacy"};
 constexpr std::array<std::string_view, 3> kModeledApiKeyLimitKeys{"usd", "diem", "vcu"};
 constexpr std::array<std::string_view, 1> kModeledApiKeyUsageKeys{"trailingSevenDays"};
 constexpr std::array<std::string_view, 1> kModeledApiKeyRateEnvelopeKeys{"data"};
@@ -1271,6 +1272,13 @@ auto api_keys_report(const venice::Client& client) -> int {
   }
 
   std::optional<std::string> detail_id;
+  const auto reconcile_model_privacy = [&agrees](const venice::ApiKey& key) {
+    if (venice::detail::opt_string(key.raw, "modelPrivacy") ==
+        key.model_privacy)
+      return;
+    std::cerr << "API-key modelPrivacy RAW/TYPED MISMATCH\n";
+    agrees = false;
+  };
   for (const auto& key : list->entries) {
     report_unmodeled("unmodeled API-key fields: ", key.raw, kModeledApiKeyKeys,
                      "ApiKey::raw");
@@ -1281,6 +1289,7 @@ auto api_keys_report(const venice::Client& client) -> int {
     if (key.usage)
       report_unmodeled("unmodeled usage fields: ", key.usage->raw,
                        kModeledApiKeyUsageKeys, "ApiKeyUsage::raw");
+    reconcile_model_privacy(key);
     if (!detail_id && key.id) detail_id = key.id;
   }
 
@@ -1295,6 +1304,7 @@ auto api_keys_report(const venice::Client& client) -> int {
               << detail->envelope_raw.dump(2) << '\n';
     report_unmodeled("unmodeled API-key detail fields: ", detail->raw,
                      kModeledApiKeyKeys, "ApiKey::raw");
+    reconcile_model_privacy(*detail);
   } else {
     std::cerr << "No API-key id was available for the read-only detail check.\n";
   }
