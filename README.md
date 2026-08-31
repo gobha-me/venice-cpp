@@ -56,9 +56,9 @@ right bridge.
   the verbatim entry as `raw`. The listing is filterable and pageable, a known
   slug can be fetched directly, and the reviews behind a rating are pageable
   with the server's own page count.
-- **Embeddings** (`/embeddings`) — single text, text batches, token arrays and
-  token-array batches; float vectors and opaque base64 results remain distinct,
-  with strict index and usage accounting plus the verbatim response as `raw`.
+- **Embeddings** (`/embeddings`) — single text and text batches; float vectors
+  and opaque base64 results remain distinct, with strict index and usage
+  accounting plus the verbatim response as `raw`.
 - **Image generation** (`/image/generate`, `/images/generations`) — separate
   Venice-native and OpenAI-compatible requests. Native success is a typed JSON
   envelope or byte-exact JPEG/PNG/WebP selected from the actual response media
@@ -370,8 +370,9 @@ Whether a request streams is decided by the method you call, not by a field on
 
 ### Embeddings
 
-Embedding input is raw JSON with builders for the four documented forms, so a
-new server-owned form remains reachable without waiting for a library release:
+Embedding input is raw JSON with builders for the two documented string forms,
+so a new server-owned form remains reachable without waiting for a library
+release:
 
 ```cpp
 venice::EmbeddingRequest embedding_request;
@@ -399,6 +400,12 @@ client rejects missing/empty required structure, but transmits range and value
 policy verbatim. Base64 is not decoded because Venice does not specify the
 decoded element width or byte order. Successful SIWX calls expose the exact
 `X-Balance-Remaining` string through `EmbeddingResponse::metadata`.
+
+Venice's current API contract rejects integer token arrays with HTTP 400. The
+legacy `embedding_input::tokens()` and `token_batches()` helpers remain only as
+deprecated source-compatibility shims and will be removed at a future breaking
+release. Pass text instead; LangChain `OpenAIEmbeddings` callers must set
+`check_embedding_ctx_length=False` so it does not replace text with token IDs.
 
 ### Image generation
 
@@ -1435,7 +1442,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.8)
+  GIT_TAG        v0.29.9)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

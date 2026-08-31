@@ -1084,8 +1084,8 @@ struct ChatRequest {
 //
 // `input` is caller-authored and polymorphic, so it follows the same contract
 // as response_format and tools: raw json is the forward-compatible floor and
-// builders make the documented shapes easy to spell. A closed variant here
-// would turn the next input form Venice adds into a source release of this
+// builders make the documented string shapes easy to spell. A closed variant
+// here would turn the next input form Venice adds into a source release of this
 // header instead of something callers can use immediately.
 
 namespace embedding_input {
@@ -1098,11 +1098,18 @@ inline auto texts(std::vector<std::string> values) -> nlohmann::json {
   return nlohmann::json(std::move(values));
 }
 
+[[deprecated(
+    "Venice rejects token-array embedding input; use text() or texts() "
+    "(LangChain: check_embedding_ctx_length=False)")]]
 inline auto tokens(std::vector<int> values) -> nlohmann::json {
   return nlohmann::json(std::move(values));
 }
 
-inline auto token_batches(std::vector<std::vector<int>> values) -> nlohmann::json {
+[[deprecated(
+    "Venice rejects token-array embedding input; use text() or texts() "
+    "(LangChain: check_embedding_ctx_length=False)")]]
+inline auto token_batches(std::vector<std::vector<int>> values)
+    -> nlohmann::json {
   return nlohmann::json(std::move(values));
 }
 

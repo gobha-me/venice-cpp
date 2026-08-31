@@ -144,15 +144,11 @@ TEST_CASE("embedding request guards reject only structural emptiness",
   }
 }
 
-TEST_CASE("embedding input builders preserve all documented shapes", "[embeddings][request]") {
+TEST_CASE("embedding input builders preserve the documented string shapes",
+          "[embeddings][request]") {
   REQUIRE(venice::embedding_input::text("one") == nlohmann::json("one"));
   REQUIRE(venice::embedding_input::texts({"one", "two"}) ==
           nlohmann::json::array({"one", "two"}));
-  REQUIRE(venice::embedding_input::tokens({1212, 318, 257}) ==
-          nlohmann::json::array({1212, 318, 257}));
-  REQUIRE(venice::embedding_input::token_batches({{1, 2}, {3, 4}}) ==
-          nlohmann::json::array({nlohmann::json::array({1, 2}),
-                                 nlohmann::json::array({3, 4})}));
 }
 
 TEST_CASE("embedding request keeps raw reachability and modeled precedence",

@@ -199,10 +199,14 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   audio, video, file, cache-control, function-call and reference shapes.
 - **Embedding input follows that same raw-with-builders rule; embedding output
   does not collapse two wire shapes.** `EmbeddingRequest::input` is raw json,
-  with `embedding_input::{text,texts,tokens,token_batches}` for the documented
-  forms. The client rejects only missing/empty required structure and leaves
-  element kinds, counts, dimensions, model ids and encoding names to the server,
-  so the raw escape hatch remains an escape hatch. On the response side,
+  with `embedding_input::{text,texts}` for the documented string forms. Venice
+  documents that integer token arrays return HTTP 400, so the old `tokens` and
+  `token_batches` helpers are deprecated source-compatibility shims rather than
+  supported forms. LangChain callers set `check_embedding_ctx_length=False` to
+  keep `OpenAIEmbeddings` from sending token IDs. The client rejects only
+  missing/empty required structure and leaves element kinds, counts, dimensions,
+  model ids and encoding names to the server, so the raw escape hatch remains an
+  escape hatch. On the response side,
   `EmbeddingValue` distinguishes `vector<double>` from opaque base64 even
   though the 20260811 OpenAPI 200 schema describes only the numeric array while
   the request explicitly offers `encoding_format: base64`. Indices, vector
