@@ -1613,8 +1613,7 @@ const auto kIsObject = [](const nlohmann::json& v) { return v.is_object(); };
 // legitimately reads absent, so calling it usable here would report a
 // reconciliation failure for correct behaviour.
 const auto kIsInt = [](const nlohmann::json& v) {
-  return v.is_number_integer() && v.get<std::int64_t>() >= std::numeric_limits<int>::min() &&
-         v.get<std::int64_t>() <= std::numeric_limits<int>::max();
+  return venice::detail::integer_if_representable<int>(v).has_value();
 };
 // Mirrors opt_double: is_number(), not is_number_float().
 const auto kIsNumber = [](const nlohmann::json& v) { return v.is_number(); };
@@ -2474,8 +2473,8 @@ auto report_usage(const nlohmann::json& raw, const std::optional<venice::Usage>&
     const auto o = raw.find(obj);
     if (o == raw.end() || !o->is_object()) return std::nullopt;
     const auto k = o->find(key);
-    if (k == o->end() || !k->is_number_integer()) return std::nullopt;
-    return k->get<int>();
+    if (k == o->end()) return std::nullopt;
+    return venice::detail::integer_if_representable<int>(*k);
   };
   const auto raw_cached = nested("prompt_tokens_details", "cached_tokens");
   const auto raw_cache_write =

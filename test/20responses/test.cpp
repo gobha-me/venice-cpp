@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -214,6 +216,174 @@ TEST_CASE("Responses required accounting stays loud", "[vc24][responses][respons
   REQUIRE_THROWS(responses_from_json_body(body));
 }
 
+TEST_CASE("integer readers reject unrepresentable signed and unsigned values",
+          "[vc52][integer][failure]") {
+  nlohmann::json object;
+
+  SECTION("representable signed and unsigned boundaries survive") {
+    object["value"] = std::numeric_limits<int>::min();
+    REQUIRE(detail::opt_int(object, "value") == std::numeric_limits<int>::min());
+    object["value"] = static_cast<std::uint64_t>(std::numeric_limits<int>::max());
+    REQUIRE(detail::opt_int(object, "value") == std::numeric_limits<int>::max());
+    object["value"] = std::numeric_limits<std::int64_t>::min();
+    REQUIRE(detail::opt_i64(object, "value") == std::numeric_limits<std::int64_t>::min());
+    object["value"] = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    REQUIRE(detail::opt_i64(object, "value") == std::numeric_limits<std::int64_t>::max());
+  }
+
+  SECTION("missing null and fractional values are unknown") {
+    REQUIRE_FALSE(detail::opt_int(object, "value"));
+    object["value"] = nullptr;
+    REQUIRE_FALSE(detail::opt_int(object, "value"));
+    object["value"] = 1.9;
+    REQUIRE_FALSE(detail::opt_int(object, "value"));
+    REQUIRE_FALSE(detail::opt_i64(object, "value"));
+  }
+
+  SECTION("signed int overflow is unknown rather than narrowed") {
+    object["value"] = static_cast<std::int64_t>(std::numeric_limits<int>::max()) + 1;
+    REQUIRE_FALSE(detail::opt_int(object, "value"));
+  }
+
+  SECTION("unsigned overflow is unknown rather than wrapped negative") {
+    object["value"] = std::numeric_limits<std::uint64_t>::max();
+    REQUIRE_FALSE(detail::opt_int(object, "value"));
+    REQUIRE_FALSE(detail::opt_i64(object, "value"));
+  }
+
+  SECTION("below-int64 input is not accepted through floating-point storage") {
+    object["value"] = nlohmann::json::parse("-9223372036854775809");
+    REQUIRE_FALSE(detail::opt_i64(object, "value"));
+  }
+
+  SECTION("tolerant integer arrays use the identical range rule") {
+    object["value"] = nlohmann::json::array(
+        {std::numeric_limits<int>::min(),
+         static_cast<std::uint64_t>(std::numeric_limits<int>::max()),
+         static_cast<std::int64_t>(std::numeric_limits<int>::max()) + 1,
+         std::numeric_limits<std::uint64_t>::max(), 1.9});
+    REQUIRE(detail::opt_int_array(object, "value") ==
+            std::vector<int>{std::numeric_limits<int>::min(),
+                             std::numeric_limits<int>::max()});
+  }
+}
+
+TEST_CASE("Chat integer fields are required and representable",
+          "[vc52][chat][integer][failure]") {
+  const auto valid_usage = [] {
+    return nlohmann::json{{"prompt_tokens", 1},
+                          {"completion_tokens", 2},
+                          {"total_tokens", 3}};
+  };
+
+  SECTION("every flat accounting field is required") {
+    for (const char* key : {"prompt_tokens", "completion_tokens", "total_tokens"}) {
+      auto usage = valid_usage();
+      usage.erase(key);
+      INFO("missing field: " << key);
+      REQUIRE_THROWS(usage.get<Usage>());
+    }
+  }
+
+  SECTION("null fractional signed-overflow and unsigned-overflow counts throw") {
+    const std::vector<nlohmann::json> invalid{
+        nullptr,
+        1.9,
+        static_cast<std::int64_t>(std::numeric_limits<int>::max()) + 1,
+        std::numeric_limits<std::uint64_t>::max(),
+    };
+    for (const auto& value : invalid) {
+      auto usage = valid_usage();
+      usage["prompt_tokens"] = value;
+      INFO("invalid value: " << value.dump());
+      REQUIRE_THROWS(usage.get<Usage>());
+    }
+  }
+
+  SECTION("every present optional accounting field is checked") {
+    const auto too_large = static_cast<std::int64_t>(std::numeric_limits<int>::max()) + 1;
+    std::vector<nlohmann::json> cases;
+    auto flat = valid_usage();
+    flat["cached_tokens"] = too_large;
+    cases.push_back(flat);
+    auto cached = valid_usage();
+    cached["prompt_tokens_details"]["cached_tokens"] = too_large;
+    cases.push_back(cached);
+    auto created = valid_usage();
+    created["prompt_tokens_details"]["cache_creation_input_tokens"] = too_large;
+    cases.push_back(created);
+    auto reasoning = valid_usage();
+    reasoning["completion_tokens_details"]["reasoning_tokens"] = too_large;
+    cases.push_back(reasoning);
+    for (const auto& usage : cases) REQUIRE_THROWS(usage.get<Usage>());
+  }
+
+  SECTION("missing choice index retains zero but every present invalid value throws") {
+    const nlohmann::json missing{{"message", {{"role", "assistant"}}}};
+    REQUIRE(missing.get<ChatChoice>().index == 0);
+    for (const auto& value : {nlohmann::json(nullptr), nlohmann::json(1.9),
+                              nlohmann::json(static_cast<std::int64_t>(
+                                  std::numeric_limits<int>::max()) + 1),
+                              nlohmann::json(std::numeric_limits<std::uint64_t>::max())}) {
+      auto present = missing;
+      present["index"] = value;
+      INFO("invalid index: " << value.dump());
+      REQUIRE_THROWS(present.get<ChatChoice>());
+    }
+  }
+}
+
+TEST_CASE("Responses integer fields are required and representable",
+          "[vc52][responses][integer][failure]") {
+  const auto valid = [] {
+    return nlohmann::json{{"id", "resp_1"},
+                          {"object", "response"},
+                          {"created_at", 10},
+                          {"model", "m"},
+                          {"status", "completed"},
+                          {"output", nlohmann::json::array()},
+                          {"usage",
+                           {{"input_tokens", 1}, {"output_tokens", 2}, {"total_tokens", 3}}}};
+  };
+
+  SECTION("every usage counter is required") {
+    for (const char* key : {"input_tokens", "output_tokens", "total_tokens"}) {
+      auto body = valid();
+      body["usage"].erase(key);
+      INFO("missing field: " << key);
+      REQUIRE_THROWS(responses_from_json_body(body));
+    }
+  }
+
+  SECTION("usage counters and optional details reject unrepresentable integers") {
+    auto base = valid();
+    base["usage"]["input_tokens"] = std::numeric_limits<std::uint64_t>::max();
+    REQUIRE_THROWS(responses_from_json_body(base));
+
+    auto cached = valid();
+    cached["usage"]["input_tokens_details"]["cached_tokens"] = 1.9;
+    REQUIRE_THROWS(responses_from_json_body(cached));
+
+    auto reasoning = valid();
+    reasoning["usage"]["output_tokens_details"]["reasoning_tokens"] = nullptr;
+    REQUIRE_THROWS(responses_from_json_body(reasoning));
+  }
+
+  SECTION("created_at rejects missing null fractional and both overflow directions") {
+    auto missing = valid();
+    missing.erase("created_at");
+    REQUIRE_THROWS(responses_from_json_body(missing));
+    for (const auto& value : {nlohmann::json(nullptr), nlohmann::json(1.9),
+                              nlohmann::json::parse("-9223372036854775809"),
+                              nlohmann::json(std::numeric_limits<std::uint64_t>::max())}) {
+      auto body = valid();
+      body["created_at"] = value;
+      INFO("invalid created_at: " << value.dump());
+      REQUIRE_THROWS(responses_from_json_body(body));
+    }
+  }
+}
+
 TEST_CASE("Responses error payload is typed without discarding its raw object",
           "[vc24][responses][response]") {
   const auto response = responses_from_json_body(nlohmann::json::parse(R"({
@@ -259,10 +429,13 @@ TEST_CASE("cache-write usage is distinct from cache-read usage", "[vc24][usage][
   REQUIRE(usage.cached_tokens == 4);
   REQUIRE(usage.cache_creation_input_tokens == 3);
 
-  const auto absent = nlohmann::json::parse(R"({"prompt_tokens":1})").get<Usage>();
+  const auto absent = nlohmann::json::parse(
+                          R"({"prompt_tokens":1,"completion_tokens":2,"total_tokens":3})")
+                          .get<Usage>();
   REQUIRE_FALSE(absent.cache_creation_input_tokens.has_value());
   REQUIRE_THROWS(nlohmann::json::parse(
-                     R"({"prompt_tokens_details":{"cache_creation_input_tokens":"many"}})")
+                     R"({"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,
+                          "prompt_tokens_details":{"cache_creation_input_tokens":"many"}})")
                      .get<Usage>());
 }
 

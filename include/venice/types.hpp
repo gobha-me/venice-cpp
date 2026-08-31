@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -50,11 +51,12 @@ namespace venice {
 // confident wrong answer, and a context window or a price is exactly the kind
 // of number nobody re-reads. Predicates first; range check after.
 //
-// These are deliberately not retrofitted onto Usage or ChatResponse. Those
-// parse inside Client::chat's try/catch, where a malformed body *should* fail
-// loudly as ErrorKind::Parse — a chat reply has no other entries to protect,
-// and silently zeroing a token count would hide a billing bug. Tolerance is a
-// property of listings, not of parsing in general.
+// Strict response fields use the same checked conversion through the
+// required_int / required_i64 wrappers below. Those throw into Client's Parse
+// boundary rather than mapping corruption onto a real number. Tolerance is a
+// property of the field contract, not of parsing in general: a listing field
+// whose optional state already means unknown may disengage, while accounting
+// and indexes with no unknown representation fail loudly.
 //
 // One rule these must never break, the same one test/02request/ states: never
 // hand a std::optional to nlohmann. cmake/deps/nlohmann_json.cmake falls back
@@ -64,6 +66,29 @@ namespace venice {
 // none is ever handed back.
 
 namespace detail {
+
+// nlohmann stores non-negative integer tokens as number_unsigned and
+// is_number_integer() intentionally accepts both integer storage classes.
+// Asking get<int64_t>() for UINT64_MAX wraps to -1, so inspect the storage class
+// before converting. The only supported targets are signed integer types: all
+// response counters and indexes in this API are int or int64_t.
+template <typename Integer>
+[[nodiscard]] inline auto integer_if_representable(const nlohmann::json& value)
+    -> std::optional<Integer> {
+  static_assert(std::is_integral_v<Integer> && std::is_signed_v<Integer>);
+  if (!value.is_number_integer()) return std::nullopt;
+  if (value.is_number_unsigned()) {
+    const auto wide = value.get<std::uint64_t>();
+    if (wide > static_cast<std::uint64_t>(std::numeric_limits<Integer>::max()))
+      return std::nullopt;
+    return static_cast<Integer>(wide);
+  }
+  const auto wide = value.get<std::int64_t>();
+  if (wide < static_cast<std::int64_t>(std::numeric_limits<Integer>::min()) ||
+      wide > static_cast<std::int64_t>(std::numeric_limits<Integer>::max()))
+    return std::nullopt;
+  return static_cast<Integer>(wide);
+}
 
 [[nodiscard]] inline auto opt_bool(const nlohmann::json& j, const char* key)
     -> std::optional<bool> {
@@ -75,20 +100,35 @@ namespace detail {
 [[nodiscard]] inline auto opt_i64(const nlohmann::json& j, const char* key)
     -> std::optional<std::int64_t> {
   const auto it = j.find(key);
-  if (it == j.end() || !it->is_number_integer()) return std::nullopt;
-  return it->get<std::int64_t>();
+  if (it == j.end()) return std::nullopt;
+  return integer_if_representable<std::int64_t>(*it);
 }
 
-// Via opt_i64, then range-checked. is_number_integer() is also true for
-// number_unsigned, so a value past INT_MAX passes the predicate and then
-// narrows silently — see the header note. A number this field cannot represent
-// is unparseable, i.e. nullopt; it is never a truncated one.
+// A number this field cannot represent is unparseable, i.e. nullopt; it is
+// never a truncated one.
 [[nodiscard]] inline auto opt_int(const nlohmann::json& j, const char* key)
     -> std::optional<int> {
-  const auto v = opt_i64(j, key);
-  if (!v || *v < std::numeric_limits<int>::min() || *v > std::numeric_limits<int>::max())
-    return std::nullopt;
-  return static_cast<int>(*v);
+  const auto it = j.find(key);
+  if (it == j.end()) return std::nullopt;
+  return integer_if_representable<int>(*it);
+}
+
+[[nodiscard]] inline auto required_int(const nlohmann::json& j, const char* key,
+                                       std::string_view where) -> int {
+  const auto value = opt_int(j, key);
+  if (!value)
+    throw std::runtime_error{std::string{where} + ": " + key +
+                             " must be an integer in int range"};
+  return *value;
+}
+
+[[nodiscard]] inline auto required_i64(const nlohmann::json& j, const char* key,
+                                       std::string_view where) -> std::int64_t {
+  const auto value = opt_i64(j, key);
+  if (!value)
+    throw std::runtime_error{std::string{where} + ": " + key +
+                             " must be an integer in int64 range"};
+  return *value;
 }
 
 // is_number(), not is_number_float(). Venice quotes prices as whole numbers
@@ -174,11 +214,7 @@ namespace detail {
   std::vector<int> out;
   out.reserve(it->size());
   for (const auto& value : *it) {
-    if (!value.is_number_integer()) continue;
-    const auto wide = value.get<std::int64_t>();
-    if (wide < std::numeric_limits<int>::min() || wide > std::numeric_limits<int>::max())
-      continue;
-    out.push_back(static_cast<int>(wide));
+    if (const auto parsed = integer_if_representable<int>(value)) out.push_back(*parsed);
   }
   return out;
 }
@@ -1133,14 +1169,6 @@ struct EmbeddingResponse {
       throw std::runtime_error{std::string{where} + ": " + key + " must be a string"};
     return it->get<std::string>();
   };
-  const auto required_int = [](const nlohmann::json& object, const char* key,
-                               const char* where) -> int {
-    const auto value = detail::opt_int(object, key);
-    if (!value)
-      throw std::runtime_error{std::string{where} + ": " + key + " must be an int"};
-    return *value;
-  };
-
   if (!j.is_object()) throw std::runtime_error{"embeddings: response must be an object"};
   const auto* entries = detail::opt_array(j, "data");
   if (entries == nullptr) throw std::runtime_error{"embeddings: response has no data array"};
@@ -1151,8 +1179,10 @@ struct EmbeddingResponse {
   response.raw = j;
   response.model = required_string(j, "model", "embeddings");
   response.object = required_string(j, "object", "embeddings");
-  response.usage.prompt_tokens = required_int(*usage, "prompt_tokens", "embeddings usage");
-  response.usage.total_tokens = required_int(*usage, "total_tokens", "embeddings usage");
+  response.usage.prompt_tokens =
+      detail::required_int(*usage, "prompt_tokens", "embeddings usage");
+  response.usage.total_tokens =
+      detail::required_int(*usage, "total_tokens", "embeddings usage");
   response.data.reserve(entries->size());
 
   for (const auto& item : *entries) {
@@ -1163,7 +1193,7 @@ struct EmbeddingResponse {
 
     Embedding entry;
     entry.raw = item;
-    entry.index = required_int(item, "index", "embedding entry");
+    entry.index = detail::required_int(item, "index", "embedding entry");
     entry.object = required_string(item, "object", "embedding entry");
     if (value->is_string()) {
       entry.value = value->get<std::string>();
@@ -2653,11 +2683,11 @@ struct Usage {
   //     "prompt_tokens_details": null is a shape variation between gateways,
   //     and letting it throw would turn a metadata nicety into a failed chat
   //     completion. detail::opt_object is a pure structural predicate, so it is
-  //     the right tool for the container while .get<int>() stays strict inside.
+  //     the right tool for the container while required_int stays strict inside.
   friend void from_json(const nlohmann::json& j, Usage& u) {
-    if (j.contains("prompt_tokens")) j.at("prompt_tokens").get_to(u.prompt_tokens);
-    if (j.contains("completion_tokens")) j.at("completion_tokens").get_to(u.completion_tokens);
-    if (j.contains("total_tokens")) j.at("total_tokens").get_to(u.total_tokens);
+    u.prompt_tokens = detail::required_int(j, "prompt_tokens", "chat usage");
+    u.completion_tokens = detail::required_int(j, "completion_tokens", "chat usage");
+    u.total_tokens = detail::required_int(j, "total_tokens", "chat usage");
 
     // Read flat first, then let the nested location override; nested wins on
     // disagreement because prompt_tokens_details.cached_tokens is the
@@ -2672,13 +2702,15 @@ struct Usage {
     // instead of it, is `cache_read_input_tokens` — a different key, carrying
     // the same number in every capture, which is why it stays untyped rather
     // than becoming a third read of one fact.
-    if (j.contains("cached_tokens")) u.cached_tokens = j.at("cached_tokens").get<int>();
+    if (j.contains("cached_tokens"))
+      u.cached_tokens = detail::required_int(j, "cached_tokens", "chat usage");
     if (const auto* pd = detail::opt_object(j, "prompt_tokens_details")) {
       if (pd->contains("cached_tokens"))
-        u.cached_tokens = pd->at("cached_tokens").get<int>();
+        u.cached_tokens =
+            detail::required_int(*pd, "cached_tokens", "chat prompt token details");
       if (pd->contains("cache_creation_input_tokens"))
-        u.cache_creation_input_tokens =
-            pd->at("cache_creation_input_tokens").get<int>();
+        u.cache_creation_input_tokens = detail::required_int(
+            *pd, "cache_creation_input_tokens", "chat prompt token details");
     }
 
     // opt_object here is intent, not protection, and that was measured rather
@@ -2688,7 +2720,9 @@ struct Usage {
     // exists — dropping both and reaching straight through turns the null and
     // empty-object shapes below red. Keep a guard; which one is style.
     if (const auto* cd = detail::opt_object(j, "completion_tokens_details"))
-      if (cd->contains("reasoning_tokens")) u.reasoning_tokens = cd->at("reasoning_tokens").get<int>();
+      if (cd->contains("reasoning_tokens"))
+        u.reasoning_tokens =
+            detail::required_int(*cd, "reasoning_tokens", "chat completion token details");
     // Both details objects are per-family, not universal: gemini-3-6-flash and
     // qwen3-235b-a22b-thinking-2507 send neither, and both *claim*
     // supportsReasoning. So an absent reasoning_tokens is not evidence of a
@@ -2723,7 +2757,7 @@ struct ChatChoice {
     // compatible gateways and fixtures. Present-but-corrupt stays loud: index
     // has no "unknown" representation, so tolerant parsing would silently turn
     // a bad join key into the real choice zero.
-    if (j.contains("index")) j.at("index").get_to(choice.index);
+    if (j.contains("index")) choice.index = detail::required_int(j, "index", "chat choice");
     choice.finish_reason = detail::opt_string(j, "finish_reason");
     choice.stop_reason = detail::opt_string(j, "stop_reason");
     if (const auto it = j.find("logprobs"); it != j.end()) choice.logprobs = *it;
@@ -2992,15 +3026,17 @@ struct ResponsesUsage {
   std::optional<int> reasoning_tokens{};
 
   friend void from_json(const nlohmann::json& j, ResponsesUsage& usage) {
-    j.at("input_tokens").get_to(usage.input_tokens);
-    j.at("output_tokens").get_to(usage.output_tokens);
-    j.at("total_tokens").get_to(usage.total_tokens);
+    usage.input_tokens = detail::required_int(j, "input_tokens", "responses usage");
+    usage.output_tokens = detail::required_int(j, "output_tokens", "responses usage");
+    usage.total_tokens = detail::required_int(j, "total_tokens", "responses usage");
     if (const auto* details = detail::opt_object(j, "input_tokens_details"))
       if (details->contains("cached_tokens"))
-        usage.cached_tokens = details->at("cached_tokens").get<int>();
+        usage.cached_tokens =
+            detail::required_int(*details, "cached_tokens", "responses input token details");
     if (const auto* details = detail::opt_object(j, "output_tokens_details"))
       if (details->contains("reasoning_tokens"))
-        usage.reasoning_tokens = details->at("reasoning_tokens").get<int>();
+        usage.reasoning_tokens = detail::required_int(
+            *details, "reasoning_tokens", "responses output token details");
   }
 };
 
@@ -3105,7 +3141,7 @@ struct ResponsesResponse {
   response.raw = j;
   j.at("id").get_to(response.id);
   j.at("object").get_to(response.object);
-  j.at("created_at").get_to(response.created_at);
+  response.created_at = detail::required_i64(j, "created_at", "responses response");
   j.at("model").get_to(response.model);
   j.at("status").get_to(response.status);
   j.at("output").get_to(response.output);
@@ -5711,23 +5747,7 @@ namespace detail {
 [[nodiscard]] inline auto required_x402_int(const nlohmann::json& j,
                                              const char* key,
                                              std::string_view where) -> int {
-  const auto it = j.find(key);
-  if (it == j.end() || !it->is_number_integer())
-    throw std::runtime_error{std::string{where} + ": " + key +
-                             " must be an integer in int range"};
-  if (it->is_number_unsigned()) {
-    const auto value = it->get<std::uint64_t>();
-    if (value > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
-      throw std::runtime_error{std::string{where} + ": " + key +
-                               " must be an integer in int range"};
-    return static_cast<int>(value);
-  }
-  const auto value = it->get<std::int64_t>();
-  if (value < std::numeric_limits<int>::min() ||
-      value > std::numeric_limits<int>::max())
-    throw std::runtime_error{std::string{where} + ": " + key +
-                             " must be an integer in int range"};
-  return static_cast<int>(value);
+  return required_int(j, key, where);
 }
 
 }  // namespace detail

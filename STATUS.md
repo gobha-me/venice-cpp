@@ -114,6 +114,23 @@ have since landed there as CT-14.
 
 ## Next up
 
+**VC-52 (#87) is implemented for v0.29.8.** One checked integer conversion now
+distinguishes nlohmann's signed and unsigned storage before narrowing. Tolerant
+optional fields return unknown for fractional or unrepresentable numbers;
+required Chat and Responses accounting, choice indexes and timestamps throw
+into the public `Parse` boundary instead of truncating, wrapping or retaining a
+default zero. Missing Chat choice indexes keep their historical zero default,
+while the three flat Chat and Responses usage counters are required.
+
+The failure-first matrix covers missing, null, fractional, signed-overflow and
+unsigned-overflow values; both signed and unsigned valid boundaries; every
+optional cache/reasoning counter; buffered Chat and Responses classification;
+and a corrupt SSE usage frame after valid content. The stream remains terminal
+on that parse failure while the caller-owned accumulator retains accepted
+deltas. Embeddings, x402, tolerant arrays and the live catalogue/usage
+reconciliation paths share the same conversion rule. No live API call or
+credential is needed.
+
 **VC-51 (#86) is implemented for v0.29.7.** Transport construction is now an
 expected-returning boundary. Unsupported schemes and empty, signed,
 non-decimal, zero, overflowing or out-of-range ports return `InvalidArg` before
@@ -1185,9 +1202,9 @@ success. That is now the one fatal case (`ErrorKind::Parse`); everything below
 it degrades. And `get<int>()` neither throws nor trips UBSan on a float or an
 out-of-range integer — it returns `1` for `1.9` and `276447231` for
 `99999999999999` — which is why the `detail::opt_*` helpers are predicate-based
-and `opt_int` range-checks. All four guards were proven by breaking them and
-watching the intended case go red; the fourth break restored the old container
-handling and turned all three §0 cases red at once.
+and checked against their destination range. All four guards were proven by
+breaking them and watching the intended case go red; the fourth break restored
+the old container handling and turned all three §0 cases red at once.
 
 Additive to `Model`, but `models()` changed behaviour on malformed input, hence
 the minor bump. `?type=` was filed separately as VC-13 and is now done.

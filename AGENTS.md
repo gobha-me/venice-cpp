@@ -305,7 +305,7 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   them — VC-08 measured six spellings on the pinned 3.11.3, including the
   array-valued-schema case a comment had long blamed, and every one produced the
   correct object. The style survived; its stated rationale did not.
-- **Response parsing: tolerant for listings, loud for everything else.**
+- **Response parsing follows the field's unknown-state contract.**
   `venice::detail::opt_bool` / `opt_int` / `opt_i64` / `opt_double` /
   `opt_string` / `opt_object` / `opt_array` / `string_array` in `types.hpp` read
   a field or return nullopt, using nlohmann **type predicates rather than
@@ -313,17 +313,19 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   `get<int>()` returns `1` for `1.9` and `276447231` for `99999999999999` and
   throws in neither case, so an exception-only guard turns a wrong-typed number
   into a confident wrong one — and the second case does not even trip UBSan,
-  because the narrowing is well-defined. `opt_int` therefore goes through
-  `opt_i64` and range-checks. `opt_double` accepts `is_number()`, not
-  `is_number_float()`: Venice quotes whole prices as JSON integers.
-  These are for *listings*, where one odd entry must not cost the caller the
-  other hundred. Do **not** retrofit them onto `Usage` / `ChatResponse` — those
-  parse inside `Client::chat`'s try/catch, where a malformed body should fail as
-  `ErrorKind::Parse`; a chat reply has no sibling entries to protect and
-  silently zeroing a token count would hide a billing bug.
+  because the narrowing is well-defined. `integer_if_representable` therefore
+  distinguishes signed from unsigned storage before range-checking; `opt_int`
+  and `opt_i64` return unknown, while `required_int` and `required_i64` throw
+  into the public `Parse` boundary. `opt_double` accepts `is_number()`, not
+  `is_number_float()`: Venice quotes whole prices as JSON integers. Listing and
+  optional metadata fields use tolerant readers because disengaged already
+  means unknown. Usage counters, choice indexes and Responses timestamps use
+  required readers because their scalar members have no unknown state and a
+  fabricated zero or wrapped negative would corrupt accounting or ordering
+  (VC-52).
 
-  **The boundary that rule is actually drawing.** The sentence above overstates
-  it, and VC-20 is where that showed: `ChatResponse` has read `created`,
+  **The boundary is representation, not which response owns the field.** VC-20
+  exposed that distinction: `ChatResponse` has read `created`,
   `system_fingerprint` and `venice_parameters` through `opt_i64` / `opt_string`
   / `opt_object` since before VC-20, so "do not retrofit onto `ChatResponse`"
   was never true of the struct as a whole. What makes tolerance wrong for

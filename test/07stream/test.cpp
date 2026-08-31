@@ -635,20 +635,27 @@ TEST_CASE("cached_tokens is read from both locations", "[usage][parse][failure]"
     // the read is harmless, removing it changes a public parse's behaviour to
     // buy nothing, and a gateway in front of Venice is exactly the thing that
     // would flatten a details object.
-    REQUIRE(usage_of(R"({"cached_tokens":80})").cached_tokens == 80);
+    REQUIRE(usage_of(R"({"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,
+                         "cached_tokens":80})")
+                .cached_tokens == 80);
   }
   SECTION("the nested OpenAI-canonical location — OBSERVED on 5 of 7 families") {
-    REQUIRE(usage_of(R"({"prompt_tokens_details":{"cached_tokens":4}})").cached_tokens == 4);
+    REQUIRE(usage_of(R"({"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,
+                         "prompt_tokens_details":{"cached_tokens":4}})")
+                .cached_tokens == 4);
   }
   SECTION("nested wins when both are present and disagree — CONSTRUCTED") {
     // No capture disagrees, because no capture carries both. This pins the
     // ordering so a disagreement, if one ever arrives, resolves the documented
     // way rather than by statement order in from_json.
-    REQUIRE(usage_of(R"({"cached_tokens":80,"prompt_tokens_details":{"cached_tokens":4}})")
+    REQUIRE(usage_of(R"({"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,
+                         "cached_tokens":80,
+                         "prompt_tokens_details":{"cached_tokens":4}})")
                 .cached_tokens == 4);
   }
   SECTION("neither leaves it unset — OBSERVED on gemini and qwen") {
-    REQUIRE_FALSE(usage_of(R"({"prompt_tokens":1})").cached_tokens.has_value());
+    REQUIRE_FALSE(usage_of(R"({"prompt_tokens":1,"completion_tokens":2,"total_tokens":3})")
+                      .cached_tokens.has_value());
   }
 }
 
@@ -656,10 +663,14 @@ TEST_CASE("a missing or null details object is structural, not corruption",
           "[usage][parse][failure]") {
   // Shape variation between gateways must not cost the caller the completion.
   const auto shapes = std::vector<std::string>{
-      R"({"prompt_tokens":1,"prompt_tokens_details":null})",
-      R"({"prompt_tokens":1,"completion_tokens_details":null})",
-      R"({"prompt_tokens":1,"prompt_tokens_details":[]})",
-      R"({"prompt_tokens":1,"completion_tokens_details":{}})",
+      R"({"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,
+           "prompt_tokens_details":null})",
+      R"({"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,
+           "completion_tokens_details":null})",
+      R"({"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,
+           "prompt_tokens_details":[]})",
+      R"({"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,
+           "completion_tokens_details":{}})",
   };
   for (const auto& s : shapes) {
     INFO("shape: " << s);
@@ -670,9 +681,13 @@ TEST_CASE("a missing or null details object is structural, not corruption",
 TEST_CASE("a wrong-typed token count stays loud", "[usage][parse][failure]") {
   // The other half of the rule above: a value that is corruption must fail as
   // ErrorKind::Parse rather than silently becoming 0 and hiding a billing bug.
-  REQUIRE_THROWS(nlohmann::json::parse(R"({"prompt_tokens":"many"})").get<Usage>());
+  REQUIRE_THROWS(nlohmann::json::parse(
+                     R"({"prompt_tokens":"many","completion_tokens":2,"total_tokens":3})")
+                     .get<Usage>());
   REQUIRE_THROWS(
-      nlohmann::json::parse(R"({"completion_tokens_details":{"reasoning_tokens":"lots"}})")
+      nlohmann::json::parse(
+          R"({"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,
+               "completion_tokens_details":{"reasoning_tokens":"lots"}})")
           .get<Usage>());
 }
 
