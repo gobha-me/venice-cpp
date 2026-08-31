@@ -2894,6 +2894,19 @@ TEST_CASE("embeddings posts exact JSON with Bearer auth and keeps response metad
   REQUIRE(std::holds_alternative<std::vector<double>>(response->data.front().value));
 }
 
+TEST_CASE("embeddings keeps raw input forward-compatible without shape policy",
+          "[transport][embeddings][request]") {
+  const TestServer server;
+  const Client client{"default-token", server.base_url()};
+  auto request = minimal_embedding();
+  request.input = nlohmann::json::array({1212, 318, 257});
+
+  const auto response = client.embeddings(request);
+  REQUIRE(response.has_value());
+  REQUIRE(server.embeddings_hits() == 1);
+  REQUIRE(response->raw["seen_body"]["input"] == request.input);
+}
+
 TEST_CASE("embeddings supports SIWX and keeps base64 opaque", "[transport][embeddings][auth]") {
   const TestServer server;
   const Client client{"default-token", server.base_url()};

@@ -33,9 +33,10 @@ AGENTS.md (which holds standing conventions, not state).
 - `character_reviews(slug, query)` — the reviews behind a rating, paged by the
   server's own `pagination` (VC-36). Verified live on 2026-08-11: every modeled
   key present, no unmodeled key at any of the four levels.
-- `embeddings(request)` — all four documented input shapes, float/base64 output
-  kept distinct, strict ordering/accounting fields, and the exact envelope in
-  `raw` (VC-26). Verified live in both formats on 2026-08-13.
+- `embeddings(request)` — the documented string and string-array input shapes,
+  float/base64 output kept distinct, strict ordering/accounting fields, and the
+  exact envelope in `raw` (VC-26/VC-53). Verified live in both output formats on
+  2026-08-13.
 - `generate_image(request)` — Venice-native typed JSON or byte-exact
   JPEG/PNG/WebP selected by actual response media type;
   `generate_image_openai(request)` for the distinct compatibility contract;
@@ -113,6 +114,20 @@ was blinded by any comment mentioning a package name. Both were upstream bugs an
 have since landed there as CT-14.
 
 ## Next up
+
+**VC-53 (#88) is implemented for v0.29.9.** Venice's current published schema
+documents only string and string-array embedding inputs and states that integer
+token arrays return HTTP 400. The named token-array builders are deprecated with
+an actionable migration diagnostic; `text()` and `texts()` remain the supported
+ergonomic forms. LangChain callers are directed to
+`check_embedding_ctx_length=False` so `OpenAIEmbeddings` sends text.
+
+`EmbeddingRequest::input` remains raw JSON and the client still applies only
+missing/empty structural guards. Loopback coverage sends a caller-authored
+integer array byte-exactly, proving that the compatibility correction did not
+turn the raw escape hatch into a closed client schema. Response parsing,
+authentication, metadata and value/range passthrough are unchanged; no live API
+call or credential is needed.
 
 **VC-52 (#87) is implemented for v0.29.8.** One checked integer conversion now
 distinguishes nlohmann's signed and unsigned storage before narrowing. Tolerant
@@ -457,8 +472,9 @@ The read-only live leg was not run in the implementing environment because no
 `VENICE_API_KEY` was configured; no mutating live call was attempted.
 
 **VC-26 (#41) is implemented for v0.18.0.** `EmbeddingRequest::input` remains
-raw JSON, with builders for text, text batches, token arrays and token-array
-batches. `EmbeddingValue` discriminates numeric vectors from opaque base64;
+raw JSON, with builders for text and text batches. VC-53 later deprecated the
+original token-array helpers after Venice documented that those inputs return
+HTTP 400. `EmbeddingValue` discriminates numeric vectors from opaque base64;
 indices and usage counts parse loudly because silently narrowing either would
 corrupt vector ordering or accounting. `venice-cpp --embeddings [model]` runs
 both response formats, reports runner-up embedding models, prints the verbatim
