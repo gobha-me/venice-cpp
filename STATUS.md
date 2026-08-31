@@ -268,9 +268,11 @@ are likewise reachable.
 stateless JSON contract. Input/output item universes stay raw and unknown items
 survive, while output text, function calls, citations, usage and failure details
 have typed accessors. The method forces `stream=false` because the audited
-document publishes no SSE event schema, and explicitly enabling E2EE fails
-before transport rather than silently rerouting. `--responses` selects a
-non-E2EE text model, reports alternatives and reconciles the verbatim envelope.
+document publishes no SSE event schema. An effective boolean E2EE enablement
+after modeled-wins merging fails before transport whether it came from a typed
+field or either raw request hatch; wrong-typed raw values remain server-owned
+input, and no request is silently rerouted. `--responses` selects a non-E2EE
+text model, reports alternatives and reconciles the verbatim envelope.
 
 The manifest now records 48 implemented operations plus the one retired,
 evidence-backed unsupported operation. #31 remains deliberately open: VC-24

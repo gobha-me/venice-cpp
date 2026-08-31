@@ -277,8 +277,10 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   `create_response()` forces `stream=false` because the audited document
   publishes no SSE event schema. Input/output item collections remain raw and
   unknown items survive; status, usage, error, function-call and citation views
-  are typed. Explicit E2EE enablement is `InvalidArg`, and the client never
-  silently reroutes to Chat Completions.
+  are typed. An effective boolean E2EE enablement after modeled-wins merging is
+  `InvalidArg`, whether it came from the typed member, `VeniceParameters::extra`
+  or `ResponsesRequest::extra`. Wrong-typed raw values remain server-owned
+  input, and the client never silently reroutes to Chat Completions (VC-54).
 - **Crypto RPC keeps the method universe raw and the transport layers distinct.**
   Network discovery is a tolerant public listing; proxy request params and
   result/error payloads remain raw JSON with small JSON-RPC 2.0 builders.

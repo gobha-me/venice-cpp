@@ -2193,25 +2193,30 @@ class TestServer {
                    return;
                  }
                  res.set_content(
-                     nlohmann::json{{"id", "resp_1"},
-                                    {"object", "response"},
-                                    {"created_at", 10},
-                                    {"model", model},
-                                    {"status", "completed"},
-                                    {"output",
-                                     nlohmann::json::array(
-                                         {{{"type", "message"},
-                                           {"id", "msg_1"},
-                                           {"status", "completed"},
-                                           {"role", "assistant"},
-                                           {"content",
-                                            nlohmann::json::array(
-                                                {{{"type", "output_text"},
-                                                  {"text", "ok"},
-                                                  {"annotations", nlohmann::json::array()}}})}}})},
-                                    {"seen_stream", request.at("stream")},
-                                    {"seen_authorization", bearer},
-                                    {"seen_siwx", siwx}}
+                     nlohmann::json{
+                         {"id", "resp_1"},
+                         {"object", "response"},
+                         {"created_at", 10},
+                         {"model", model},
+                         {"status", "completed"},
+                         {"output",
+                          nlohmann::json::array(
+                              {{{"type", "message"},
+                                {"id", "msg_1"},
+                                {"status", "completed"},
+                                {"role", "assistant"},
+                                {"content",
+                                 nlohmann::json::array(
+                                     {{{"type", "output_text"},
+                                       {"text", "ok"},
+                                       {"annotations",
+                                        nlohmann::json::array()}}})}}})},
+                         {"seen_stream", request.at("stream")},
+                         {"seen_venice_parameters",
+                          request.value("venice_parameters",
+                                        nlohmann::json{nullptr})},
+                         {"seen_authorization", bearer},
+                         {"seen_siwx", siwx}}
                          .dump(),
                      "application/json");
                });
@@ -6421,6 +6426,89 @@ TEST_CASE("Responses API uses buffered JSON transport and preserves metadata",
   REQUIRE(signed_response.has_value());
   REQUIRE(signed_response->raw.at("seen_siwx") == "signed-proof");
   REQUIRE(signed_response->raw.at("seen_authorization") == "");
+}
+
+TEST_CASE("Responses rejects only effective boolean E2EE before transport",
+          "[transport][responses][vc54][failure]") {
+  const TestServer server;
+  const Client client{"test-key", server.base_url()};
+
+  SECTION("typed true") {
+    auto request = minimal_response();
+    request.venice_parameters = venice::VeniceParameters{};
+    request.venice_parameters->enable_e2ee = true;
+    const auto result = client.create_response(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(result.error().status == 0);
+    REQUIRE(result.error().body.empty());
+    REQUIRE(server.responses_hits() == 0);
+  }
+
+  SECTION("nested raw true") {
+    auto request = minimal_response();
+    request.venice_parameters = venice::VeniceParameters{};
+    request.venice_parameters->extra["enable_e2ee"] = true;
+    const auto result = client.create_response(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(server.responses_hits() == 0);
+  }
+
+  SECTION("top-level raw true") {
+    auto request = minimal_response();
+    request.extra["venice_parameters"]["enable_e2ee"] = true;
+    const auto result = client.create_response(request);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().kind == ErrorKind::InvalidArg);
+    REQUIRE(server.responses_hits() == 0);
+  }
+
+  SECTION("typed false shadows nested raw true") {
+    auto request = minimal_response();
+    request.venice_parameters = venice::VeniceParameters{};
+    request.venice_parameters->extra =
+        nlohmann::json::parse(R"({"enable_e2ee":true,"future":7})");
+    request.venice_parameters->enable_e2ee = false;
+    const auto result = client.create_response(request);
+    REQUIRE(result.has_value());
+    REQUIRE(result->raw.at("seen_stream") == false);
+    REQUIRE(result->raw.at("seen_venice_parameters").at("enable_e2ee") ==
+            false);
+    REQUIRE(result->raw.at("seen_venice_parameters").at("future") == 7);
+    REQUIRE(server.responses_hits() == 1);
+  }
+
+  SECTION("an engaged typed object shadows a top-level raw true") {
+    auto request = minimal_response();
+    request.extra["venice_parameters"] =
+        nlohmann::json::parse(R"({"enable_e2ee":true,"raw_future":1})");
+    request.venice_parameters = venice::VeniceParameters{};
+    request.venice_parameters->extra["typed_future"] = 2;
+    const auto result = client.create_response(request);
+    REQUIRE(result.has_value());
+    const auto& seen = result->raw.at("seen_venice_parameters");
+    REQUIRE(seen.at("typed_future") == 2);
+    REQUIRE_FALSE(seen.contains("enable_e2ee"));
+    REQUIRE_FALSE(seen.contains("raw_future"));
+    REQUIRE(server.responses_hits() == 1);
+  }
+
+  SECTION("wrong-typed raw values stay server-owned") {
+    const std::array wrong_typed{nlohmann::json("true"), nlohmann::json(1),
+                                 nlohmann::json::object({{"future_value", 3}})};
+    for (const auto& value : wrong_typed) {
+      auto request = minimal_response();
+      request.extra["venice_parameters"] =
+          nlohmann::json{{"enable_e2ee", value}, {"future", 9}};
+      const auto result = client.create_response(request);
+      REQUIRE(result.has_value());
+      const auto& seen = result->raw.at("seen_venice_parameters");
+      REQUIRE(seen.at("enable_e2ee") == value);
+      REQUIRE(seen.at("future") == 9);
+    }
+    REQUIRE(server.responses_hits() == static_cast<int>(wrong_typed.size()));
+  }
 }
 
 TEST_CASE("buffered Chat and Responses reject unrepresentable response integers",
