@@ -256,6 +256,16 @@ struct VectorField {
   const char* key;
 };
 
+// A list whose public contract intentionally flattens absent and malformed to
+// empty. Most modeled lists preserve unknown with optional<vector<T>> and use
+// VectorField; capability reasoning options predate that distinction and stay
+// source-compatible as a plain vector.
+template <typename T, typename Struct>
+struct FlatVectorField {
+  std::vector<T> Struct::* field;
+  const char* key;
+};
+
 // A nested modeled object — `steps`, `voice_cloning`, `constraints`, each text
 // sampling parameter. Same shape as Field, under its own name because the
 // reader differs: opt_object then the sub-struct's own from_json, so a
@@ -303,6 +313,13 @@ template <typename Struct, std::size_t N>
 inline void read_table(const nlohmann::json& j, Struct& s,
                        const std::array<VectorField<int, Struct>, N>& table) {
   for (const auto& [field, key] : table) s.*field = opt_int_array(j, key);
+}
+
+template <typename Struct, std::size_t N>
+inline void read_table(
+    const nlohmann::json& j, Struct& s,
+    const std::array<FlatVectorField<std::string, Struct>, N>& table) {
+  for (const auto& [field, key] : table) s.*field = string_array(j, key);
 }
 
 template <typename Struct, typename T, std::size_t N>
@@ -3288,6 +3305,8 @@ struct ModelCapabilities {
   // efforts exist, is the half-answer that makes callers fork the header.
   std::optional<std::string> default_reasoning_effort;
   std::vector<std::string> reasoning_effort_options;
+  // Appended for positional aggregate source compatibility.
+  std::optional<int> max_videos;
 };
 
 namespace detail {
@@ -3325,18 +3344,34 @@ inline constexpr std::array<CapabilityFlag, 14> kCapabilityBoolFields{{
     {&ModelCapabilities::optimized_for_code, "optimizedForCode"},
 }};
 
+inline constexpr std::array<Field<int, ModelCapabilities>, 2>
+    kCapabilityIntFields{{
+        {&ModelCapabilities::max_images, "maxImages"},
+        {&ModelCapabilities::max_videos, "maxVideos"},
+    }};
+
+inline constexpr std::array<Field<std::string, ModelCapabilities>, 2>
+    kCapabilityStringFields{{
+        {&ModelCapabilities::quantization, "quantization"},
+        {&ModelCapabilities::default_reasoning_effort,
+         "defaultReasoningEffort"},
+    }};
+
+inline constexpr std::array<FlatVectorField<std::string, ModelCapabilities>, 1>
+    kCapabilityListFields{{
+        {&ModelCapabilities::reasoning_effort_options,
+         "reasoningEffortOptions"},
+    }};
+
 }  // namespace detail
 
 // Free rather than a friend, because the table above must be declared first
 // and it needs ModelCapabilities complete. Found by ADL all the same.
 inline void from_json(const nlohmann::json& j, ModelCapabilities& c) {
-  for (const auto& [field, key] : detail::kCapabilityBoolFields)
-    c.*field = detail::opt_bool(j, key);
-
-  c.quantization = detail::opt_string(j, "quantization");
-  c.max_images = detail::opt_int(j, "maxImages");
-  c.default_reasoning_effort = detail::opt_string(j, "defaultReasoningEffort");
-  c.reasoning_effort_options = detail::string_array(j, "reasoningEffortOptions");
+  detail::read_table(j, c, detail::kCapabilityBoolFields);
+  detail::read_table(j, c, detail::kCapabilityIntFields);
+  detail::read_table(j, c, detail::kCapabilityStringFields);
+  detail::read_table(j, c, detail::kCapabilityListFields);
 }
 
 // ── per-modality model metadata ───────────────────────────────────────────
@@ -3529,6 +3564,9 @@ struct MusicModelSpec {
   std::optional<bool> supports_custom_voice_id;
   std::optional<bool> supports_language_code;
   std::optional<bool> supports_speed;
+  // Source-compatible mirror of Model::uncensored for music entries. New code
+  // reads the canonical cross-modality field; this remains populated so code
+  // written against the original music-only view does not break.
   std::optional<bool> uncensored;
   std::optional<int> default_duration;
   std::optional<int> min_duration;
@@ -3703,17 +3741,19 @@ inline constexpr std::array<ObjectField<VoiceCloning, TtsModelSpec>, 1> kTtsSpec
     {&TtsModelSpec::voice_cloning, "voice_cloning"},
 }};
 
-inline constexpr std::array<Field<bool, MusicModelSpec>, 9> kMusicSpecBoolFields{{
-    {&MusicModelSpec::lyrics_required, "lyrics_required"},
-    {&MusicModelSpec::supports_lyrics, "supports_lyrics"},
-    {&MusicModelSpec::supports_force_instrumental, "supports_force_instrumental"},
-    {&MusicModelSpec::supports_lyrics_optimizer, "supports_lyrics_optimizer"},
-    {&MusicModelSpec::supports_loop, "supports_loop"},
-    {&MusicModelSpec::supports_custom_voice_id, "supports_custom_voice_id"},
-    {&MusicModelSpec::supports_language_code, "supports_language_code"},
-    {&MusicModelSpec::supports_speed, "supports_speed"},
-    {&MusicModelSpec::uncensored, "uncensored"},
-}};
+inline constexpr std::array<Field<bool, MusicModelSpec>, 8>
+    kMusicSpecBoolFields{{
+        {&MusicModelSpec::lyrics_required, "lyrics_required"},
+        {&MusicModelSpec::supports_lyrics, "supports_lyrics"},
+        {&MusicModelSpec::supports_force_instrumental,
+         "supports_force_instrumental"},
+        {&MusicModelSpec::supports_lyrics_optimizer,
+         "supports_lyrics_optimizer"},
+        {&MusicModelSpec::supports_loop, "supports_loop"},
+        {&MusicModelSpec::supports_custom_voice_id, "supports_custom_voice_id"},
+        {&MusicModelSpec::supports_language_code, "supports_language_code"},
+        {&MusicModelSpec::supports_speed, "supports_speed"},
+    }};
 inline constexpr std::array<Field<int, MusicModelSpec>, 6> kMusicSpecIntFields{{
     {&MusicModelSpec::default_duration, "default_duration"},
     {&MusicModelSpec::min_duration, "min_duration"},
@@ -3824,6 +3864,11 @@ inline void from_json(const nlohmann::json& j, TtsModelSpec& s) {
 
 inline void from_json(const nlohmann::json& j, MusicModelSpec& s) {
   detail::read_table(j, s, detail::kMusicSpecBoolFields);
+  // Kept outside the music table because `uncensored` is not music policy: it
+  // is shared model_spec metadata. Standalone ADL parsing still populates the
+  // compatibility member; Model parsing below then assigns it from the
+  // canonical cross-modality value.
+  s.uncensored = detail::opt_bool(j, "uncensored");
   detail::read_table(j, s, detail::kMusicSpecIntFields);
   detail::read_table(j, s, detail::kMusicSpecDoubleFields);
   detail::read_table(j, s, detail::kMusicSpecStringFields);
@@ -3952,6 +3997,11 @@ struct Model {
 
   nlohmann::json raw;  // the verbatim entry — see the note above
 
+  // Server-owned cross-modality classification. Appended for positional
+  // aggregate source compatibility; this is catalogue metadata, not a
+  // content/privacy guarantee enforced by this client.
+  std::optional<bool> uncensored;
+
   friend void from_json(const nlohmann::json& j, Model& m) {
     if (const auto* s = detail::opt_string_at(j, "id")) m.id = *s;
     if (const auto* s = detail::opt_string_at(j, "type")) m.type = *s;
@@ -3970,6 +4020,7 @@ struct Model {
     m.model_source = detail::opt_string(*spec, "modelSource");
     m.offline = detail::opt_bool(*spec, "offline");
     m.beta_model = detail::opt_bool(*spec, "betaModel");
+    m.uncensored = detail::opt_bool(*spec, "uncensored");
     m.traits = detail::string_array(*spec, "traits");
     m.available_context_tokens = detail::opt_int(*spec, "availableContextTokens");
     m.max_completion_tokens = detail::opt_int(*spec, "maxCompletionTokens");
@@ -4002,9 +4053,12 @@ struct Model {
       m.video = spec->get<VideoModelSpec>();
     else if (m.type == "tts")
       m.tts = spec->get<TtsModelSpec>();
-    else if (m.type == "music")
+    else if (m.type == "music") {
       m.music = spec->get<MusicModelSpec>();
-    else if (m.type == "embedding")
+      // One authoritative value on a parsed Model. The member on the music
+      // view remains only as a source-compatible mirror.
+      m.music->uncensored = m.uncensored;
+    } else if (m.type == "embedding")
       m.embedding = spec->get<EmbeddingModelSpec>();
     else if (m.type == "text") {
       if (const auto* c = detail::opt_object(*spec, "constraints"))
@@ -4012,6 +4066,17 @@ struct Model {
     }
   }
 };
+
+namespace detail {
+
+// Shared model_spec policy table used by the live raw-vs-typed audit. Parsing
+// stays inside Model::from_json above because Model must be complete before a
+// pointer-to-member table can name it.
+inline constexpr std::array<Field<bool, Model>, 1> kModelSpecBoolFields{{
+    {&Model::uncensored, "uncensored"},
+}};
+
+}  // namespace detail
 
 // Parse a /models response body into a listing.
 //

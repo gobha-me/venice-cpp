@@ -1615,6 +1615,56 @@ void walk(const nlohmann::json& obj, const Struct& s, const std::array<Row, N>& 
   }
 }
 
+// Presence in both directions catches wrong nesting; equality additionally
+// catches two same-typed rows wired to each other's keys. VC-56 uses this for
+// the capability block and the cross-modality policy field whose live values
+// are scalar and therefore have an unambiguous comparison.
+template <typename Struct, typename T, std::size_t N, typename Engaged,
+          typename Reader>
+void walk_values(const nlohmann::json& obj, const Struct& s,
+                 const std::array<venice::detail::Field<T, Struct>, N>& table,
+                 Engaged usable, Reader read, std::string_view model,
+                 std::string_view level, std::map<std::string, int>& coverage,
+                 std::vector<Mismatch>& out) {
+  walk(obj, s, table, usable, model, level, coverage, out);
+  for (const auto& [field, key] : table) {
+    const auto expected = read(obj, key);
+    const auto& typed = s.*field;
+    if (expected && typed && *expected != *typed)
+      out.push_back({std::string{model}, std::string{level}, key,
+                     "typed value disagrees with the usable raw value"});
+  }
+}
+
+// The one legacy plain-vector table. Its public empty value collapses absent,
+// malformed and an explicitly empty array, so reconciliation compares the
+// parser's exact filtered result when the raw array is present rather than
+// pretending the type has an engaged state it cannot represent.
+template <typename Struct, std::size_t N>
+void walk_flat_strings(
+    const nlohmann::json& obj, const Struct& s,
+    const std::array<venice::detail::FlatVectorField<std::string, Struct>, N>&
+        table,
+    std::string_view model, std::string_view level,
+    std::map<std::string, int>& coverage, std::vector<Mismatch>& out) {
+  for (const auto& [field, key] : table) {
+    const auto it = obj.find(key);
+    const bool usable = it != obj.end() && it->is_array();
+    if (usable)
+      ++coverage[std::string{level} + '.' + key];
+    else
+      coverage.try_emplace(std::string{level} + '.' + key, 0);
+
+    if (it == obj.end() && !(s.*field).empty())
+      out.push_back({std::string{model}, std::string{level}, key,
+                     "typed list is non-empty but raw carries no such key at "
+                     "this level"});
+    if (usable && s.*field != venice::detail::string_array(obj, key))
+      out.push_back({std::string{model}, std::string{level}, key,
+                     "typed list disagrees with the usable raw array"});
+  }
+}
+
 const auto kIsBool = [](const nlohmann::json& v) { return v.is_boolean(); };
 const auto kIsString = [](const nlohmann::json& v) { return v.is_string(); };
 const auto kIsArray = [](const nlohmann::json& v) { return v.is_array(); };
@@ -1628,8 +1678,8 @@ const auto kIsInt = [](const nlohmann::json& v) {
 // Mirrors opt_double: is_number(), not is_number_float().
 const auto kIsNumber = [](const nlohmann::json& v) { return v.is_number(); };
 
-// The model_spec keys Model has read since VC-03, plus the two VC-39 reads for
-// every type. Per-modality keys are appended from that modality's tables.
+// The model_spec keys Model has read since VC-03, plus the VC-39 reads for
+// every type. Cross-modality and per-modality table keys are appended below.
 constexpr std::array<std::string_view, 14> kSharedSpecKeys{
     "name",        "description",          "privacy",             "modelSource",
     "offline",     "betaModel",            "traits",              "availableContextTokens",
@@ -1678,6 +1728,8 @@ auto report_modality(const std::vector<venice::Model>& models, std::string_view 
 
   {
     using namespace venice::detail;
+    const auto shared = table_keys(kModelSpecBoolFields);
+    spec_keys.insert(spec_keys.end(), shared.begin(), shared.end());
     std::vector<std::string_view> extra;
     if (type == "image") extra = table_keys(kImageSpecBoolFields);
     else if (type == "inpaint") extra = table_keys(kInpaintSpecBoolFields);
@@ -1724,9 +1776,39 @@ auto report_modality(const std::vector<venice::Model>& models, std::string_view 
     if (spec == nullptr) continue;
     report_unmodeled("unmodeled model_spec keys [" + m.id + "]: ", *spec, spec_keys,
                      "Model::raw[\"model_spec\"]");
+    walk_values(
+        *spec, m, kModelSpecBoolFields, kIsBool,
+        [](const auto& obj, const char* key) { return opt_bool(obj, key); },
+        m.id, "model_spec", coverage, mismatches);
     if (const auto* c = opt_object(*spec, "constraints"))
       report_unmodeled("unmodeled constraint keys [" + m.id + "]: ", *c, constraint_keys,
                        "Model::raw[\"model_spec\"][\"constraints\"]");
+
+    if (const auto* caps = opt_object(*spec, "capabilities")) {
+      report_unmodeled(
+          "unmodeled capability keys [" + m.id + "]: ", *caps,
+          table_keys(kCapabilityBoolFields, kCapabilityIntFields,
+                     kCapabilityStringFields, kCapabilityListFields),
+          "Model::raw[...][\"capabilities\"]");
+      if (m.capabilities) {
+        walk_values(
+            *caps, *m.capabilities, kCapabilityBoolFields, kIsBool,
+            [](const auto& obj, const char* key) { return opt_bool(obj, key); },
+            m.id, "capabilities", coverage, mismatches);
+        walk_values(
+            *caps, *m.capabilities, kCapabilityIntFields, kIsInt,
+            [](const auto& obj, const char* key) { return opt_int(obj, key); },
+            m.id, "capabilities", coverage, mismatches);
+        walk_values(
+            *caps, *m.capabilities, kCapabilityStringFields, kIsString,
+            [](const auto& obj, const char* key) {
+              return opt_string(obj, key);
+            },
+            m.id, "capabilities", coverage, mismatches);
+        walk_flat_strings(*caps, *m.capabilities, kCapabilityListFields, m.id,
+                          "capabilities", coverage, mismatches);
+      }
+    }
 
     if (const auto* dep = opt_object(*spec, "deprecation")) {
       report_unmodeled("unmodeled deprecation keys [" + m.id + "]: ", *dep,
