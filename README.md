@@ -1423,7 +1423,8 @@ req.tools = std::vector<nlohmann::json>{
                               "type": "object",
                               "properties": {"city": {"type": "string"}},
                               "required": ["city"]
-                            })"))};
+                            })"),
+                            true)};
 
 req.tool_choice = venice::tool_choice::automatic();   // or none() / required()
                                                       // or function("get_weather")
@@ -1435,15 +1436,17 @@ req.parallel_tool_calls = false;                      // one call at a time
 tool shape — and would emit `{"type":"web_search","function":{"name":""}}` the
 day Venice accepts an entry that is not a function. `ToolCall` on the response
 side may nest unconditionally because it re-serializes what the server *sent*;
-`tools` is yours to author. The corollary, learned the expensive way in #29: a
-freshly built object serializes exactly what it models and drops the rest, so a
-server-sent tool-call key that a model *requires back* has to be modeled — no
-hatch reaches it. So the builders supply the ergonomics and anything
+`tools` is yours to author. The builder's optional fourth argument controls the
+documented nested `function.strict` key: unset omits it, while `false` and
+`true` emit distinct JSON booleans. The corollary, learned the expensive way in
+#29: a freshly built object serializes exactly what it models and drops the rest,
+so a server-sent tool-call key that a model *requires back* has to be modeled —
+no hatch reaches it. So the builders supply the ergonomics and anything
 they don't cover you assign yourself, exactly as with `response_format`:
 
 ```cpp
 req.tools->push_back(nlohmann::json::parse(R"({"type":"web_search"})"));
-(*req.tools)[0]["function"]["strict"] = true;   // any unmodeled sub-key
+req.tools->push_back(nlohmann::json::parse(R"({"type":"future_tool"})"));
 ```
 
 Two details worth knowing:
@@ -1479,7 +1482,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.13)
+  GIT_TAG        v0.29.14)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package

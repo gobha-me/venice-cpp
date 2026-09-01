@@ -398,10 +398,12 @@ TEST_CASE("each new field serializes with the right value and json type", "[requ
   }
   SECTION("tools") {
     auto r = minimal();
-    r.tools = std::vector<nlohmann::json>{venice::tools::function("get_weather")};
+    r.tools = std::vector<nlohmann::json>{
+        venice::tools::function("get_weather", {}, nlohmann::json(), true)};
     const auto j = r.to_json_body(false);
     REQUIRE(j["tools"].is_array());
     REQUIRE(j["tools"][0]["function"]["name"] == "get_weather");
+    REQUIRE(j["tools"][0]["function"]["strict"] == true);
   }
   SECTION("tool_choice") {
     auto r = minimal();
@@ -465,6 +467,19 @@ TEST_CASE("tool builders emit the documented shapes", "[request][tools]") {
                 .dump() ==
             R"({"function":{"description":"Current weather","name":"get_weather",)"
             R"("parameters":{"type":"object"}},"type":"function"})");
+  }
+  SECTION("tools::function preserves the three strict states") {
+    const auto unset = venice::tools::function("f");
+    const auto disabled =
+        venice::tools::function("f", {}, nlohmann::json(), false);
+    const auto enabled =
+        venice::tools::function("f", {}, nlohmann::json(), true);
+
+    REQUIRE_FALSE(unset["function"].contains("strict"));
+    REQUIRE(disabled["function"]["strict"].is_boolean());
+    REQUIRE(disabled["function"]["strict"] == false);
+    REQUIRE(enabled["function"]["strict"].is_boolean());
+    REQUIRE(enabled["function"]["strict"] == true);
   }
   SECTION("an empty description and a null parameters are omitted") {
     // Omitting `parameters` is how a zero-argument function is declared;

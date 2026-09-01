@@ -128,6 +128,16 @@ TEST_CASE("the README Responses example compiles and serializes", "[vc24][readme
   REQUIRE(body.at("tools").at(0).at("function").at("name") == "lookup");
 }
 
+TEST_CASE("Responses function tools preserve strict",
+          "[vc58][responses][request]") {
+  auto request = minimal_response();
+  request.tools = std::vector<nlohmann::json>{
+      tools::function("lookup", "Look up a value", nlohmann::json(), false)};
+
+  const auto body = request.to_json_body();
+  REQUIRE(body.at("tools").at(0).at("function").at("strict") == false);
+}
+
 TEST_CASE("message reasoning details and message-level signature are mutation honest",
           "[vc24][message][failure]") {
   auto message = nlohmann::json::parse(R"({

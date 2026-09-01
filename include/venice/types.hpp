@@ -806,20 +806,22 @@ inline auto json_schema(std::string name, nlohmann::json schema, bool strict = t
 // whose behaviour flips on an unrelated field is worse than no hatch. With json
 // elements there is nothing to escape from:
 //
-//     r.tools = std::vector<nlohmann::json>{venice::tools::function("f", "d", schema)};
+//     const auto fn = venice::tools::function("f", "d", schema, true);
+//     r.tools = std::vector<nlohmann::json>{fn};
 //     r.tools->push_back(nlohmann::json::parse(R"({"type":"web_search"})"));
-//     (*r.tools)[0]["function"]["strict"] = true;   // or any unmodeled sub-key
+//     (*r.tools)[0]["future_key"] = value;   // any unmodeled key
 //
-// The element type is spelled out in that first line because it has to be:
-// `r.tools = {venice::tools::function("f")}` is an *ambiguous overload* and does
-// not compile — a braced list can match optional's converting assignment, its
-// nullopt_t overload, and both copy and move assignment at once. Every call site
-// in this repo already used the explicit form, which is exactly why the suite
-// stayed green while this comment did not compile (VC-08).
+// The element type is spelled out in that assignment because it has to be:
+// `r.tools = {venice::tools::function("f")}` is an *ambiguous overload* and
+// does not compile — a braced list can match optional's converting assignment,
+// its nullopt_t overload, and both copy and move assignment at once. Every call
+// site in this repo already used the explicit form, which is exactly why the
+// suite stayed green while this comment did not compile (VC-08).
 //
-// which is also why `strict` is not a parameter below: Venice documents it on
-// response_format.json_schema, not on tools, and a parameter for an undocumented
-// key is this header speculating.
+// `strict` is the documented exception to that raw-key example: it is an
+// optional builder argument because both Chat Completions and Responses publish
+// it on function tools. Unset omits the key, while engaged false and true emit
+// distinct JSON booleans, so existing calls retain their exact wire shape.
 //
 // Parentheses, never braces, when building a json SCALAR — and that is the only
 // brace rule here that is load bearing. Measured against the pinned 3.11.3:
@@ -836,10 +838,10 @@ inline auto json_schema(std::string name, nlohmann::json schema, bool strict = t
 // the belief: six spellings were measured on 3.11.3 — nested one-shot,
 // array-valued values, runtime-variable values, inline two-string arrays — and
 // every one produced the correct object. Rebuilding json_schema above as a
-// single brace-init left all 115 cases in test/02request/ green, which means the
-// "an array-valued schema makes the outer list ambiguous" rationale that used to
-// sit there described a hazard this pin does not have. The rule survives; the
-// citation for it did not.
+// single brace-init left all 115 cases in test/02request/ green, which means
+// the "an array-valued schema makes the outer list ambiguous" rationale that
+// used to sit there described a hazard this pin does not have. The rule
+// survives; the citation for it did not.
 
 namespace tools {
 
@@ -847,22 +849,30 @@ namespace tools {
 //
 // An empty `description` and a null `parameters` are OMITTED. A plain (non-
 // optional) parameter has no "unset" state, so the degenerate value is the only
-// way a caller can say "no" — the same convention detail::with_query uses for an
-// empty query value. Omitting `parameters` is also the documented way to declare
-// a function that takes no arguments, where "parameters": null is a 400. This
-// does not contradict the engaged-optional rule below ChatRequest: there is no
-// optional here to have engaged.
+// way a caller can say "no" — the same convention detail::with_query uses for
+// an empty query value. Omitting `parameters` is also the documented way to
+// declare a function that takes no arguments, where "parameters": null is a
+// 400. This does not contradict the engaged-optional rule below ChatRequest:
+// there is no optional here to have engaged.
 //
 // `name` is emitted even when empty, deliberately. A nameless tool is the
-// caller's error to see in the server's answer — which names the offending entry
-// — and dropping the key would produce a different, less legible 400.
+// caller's error to see in the server's answer — which names the offending
+// entry — and dropping the key would produce a different, less legible 400.
 // Client::validate does not check it either; see test/03guards/.
+//
+// `strict` is optional rather than default-false because omission is observable
+// request structure. It is dereferenced in C++ instead of handed to nlohmann;
+// the pinned 3.11.3 has no std::optional serializer.
 inline auto function(std::string name, std::string description = {},
-                     nlohmann::json parameters = nlohmann::json()) -> nlohmann::json {
+                     nlohmann::json parameters = nlohmann::json(),
+                     std::optional<bool> strict = std::nullopt)
+    -> nlohmann::json {
   auto fn = nlohmann::json::object();
   fn["name"] = std::move(name);
   if (!description.empty()) fn["description"] = std::move(description);
   if (!parameters.is_null()) fn["parameters"] = std::move(parameters);
+  if (strict.has_value())
+    fn["strict"] = *strict;
 
   auto j = nlohmann::json::object();
   j["type"] = "function";
