@@ -2749,6 +2749,217 @@ auto stream_report(const venice::Client& client, const std::string& prompt) -> i
   return EXIT_SUCCESS;
 }
 
+// `--structured [model]`: VC-59's discriminator for two conflicting first-party
+// contracts. The Structured Responses guide publishes OpenAI's
+// name/strict/schema wrapper, while the Chat Completions reference publishes
+// the schema object directly. Fixtures can prove what this client emits; only
+// the server can say which spelling it accepts.
+//
+// The prompt is read from stdin and never printed. Successful model output is
+// parsed and checked but never printed. Error bodies are represented only by
+// their byte count, so a gateway cannot reflect either back into the report.
+enum class StructuredShape { Wrapper, Direct };
+
+[[nodiscard]] auto structured_format(StructuredShape shape,
+                                     const nlohmann::json &schema)
+    -> nlohmann::json {
+  if (shape == StructuredShape::Wrapper)
+    return venice::response_format::json_schema("vc59_response", schema);
+
+  auto format = nlohmann::json::object();
+  format["type"] = "json_schema";
+  format["json_schema"] = schema;
+  return format;
+}
+
+[[nodiscard]] auto structured_json_diagnosis(const nlohmann::json &parsed)
+    -> std::string_view {
+  if (!parsed.is_object())
+    return "not-object";
+  if (!parsed.contains("answer"))
+    return "answer-missing";
+  if (!parsed.at("answer").is_string())
+    return "answer-not-string";
+  if (parsed.size() != 1)
+    return "extra-keys";
+  return "conformant";
+}
+
+[[nodiscard]] auto
+structured_output_diagnosis(const venice::ChatResponse &response)
+    -> std::string_view {
+  if (!response.message || !response.message->content)
+    return "empty";
+  const auto &content = *response.message->content;
+  if (!content.is_string())
+    return structured_json_diagnosis(content);
+  try {
+    return structured_json_diagnosis(
+        nlohmann::json::parse(content.get_ref<const std::string &>()));
+  } catch (const std::exception &) {
+    return "invalid-json";
+  }
+}
+
+[[nodiscard]] auto
+structured_output_conforms(const venice::ChatResponse &response) -> bool {
+  return structured_output_diagnosis(response) == "conformant";
+}
+
+void report_structured_result(
+    std::string_view shape, std::string_view mode,
+    const std::expected<venice::ChatResponse, venice::Error> &result) {
+  std::cerr << shape << ' ' << mode << ": ";
+  if (!result) {
+    std::cerr << "rejected [" << venice::to_string(result.error().kind)
+              << "] status=" << result.error().status << " body=[redacted "
+              << result.error().body.size() << " bytes]\n";
+    return;
+  }
+
+  std::cerr << "accepted; schema=" << structured_output_diagnosis(*result)
+            << "; content_type=";
+  if (result->message && result->message->content)
+    std::cerr << result->message->content->type_name();
+  else
+    std::cerr << "absent";
+  if (result->message && result->message->content &&
+      result->message->content->is_string()) {
+    const auto &text = result->message->content->get_ref<const std::string &>();
+    const auto first = text.find_first_not_of(" \t\r\n");
+    const auto last = text.find_last_not_of(" \t\r\n");
+    std::cerr << "; output_bytes=" << text.size() << "; object_delimiters="
+              << (first != std::string::npos && text[first] == '{' &&
+                          last != std::string::npos && text[last] == '}'
+                      ? "yes"
+                      : "no")
+              << "; code_fence="
+              << (text.find("```") != std::string::npos ? "yes" : "no");
+  }
+  if (result->usage)
+    std::cerr << "; tokens=" << result->usage->prompt_tokens << '/'
+              << result->usage->completion_tokens;
+  if (result->cost) {
+    if (result->cost->usd)
+      std::cerr << "; cost_usd=" << *result->cost->usd;
+    if (result->cost->diem)
+      std::cerr << "; cost_diem=" << *result->cost->diem;
+  }
+  std::cerr << '\n';
+}
+
+auto structured_report(const venice::Client &client, std::string_view model)
+    -> int {
+  ModelPick pick;
+  if (model.empty()) {
+    auto picked = pick_by_capability(
+        client, &venice::ModelCapabilities::supports_response_schema,
+        "supportsResponseSchema");
+    if (!picked)
+      return EXIT_FAILURE;
+    pick = *std::move(picked);
+  } else {
+    const auto models = client.models("text");
+    if (!models) {
+      std::cerr << "models failed [" << venice::to_string(models.error().kind)
+                << "] " << models.error().message << '\n';
+      return EXIT_FAILURE;
+    }
+    const auto it =
+        std::ranges::find_if(*models, [&](const venice::Model &candidate) {
+          return candidate.id == model;
+        });
+    if (it == models->end() || !it->capabilities ||
+        it->capabilities->supports_response_schema != true) {
+      std::cerr << "named model does not report supportsResponseSchema=true\n";
+      return EXIT_FAILURE;
+    }
+    pick.chosen = std::string{model};
+  }
+  report_pick(pick, "supportsResponseSchema", "`venice-cpp --structured <id>`");
+
+  std::string prompt;
+  if (!std::getline(std::cin, prompt) || prompt.empty()) {
+    std::cerr << "--structured requires a non-empty prompt on stdin; it is "
+                 "never printed\n";
+    return EXIT_FAILURE;
+  }
+
+  auto schema = nlohmann::json::object();
+  schema["type"] = "object";
+  schema["properties"] = nlohmann::json::object();
+  schema["properties"]["answer"] = nlohmann::json{{"type", "string"}};
+  schema["required"] = nlohmann::json::array({"answer"});
+  schema["additionalProperties"] = false;
+
+  bool wrapper_buffered = false;
+  bool wrapper_streamed = false;
+  bool direct_buffered = false;
+  bool direct_streamed = false;
+
+  for (const auto shape : {StructuredShape::Wrapper, StructuredShape::Direct}) {
+    venice::ChatRequest request;
+    request.model = pick.chosen;
+    request.messages = {venice::Message::user(prompt)};
+    request.max_tokens = 32;
+    request.parallel_tool_calls = false;
+    request.response_format = structured_format(shape, schema);
+
+    const auto label = shape == StructuredShape::Wrapper ? "wrapper" : "direct";
+    const auto buffered = client.chat(request);
+    report_structured_result(label, "buffered", buffered);
+    const bool buffered_ok = buffered && structured_output_conforms(*buffered);
+
+    venice::StreamAccumulator accumulator{/*keep_chunks=*/true};
+    const auto streamed = client.chat_stream(request, accumulator);
+    report_structured_result(label, "streamed", streamed);
+    std::size_t string_content_frames = 0;
+    std::size_t object_content_frames = 0;
+    std::size_t other_content_frames = 0;
+    for (const auto &chunk : accumulator.chunks()) {
+      const auto *choices = venice::detail::opt_array(chunk, "choices");
+      if (choices == nullptr)
+        continue;
+      for (const auto &choice : *choices) {
+        const auto *delta = venice::detail::opt_object(choice, "delta");
+        if (delta == nullptr)
+          continue;
+        const auto content = delta->find("content");
+        if (content == delta->end())
+          continue;
+        if (content->is_string())
+          ++string_content_frames;
+        else if (content->is_object())
+          ++object_content_frames;
+        else
+          ++other_content_frames;
+      }
+    }
+    std::cerr << label
+              << " streamed content frames: string=" << string_content_frames
+              << "; object=" << object_content_frames
+              << "; other=" << other_content_frames << '\n';
+    const bool streamed_ok = streamed && structured_output_conforms(*streamed);
+
+    if (shape == StructuredShape::Wrapper) {
+      wrapper_buffered = buffered_ok;
+      wrapper_streamed = streamed_ok;
+    } else {
+      direct_buffered = buffered_ok;
+      direct_streamed = streamed_ok;
+    }
+  }
+
+  std::cerr << "summary: wrapper="
+            << (wrapper_buffered && wrapper_streamed ? "both" : "no")
+            << "; direct="
+            << (direct_buffered && direct_streamed ? "both" : "no") << '\n';
+  return (wrapper_buffered && wrapper_streamed) ||
+                 (direct_buffered && direct_streamed)
+             ? EXIT_SUCCESS
+             : EXIT_FAILURE;
+}
+
 // `--tools [model]`: the live check VC-08 could not run offline, for the same
 // reason --stream exists. Every offline case in test/02request/ asserts what
 // to_json_body *emits*; none of them can assert that Venice *accepts* it. The
@@ -3327,12 +3538,13 @@ auto main(int argc, char** argv) -> int {
 
   const char* key = std::getenv("VENICE_API_KEY");
   if (key == nullptr || *key == '\0') {
-    std::cerr << "VENICE_API_KEY not set; nothing to call with a credential.\n"
-                 "(--traits, --compat, --modality, --styles and --x402 need no key;\n"
-                 " --embeddings, --image, --image-transform, --audio, --video, "
-                 "--augment, --crypto-rpc,\n"
-                 " --billing, --responses and\n"
-                 " --api-keys need a key.)\n";
+    std::cerr
+        << "VENICE_API_KEY not set; nothing to call with a credential.\n"
+           "(--traits, --compat, --modality, --styles and --x402 need no key;\n"
+           " --embeddings, --image, --image-transform, --audio, --video, "
+           "--augment, --crypto-rpc,\n"
+           " --billing, --responses, --structured and\n"
+           " --api-keys need a key.)\n";
     return EXIT_SUCCESS;
   }
 
@@ -3349,6 +3561,8 @@ auto main(int argc, char** argv) -> int {
     return stream_report(client, argc > 2 ? std::string{arg}
                                           : std::string{"Think step by step: what is 17 * 23?"});
   if (leg == "--tools") return tools_report(client, arg);
+  if (leg == "--structured")
+    return structured_report(client, arg);
   if (leg == "--usage") return usage_report(client, arg);
   if (leg == "--embeddings") return embeddings_report(client, arg);
   if (leg == "--image") return image_report(client, arg);

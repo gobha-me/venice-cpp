@@ -759,6 +759,14 @@ inline auto json_object() -> nlohmann::json {
   return j;
 }
 
+// This is the OpenAI wrapper Venice's Structured Responses guide publishes,
+// and not the direct-schema object in the generated Chat Completions reference.
+// VC-59 measured both spellings on 2026-09-01: this wrapper produced conformant
+// buffered and streamed replies, while the direct form was HTTP 400 in both
+// modes on openai-gpt-4o-mini-2024-07-18 (and HTTP 500 on a second family).
+// `ChatRequest::response_format` remains raw JSON, so caller-authored future
+// shapes stay reachable; the ergonomic helper emits only the proven contract.
+//
 // Field-by-field assignment rather than a brace-init list. The rationale
 // originally recorded here — that an array-valued `schema` makes the outer
 // initializer-list ambiguous and nlohmann reads the whole thing as an array —
@@ -767,7 +775,8 @@ inline auto json_object() -> nlohmann::json {
 // array-valued schema included. The style stays, because it is unambiguous by
 // construction and does not depend on nlohmann's init-list heuristic holding.
 // The real brace hazard is one level down and is documented under the tool
-// builders below: a json *scalar* built with braces becomes a one-element array.
+// builders below: a json *scalar* built with braces becomes a one-element
+// array.
 inline auto json_schema(std::string name, nlohmann::json schema, bool strict = true)
     -> nlohmann::json {
   auto inner = nlohmann::json::object();

@@ -200,6 +200,16 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   Message content and Responses input/output follow the same rule: item
   universes remain raw JSON, while builders cover the documented text, image,
   audio, video, file, cache-control, function-call and reference shapes.
+- **Structured-response JSON Schema uses the measured OpenAI wrapper.** Venice's
+  Structured Responses guide publishes `name` / `strict` / nested `schema`,
+  while the generated Chat Completions reference publishes the schema object
+  directly. VC-59 measured both on 2026-09-01: the wrapper returned conformant
+  buffered and streamed replies on `openai-gpt-4o-mini-2024-07-18`; the direct
+  form returned HTTP 400 in both modes (and HTTP 500 on
+  `zai-org-glm-4.7-flash`). `response_format::json_schema` therefore keeps the
+  wrapper, while raw `ChatRequest::response_format` keeps future or alternate
+  shapes reachable. `--structured [model]` is the redacted live regression leg:
+  it reads its prompt from stdin and never prints prompt or model output.
 - **Embedding input follows that same raw-with-builders rule; embedding output
   does not collapse two wire shapes.** `EmbeddingRequest::input` is raw json,
   with `embedding_input::{text,texts}` for the documented string forms. Venice
