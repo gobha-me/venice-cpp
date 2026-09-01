@@ -19,7 +19,7 @@ AGENTS.md (which holds standing conventions, not state).
 - Per-request timeouts, a `CancelToken`, and an authentication override on every
   entry point (VC-06/VC-23).
 - `models()` list with typed per-model metadata, filterable by modality
-  (111 text / 338 all, fetched live 2026-08-31), `balance()`
+  (111 text / 339 all, fetched live 2026-09-01), `balance()`
   rate-limit endpoint.
 - `model_traits(type)` and `model_compatibility_mapping(type)` (VC-38) — the
   catalogue's own answer to "which model", and the first two operations in this
@@ -114,6 +114,24 @@ was blinded by any comment mentioning a package name. Both were upstream bugs an
 have since landed there as CT-14.
 
 ## Next up
+
+**VC-57 (#92) is implemented for v0.29.13.** `Model` now exposes six
+type-selected, unit-aware pricing views: token rates for text/embedding;
+generation, resolution, quality and upscale rates for image/upscale; distinct
+base, selection and input-image rates for inpaint; per-million-character TTS;
+per-audio-second ASR; and generation, duration, per-second and
+per-thousand-character music forms. Open resolution, quality and duration keys
+remain server-owned strings, while `Model::pricing` remains the
+source-compatible legacy mirror and `Model::raw` remains verbatim. No estimator
+guesses at unpublished tier semantics.
+
+Failure-first captures cover every observed family, fractional prices,
+included/min/max integer representation, malformed nested buckets, explicit
+empty maps, unknown modalities and parser reuse. The keyless audit now descends
+and reconciles every pricing level in both directions. Its 2026-09-01 run
+covered all 339 models with no unmodeled pricing key or reconciliation mismatch:
+text 111, image 38, inpaint 21, video 129, TTS 11, embedding 9, music 14, ASR 5
+and upscale 1.
 
 **VC-56 (#91) is implemented for v0.29.12.** Text-model capabilities now expose
 the optional representable `maxVideos` limit as `max_videos`, and
@@ -669,6 +687,14 @@ key and no reconciliation mismatch. The nested coverage reports
 `capabilities.maxVideos` on 1/111 text entries and shared
 `model_spec.uncensored` on 10/111 text, 11/38 image, 6/21 inpaint, 2/14 music
 and 34/128 video entries.
+
+Live run 2026-09-01, keyless, all 339 entries: exit 0, no unmodeled pricing key
+and no raw-to-typed reconciliation mismatch at any pricing nesting level. The
+top-level pricing coverage was: text input/output 111, cache input 80, cache
+write 23, extended 14; image generation 28, resolutions 10, quality 2, upscale
+38; inpaint base 21, resolutions 9, quality 2, input images 9; TTS input 11;
+embedding input/output 9; music durations 2, generation 5, per second 5, per
+thousand characters 2; ASR per audio second 5; upscale generation/upscale 1.
 
 That run also found the OpenAPI source drift now resolved by VC-26; the current
 snapshot and the audit result are recorded in its entry above.

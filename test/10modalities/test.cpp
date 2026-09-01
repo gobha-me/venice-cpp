@@ -27,6 +27,8 @@
 // embedding, 5-of-106 text) come from that capture and are recorded in the
 // VC-39 entry in STATUS.md. They are not asserted against the live API here —
 // unit tests are offline and take no key.
+// The focused pricing fixtures below are verbatim 2026-09-01 blocks from the
+// 339-entry all-modality listing; together they cover every observed rate form.
 //
 // One rule this file must never break, the same one test/02request/ and
 // test/09catalogue/ state: never hand a std::optional to nlohmann. The pinned
@@ -106,6 +108,23 @@ constexpr auto kMusic = R"J({"created":1771804800,"id":"ace-step-15","model_spec
 // beyond pricing.
 constexpr auto kUpscale = R"J({"created":1744453050,"id":"upscaler","model_spec":{"pricing":{"generation":{"usd":0.01,"diem":0.01},"upscale":{"2x":{"usd":0.02,"diem":0.02},"4x":{"usd":0.08,"diem":0.08}}},"name":"Upscaler","offline":false,"privacy":"private","traits":[]},"object":"model","owned_by":"venice.ai","type":"upscale"})J";
 
+// Verbatim pricing blocks from the keyless 2026-09-01 capture, embedded in a
+// minimal model envelope so each family can be varied independently below.
+constexpr auto kTextRateCard =
+    R"J({"id":"qwen-3-7-plus","type":"text","model_spec":{"pricing":{"input":{"usd":0.5,"diem":0.5},"cache_input":{"usd":0.05,"diem":0.05},"cache_write":{"usd":0.625,"diem":0.625},"output":{"usd":2,"diem":2},"extended":{"context_token_threshold":256000,"input":{"usd":1.5,"diem":1.5},"output":{"usd":6,"diem":6},"cache_input":{"usd":0.15,"diem":0.15},"cache_write":{"usd":1.875,"diem":1.875}}}}})J";
+constexpr auto kImageRateCard =
+    R"J({"id":"gpt-image-2","type":"image","model_spec":{"pricing":{"resolutions":{"1K":{"usd":0.27,"diem":0.27},"2K":{"usd":0.51,"diem":0.51},"4K":{"usd":0.84,"diem":0.84}},"quality":{"1K":{"high":{"usd":0.26,"diem":0.26},"low":{"usd":0.02,"diem":0.02},"medium":{"usd":0.07,"diem":0.07}},"2K":{"high":{"usd":0.5,"diem":0.5},"low":{"usd":0.03,"diem":0.03},"medium":{"usd":0.13,"diem":0.13}},"4K":{"high":{"usd":0.83,"diem":0.83},"low":{"usd":0.05,"diem":0.05},"medium":{"usd":0.21,"diem":0.21}}},"upscale":{"2x":{"usd":0.02,"diem":0.02},"4x":{"usd":0.08,"diem":0.08}}}}})J";
+constexpr auto kInpaintRateCard =
+    R"J({"id":"gpt-image-2-edit","type":"inpaint","model_spec":{"pricing":{"inpaint":{"usd":0.34,"diem":0.34},"resolutions":{"1K":{"usd":0.34,"diem":0.34},"2K":{"usd":0.52,"diem":0.52},"4K":{"usd":0.84,"diem":0.84}},"inputImages":{"included":1,"additional":{"usd":0.009200000000000002,"diem":0.009200000000000002}},"quality":{"1K":{"high":{"usd":0.34,"diem":0.34},"low":{"usd":0.03,"diem":0.03},"medium":{"usd":0.08,"diem":0.08}},"2K":{"high":{"usd":0.52,"diem":0.52},"low":{"usd":0.03,"diem":0.03},"medium":{"usd":0.14,"diem":0.14}},"4K":{"high":{"usd":0.84,"diem":0.84},"low":{"usd":0.04,"diem":0.04},"medium":{"usd":0.22,"diem":0.22}}}}}})J";
+constexpr auto kAsrRateCard =
+    R"J({"id":"elevenlabs/scribe-v2","type":"asr","model_spec":{"pricing":{"per_audio_second":{"usd":0.000167,"diem":0.000167}}}})J";
+constexpr auto kMusicGenerationRateCard =
+    R"J({"id":"lyria-3-pro","type":"music","model_spec":{"pricing":{"generation":{"usd":0.1,"diem":0.1}}}})J";
+constexpr auto kMusicPerSecondRateCard =
+    R"J({"id":"elevenlabs-sound-effects-v2","type":"music","model_spec":{"pricing":{"per_second":{"usd":0.0023000000000000004,"diem":0.0023000000000000004}}}})J";
+constexpr auto kMusicCharacterRateCard =
+    R"J({"id":"elevenlabs-tts-multilingual-v2","type":"music","model_spec":{"pricing":{"per_thousand_characters":{"usd":0.11500000000000002,"diem":0.11500000000000002}}}})J";
+
 // Parse one entry, as test/04models/'s `one` does.
 auto one(std::string_view entry) -> venice::Model {
   const auto body = nlohmann::json::parse(std::string{"{\"data\":["} + std::string{entry} + "]}");
@@ -127,6 +146,15 @@ auto views_engaged(const venice::Model& m) -> int {
          static_cast<int>(m.video.has_value()) + static_cast<int>(m.tts.has_value()) +
          static_cast<int>(m.music.has_value()) + static_cast<int>(m.embedding.has_value()) +
          static_cast<int>(m.text_constraints.has_value());
+}
+
+auto pricing_views_engaged(const venice::Model &m) -> int {
+  return static_cast<int>(m.token_pricing.has_value()) +
+         static_cast<int>(m.image_pricing.has_value()) +
+         static_cast<int>(m.inpaint_pricing.has_value()) +
+         static_cast<int>(m.tts_pricing.has_value()) +
+         static_cast<int>(m.asr_pricing.has_value()) +
+         static_cast<int>(m.music_pricing.has_value());
 }
 
 // Every key a table names, for the §6 set differences. Collected from the
@@ -235,6 +263,153 @@ TEST_CASE("image-family pricing retains generation and both upscale factors",
   REQUIRE(upscale.pricing->upscale->x4.has_value());
   REQUIRE(upscale.pricing->upscale->x2->usd == 0.02);
   REQUIRE(upscale.pricing->upscale->x4->usd == 0.08);
+}
+
+TEST_CASE(
+    "pricing views select units by modality without changing legacy fields",
+    "[modalities][pricing]") {
+  const auto text = one(kTextRateCard);
+  REQUIRE(pricing_views_engaged(text) == 1);
+  REQUIRE(text.token_pricing->base.input->usd == 0.5);
+  REQUIRE(text.token_pricing->base.output->usd == 2.0);
+  REQUIRE(text.token_pricing->base.cache_input->usd == 0.05);
+  REQUIRE(text.token_pricing->base.cache_write->usd == 0.625);
+  REQUIRE(text.token_pricing->extended_threshold_tokens ==
+          std::int64_t{256000});
+  REQUIRE(text.token_pricing->extended->output->usd == 6.0);
+  REQUIRE(text.token_pricing->extended->cache_write->usd == 1.875);
+
+  const auto embedding = one(kEmbedding);
+  REQUIRE(pricing_views_engaged(embedding) == 1);
+  REQUIRE(embedding.token_pricing->base.input->usd == 0.0125);
+
+  const auto tts = one(kTtsCloning);
+  REQUIRE(pricing_views_engaged(tts) == 1);
+  REQUIRE(tts.tts_pricing->per_million_characters->usd == 50.0);
+  REQUIRE_FALSE(tts.token_pricing.has_value());
+  REQUIRE(tts.pricing->base.input->usd == 50.0); // source-compatible mirror
+
+  const auto upscale = one(kUpscale);
+  REQUIRE(pricing_views_engaged(upscale) == 1);
+  REQUIRE(upscale.image_pricing->generation->usd == 0.01);
+  REQUIRE(upscale.image_pricing->upscale->x4->usd == 0.08);
+
+  const auto image = one(kImageStyleRefs);
+  REQUIRE(pricing_views_engaged(image) == 1);
+  REQUIRE(image.image_pricing->generation->usd == 0.07);
+
+  const auto unknown =
+      spec_entry("holograph", R"({"pricing":{"generation":{"usd":1}}})");
+  REQUIRE(pricing_views_engaged(unknown) == 0);
+  REQUIRE(unknown.pricing->generation->usd == 1.0);
+}
+
+TEST_CASE("image prices preserve open resolution and quality dimensions",
+          "[modalities][pricing]") {
+  const auto m = one(kImageRateCard);
+  REQUIRE(m.image_pricing.has_value());
+  REQUIRE(m.image_pricing->resolutions->at("1K").usd == 0.27);
+  REQUIRE(m.image_pricing->resolutions->at("4K").diem == 0.84);
+  REQUIRE(m.image_pricing->quality->at("1K").at("low").usd == 0.02);
+  REQUIRE(m.image_pricing->quality->at("4K").at("high").diem == 0.83);
+  REQUIRE(m.image_pricing->upscale->x2->usd == 0.02);
+}
+
+TEST_CASE(
+    "inpaint prices keep operation, selection and input-image charges distinct",
+    "[modalities][pricing]") {
+  const auto m = one(kInpaintRateCard);
+  REQUIRE(m.inpaint_pricing.has_value());
+  REQUIRE(m.inpaint_pricing->base->usd == 0.34);
+  REQUIRE(m.inpaint_pricing->resolutions->at("2K").usd == 0.52);
+  REQUIRE(m.inpaint_pricing->quality->at("2K").at("medium").usd == 0.14);
+  REQUIRE(m.inpaint_pricing->input_images->included == 1);
+  REQUIRE(m.inpaint_pricing->input_images->additional->diem ==
+          0.009200000000000002);
+}
+
+TEST_CASE("ASR and every observed music rate form carry explicit units",
+          "[modalities][pricing]") {
+  const auto asr = one(kAsrRateCard);
+  REQUIRE(asr.asr_pricing->per_audio_second->usd == 0.000167);
+
+  const auto durations = one(kUncensoredMusic);
+  REQUIRE(durations.music_pricing->durations->at("60").price.usd == 0.03);
+  REQUIRE(durations.music_pricing->durations->at("60").min_seconds == 60);
+  REQUIRE(durations.music_pricing->durations->at("210").max_seconds == 210);
+
+  const auto generation = one(kMusicGenerationRateCard);
+  REQUIRE(generation.music_pricing->generation->usd == 0.1);
+  const auto per_second = one(kMusicPerSecondRateCard);
+  REQUIRE(per_second.music_pricing->per_second->usd == 0.0023000000000000004);
+  const auto characters = one(kMusicCharacterRateCard);
+  REQUIRE(characters.music_pricing->per_thousand_characters->usd ==
+          0.11500000000000002);
+}
+
+TEST_CASE("malformed pricing degrades per field and preserves raw",
+          "[modalities][pricing][failure]") {
+  const auto image = spec_entry(
+      "image",
+      R"({"pricing":{"resolutions":{"future":{"usd":2,"diem":"bad"},"bad":7},)"
+      R"("quality":{},"upscale":[]}})");
+  REQUIRE(image.image_pricing.has_value());
+  REQUIRE(image.image_pricing->resolutions->at("future").usd == 2.0);
+  REQUIRE_FALSE(
+      image.image_pricing->resolutions->at("future").diem.has_value());
+  REQUIRE_FALSE(image.image_pricing->resolutions->contains("bad"));
+  REQUIRE(image.image_pricing->quality.has_value());
+  REQUIRE(image.image_pricing->quality->empty());
+  REQUIRE_FALSE(image.image_pricing->upscale.has_value());
+  REQUIRE(image.raw["model_spec"]["pricing"]["resolutions"]["bad"] == 7);
+
+  const auto inpaint = spec_entry(
+      "inpaint",
+      R"({"pricing":{"inputImages":{"included":1.5,"additional":{"usd":3}}}})");
+  REQUIRE(inpaint.inpaint_pricing.has_value());
+  REQUIRE_FALSE(inpaint.inpaint_pricing->input_images->included.has_value());
+  REQUIRE(inpaint.inpaint_pricing->input_images->additional->usd == 3.0);
+
+  const auto music = spec_entry(
+      "music",
+      R"({"pricing":{"durations":{"future":{"usd":4,"min_seconds":1.5,)"
+      R"("max_seconds":99999999999999},"bad":false}}})");
+  REQUIRE(music.music_pricing.has_value());
+  REQUIRE(music.music_pricing->durations->at("future").price.usd == 4.0);
+  REQUIRE_FALSE(
+      music.music_pricing->durations->at("future").min_seconds.has_value());
+  REQUIRE_FALSE(
+      music.music_pricing->durations->at("future").max_seconds.has_value());
+  REQUIRE_FALSE(music.music_pricing->durations->contains("bad"));
+
+  const auto wrong_top =
+      spec_entry("asr", R"({"pricing":{"per_audio_second":9}})");
+  REQUIRE_FALSE(wrong_top.asr_pricing.has_value());
+  REQUIRE(wrong_top.raw["model_spec"]["pricing"]["per_audio_second"] == 9);
+}
+
+TEST_CASE("pricing parsers clear stale optional state when reused",
+          "[modalities][pricing][failure]") {
+  auto image =
+      nlohmann::json::parse(
+          R"({"generation":{"usd":1},"quality":{"future":{"fast":{"diem":2}}}})")
+          .get<venice::ImagePricing>();
+  REQUIRE(image.generation.has_value());
+  REQUIRE(image.quality.has_value());
+  nlohmann::json::parse(R"({"resolutions":{"next":{"usd":3}}})").get_to(image);
+  REQUIRE_FALSE(image.generation.has_value());
+  REQUIRE_FALSE(image.quality.has_value());
+  REQUIRE(image.resolutions->at("next").usd == 3.0);
+
+  auto music = nlohmann::json::parse(
+                   R"({"generation":{"usd":1},"durations":{"60":{"diem":2}}})")
+                   .get<venice::MusicPricing>();
+  REQUIRE(music.generation.has_value());
+  REQUIRE(music.durations.has_value());
+  nlohmann::json::parse(R"({"per_second":{"usd":0.5}})").get_to(music);
+  REQUIRE_FALSE(music.generation.has_value());
+  REQUIRE_FALSE(music.durations.has_value());
+  REQUIRE(music.per_second->usd == 0.5);
 }
 
 TEST_CASE("a type this client does not model engages nothing and keeps raw",

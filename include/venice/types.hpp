@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <expected>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <optional>
@@ -2655,10 +2656,10 @@ namespace detail {
 // not have to reconstruct them from dollars at a rate this library would be
 // guessing at.
 //
-// Used on both sides of a call and the two are NOT the same quantity:
-// Model::pricing is a *rate* (per million tokens, per image), ChatResponse::cost
-// is an *amount* (what this one call charged). Do not multiply the latter by a
-// token count.
+// Used on both sides of a call and the two are NOT the same quantity: a Model
+// catalogue pricing field is a *rate* whose unit is named by its type-selected
+// pricing view, while ChatResponse::cost is an *amount* (what this one call
+// charged). Do not multiply the latter by a request quantity.
 
 struct Price {
   std::optional<double> usd;
@@ -3199,6 +3200,10 @@ struct PriceTier {
   std::optional<Price> cache_write;
 
   friend void from_json(const nlohmann::json& j, PriceTier& t) {
+    t.input.reset();
+    t.output.reset();
+    t.cache_input.reset();
+    t.cache_write.reset();
     struct Bucket {
       std::optional<Price> PriceTier::*field;
       const char* key;
@@ -3257,6 +3262,8 @@ struct Pricing {
 
   friend void from_json(const nlohmann::json& j, Pricing& p) {
     p.base = j.get<PriceTier>();
+    p.extended_threshold_tokens.reset();
+    p.extended.reset();
     p.generation.reset();
     p.upscale.reset();
     if (const auto* ext = detail::opt_object(j, "extended")) {
@@ -3267,6 +3274,185 @@ struct Pricing {
       p.generation = generation->get<Price>();
     if (const auto* upscale = detail::opt_object(j, "upscale"))
       p.upscale = upscale->get<ImageUpscalePricing>();
+  }
+};
+
+// `Pricing` above is the source-compatible view shipped by VC-03 and VC-39.
+// Its `input` key means tokens on text/embedding models and characters on TTS,
+// while `generation` is shared by image and music. Keep those fields working,
+// but do not make new callers recover their unit from Model::type themselves.
+// The views below are selected by the parent Model's explicit modality.
+
+using OptionPriceMap = std::map<std::string, Price, std::less<>>;
+using ResolutionQualityPriceMap =
+    std::map<std::string, OptionPriceMap, std::less<>>;
+
+namespace detail {
+
+[[nodiscard]] inline auto price_map_from_json(const nlohmann::json &j)
+    -> OptionPriceMap {
+  OptionPriceMap prices;
+  for (const auto &[key, value] : j.items())
+    if (value.is_object())
+      prices.emplace(key, value.get<Price>());
+  return prices;
+}
+
+[[nodiscard]] inline auto
+resolution_quality_price_map_from_json(const nlohmann::json &j)
+    -> ResolutionQualityPriceMap {
+  ResolutionQualityPriceMap prices;
+  for (const auto &[resolution, value] : j.items())
+    if (value.is_object())
+      prices.emplace(resolution, price_map_from_json(value));
+  return prices;
+}
+
+[[nodiscard]] inline auto
+has_any_object(const nlohmann::json &j,
+               std::initializer_list<const char *> keys) -> bool {
+  return std::ranges::any_of(
+      keys, [&](const char *key) { return opt_object(j, key) != nullptr; });
+}
+
+} // namespace detail
+
+// Every PriceTier member is a rate per million tokens. Text and embedding use
+// this view; the existing Pricing::base/extended fields remain mirrors.
+struct TokenPricing {
+  PriceTier base;
+  std::optional<std::int64_t> extended_threshold_tokens;
+  std::optional<PriceTier> extended;
+
+  friend void from_json(const nlohmann::json &j, TokenPricing &p) {
+    p.base = j.get<PriceTier>();
+    p.extended_threshold_tokens.reset();
+    p.extended.reset();
+    if (const auto *value = detail::opt_object(j, "extended")) {
+      p.extended = value->get<PriceTier>();
+      p.extended_threshold_tokens =
+          detail::opt_i64(*value, "context_token_threshold");
+    }
+  }
+};
+
+// Image and upscale operations share this rate-card shape. Resolution and
+// quality strings are server-owned selection values, so both maps stay open.
+struct ImagePricing {
+  std::optional<Price> generation;
+  std::optional<OptionPriceMap> resolutions;
+  std::optional<ResolutionQualityPriceMap> quality;
+  std::optional<ImageUpscalePricing> upscale;
+
+  friend void from_json(const nlohmann::json &j, ImagePricing &p) {
+    p.generation.reset();
+    p.resolutions.reset();
+    p.quality.reset();
+    p.upscale.reset();
+    if (const auto *value = detail::opt_object(j, "generation"))
+      p.generation = value->get<Price>();
+    if (const auto *value = detail::opt_object(j, "resolutions"))
+      p.resolutions = detail::price_map_from_json(*value);
+    if (const auto *value = detail::opt_object(j, "quality"))
+      p.quality = detail::resolution_quality_price_map_from_json(*value);
+    if (const auto *value = detail::opt_object(j, "upscale"))
+      p.upscale = value->get<ImageUpscalePricing>();
+  }
+};
+
+struct InputImagePricing {
+  std::optional<int> included;
+  std::optional<Price> additional;
+
+  friend void from_json(const nlohmann::json &j, InputImagePricing &p) {
+    p.included = detail::opt_int(j, "included");
+    p.additional.reset();
+    if (const auto *value = detail::opt_object(j, "additional"))
+      p.additional = value->get<Price>();
+  }
+};
+
+struct InpaintPricing {
+  std::optional<Price> base; // wire: inpaint; per edit/inpaint operation
+  std::optional<OptionPriceMap> resolutions;
+  std::optional<ResolutionQualityPriceMap> quality;
+  std::optional<InputImagePricing> input_images;
+
+  friend void from_json(const nlohmann::json &j, InpaintPricing &p) {
+    p.base.reset();
+    p.resolutions.reset();
+    p.quality.reset();
+    p.input_images.reset();
+    if (const auto *value = detail::opt_object(j, "inpaint"))
+      p.base = value->get<Price>();
+    if (const auto *value = detail::opt_object(j, "resolutions"))
+      p.resolutions = detail::price_map_from_json(*value);
+    if (const auto *value = detail::opt_object(j, "quality"))
+      p.quality = detail::resolution_quality_price_map_from_json(*value);
+    if (const auto *value = detail::opt_object(j, "inputImages"))
+      p.input_images = value->get<InputImagePricing>();
+  }
+};
+
+struct TtsPricing {
+  std::optional<Price> per_million_characters; // wire: input
+
+  friend void from_json(const nlohmann::json &j, TtsPricing &p) {
+    p.per_million_characters.reset();
+    if (const auto *value = detail::opt_object(j, "input"))
+      p.per_million_characters = value->get<Price>();
+  }
+};
+
+struct AsrPricing {
+  std::optional<Price> per_audio_second;
+
+  friend void from_json(const nlohmann::json &j, AsrPricing &p) {
+    p.per_audio_second.reset();
+    if (const auto *value = detail::opt_object(j, "per_audio_second"))
+      p.per_audio_second = value->get<Price>();
+  }
+};
+
+struct MusicDurationPrice {
+  Price price;
+  std::optional<int> min_seconds;
+  std::optional<int> max_seconds;
+
+  friend void from_json(const nlohmann::json &j, MusicDurationPrice &p) {
+    p.price = j.get<Price>();
+    p.min_seconds = detail::opt_int(j, "min_seconds");
+    p.max_seconds = detail::opt_int(j, "max_seconds");
+  }
+};
+
+using MusicDurationPriceMap =
+    std::map<std::string, MusicDurationPrice, std::less<>>;
+
+struct MusicPricing {
+  std::optional<Price> generation;
+  std::optional<MusicDurationPriceMap> durations;
+  std::optional<Price> per_second;
+  std::optional<Price> per_thousand_characters;
+
+  friend void from_json(const nlohmann::json &j, MusicPricing &p) {
+    p.generation.reset();
+    p.durations.reset();
+    p.per_second.reset();
+    p.per_thousand_characters.reset();
+    if (const auto *value = detail::opt_object(j, "generation"))
+      p.generation = value->get<Price>();
+    if (const auto *value = detail::opt_object(j, "durations")) {
+      MusicDurationPriceMap durations;
+      for (const auto &[key, tier] : value->items())
+        if (tier.is_object())
+          durations.emplace(key, tier.get<MusicDurationPrice>());
+      p.durations = std::move(durations);
+    }
+    if (const auto *value = detail::opt_object(j, "per_second"))
+      p.per_second = value->get<Price>();
+    if (const auto *value = detail::opt_object(j, "per_thousand_characters"))
+      p.per_thousand_characters = value->get<Price>();
   }
 };
 
@@ -4002,11 +4188,27 @@ struct Model {
   // content/privacy guarantee enforced by this client.
   std::optional<bool> uncensored;
 
+  // Unit-explicit pricing views, selected from `type`. Appended for positional
+  // aggregate source compatibility; `pricing` above remains the legacy mirror.
+  // At most one is engaged for a given model.
+  std::optional<TokenPricing> token_pricing;
+  std::optional<ImagePricing> image_pricing;
+  std::optional<InpaintPricing> inpaint_pricing;
+  std::optional<TtsPricing> tts_pricing;
+  std::optional<AsrPricing> asr_pricing;
+  std::optional<MusicPricing> music_pricing;
+
   friend void from_json(const nlohmann::json& j, Model& m) {
     if (const auto* s = detail::opt_string_at(j, "id")) m.id = *s;
     if (const auto* s = detail::opt_string_at(j, "type")) m.type = *s;
 
     m.raw = j;
+    m.token_pricing.reset();
+    m.image_pricing.reset();
+    m.inpaint_pricing.reset();
+    m.tts_pricing.reset();
+    m.asr_pricing.reset();
+    m.music_pricing.reset();
     m.owned_by = detail::opt_string(j, "owned_by");
     m.created = detail::opt_i64(j, "created");
     m.context_length = detail::opt_int(j, "context_length");
@@ -4027,8 +4229,31 @@ struct Model {
 
     if (const auto* caps = detail::opt_object(*spec, "capabilities"))
       m.capabilities = caps->get<ModelCapabilities>();
-    if (const auto* price = detail::opt_object(*spec, "pricing"))
+    if (const auto *price = detail::opt_object(*spec, "pricing")) {
       m.pricing = price->get<Pricing>();
+      if ((m.type == "text" || m.type == "embedding") &&
+          detail::has_any_object(*price, {"input", "output", "cache_input",
+                                          "cache_write", "extended"}))
+        m.token_pricing = price->get<TokenPricing>();
+      else if ((m.type == "image" || m.type == "upscale") &&
+               detail::has_any_object(
+                   *price, {"generation", "resolutions", "quality", "upscale"}))
+        m.image_pricing = price->get<ImagePricing>();
+      else if (m.type == "inpaint" &&
+               detail::has_any_object(*price, {"inpaint", "resolutions",
+                                               "quality", "inputImages"}))
+        m.inpaint_pricing = price->get<InpaintPricing>();
+      else if (m.type == "tts" && detail::has_any_object(*price, {"input"}))
+        m.tts_pricing = price->get<TtsPricing>();
+      else if (m.type == "asr" &&
+               detail::has_any_object(*price, {"per_audio_second"}))
+        m.asr_pricing = price->get<AsrPricing>();
+      else if (m.type == "music" &&
+               detail::has_any_object(*price,
+                                      {"generation", "durations", "per_second",
+                                       "per_thousand_characters"}))
+        m.music_pricing = price->get<MusicPricing>();
+    }
 
     // Cross-modality, so before the dispatch rather than repeated inside it.
     if (const auto* dep = detail::opt_object(*spec, "deprecation"))

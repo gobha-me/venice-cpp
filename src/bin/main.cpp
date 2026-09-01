@@ -1597,6 +1597,9 @@ void reconcile_row(const nlohmann::json& obj, bool typed, const char* key, Engag
   if (typed && !present)
     out.push_back({std::string{model}, std::string{level}, key,
                    "typed field engaged but raw carries no such key at this level"});
+  if (typed && present && !usable(*it))
+    out.push_back({std::string{model}, std::string{level}, key,
+                   "typed field engaged but the raw value has the wrong type"});
   if (present && usable(*it) && !typed)
     out.push_back({std::string{model}, std::string{level}, key,
                    "raw carries a usable value but the typed field is absent"});
@@ -1678,6 +1681,390 @@ const auto kIsInt = [](const nlohmann::json& v) {
 // Mirrors opt_double: is_number(), not is_number_float().
 const auto kIsNumber = [](const nlohmann::json& v) { return v.is_number(); };
 
+constexpr std::array<std::string_view, 2> kPriceKeys{"usd", "diem"};
+constexpr std::array<std::string_view, 5> kTokenPricingKeys{
+    "input", "output", "cache_input", "cache_write", "extended"};
+constexpr std::array<std::string_view, 5> kExtendedPricingKeys{
+    "context_token_threshold", "input", "output", "cache_input", "cache_write"};
+constexpr std::array<std::string_view, 4> kImagePricingKeys{
+    "generation", "resolutions", "quality", "upscale"};
+constexpr std::array<std::string_view, 2> kUpscalePricingKeys{"2x", "4x"};
+constexpr std::array<std::string_view, 4> kInpaintPricingKeys{
+    "inpaint", "resolutions", "quality", "inputImages"};
+constexpr std::array<std::string_view, 2> kInputImagePricingKeys{"included",
+                                                                 "additional"};
+constexpr std::array<std::string_view, 1> kTtsPricingKeys{"input"};
+constexpr std::array<std::string_view, 1> kAsrPricingKeys{"per_audio_second"};
+constexpr std::array<std::string_view, 4> kMusicPricingKeys{
+    "generation", "durations", "per_second", "per_thousand_characters"};
+constexpr std::array<std::string_view, 4> kMusicDurationPriceKeys{
+    "usd", "diem", "min_seconds", "max_seconds"};
+
+template <typename T, typename Reader, typename Usable>
+void audit_scalar(const nlohmann::json &raw, const char *key,
+                  const std::optional<T> &typed, Reader read, Usable usable,
+                  std::string_view model, std::string_view level,
+                  std::map<std::string, int> &coverage,
+                  std::vector<Mismatch> &mismatches) {
+  if (typed)
+    ++coverage[std::string{level} + '.' + key];
+  else
+    coverage.try_emplace(std::string{level} + '.' + key, 0);
+  reconcile_row(raw, typed.has_value(), key, usable, model, level, mismatches);
+  const auto expected = read(raw, key);
+  if (expected && typed && *expected != *typed)
+    mismatches.push_back({std::string{model}, std::string{level}, key,
+                          "typed value disagrees with the usable raw value"});
+}
+
+void audit_price(const nlohmann::json &raw, const venice::Price &typed,
+                 std::string_view model, std::string level,
+                 std::map<std::string, int> &coverage,
+                 std::vector<Mismatch> &mismatches) {
+  report_unmodeled("unmodeled price keys [" + std::string{model} + "]: ", raw,
+                   kPriceKeys, "Model::raw[...][\"pricing\"]");
+  audit_scalar(raw, "usd", typed.usd, venice::detail::opt_double, kIsNumber,
+               model, level, coverage, mismatches);
+  audit_scalar(raw, "diem", typed.diem, venice::detail::opt_double, kIsNumber,
+               model, level, coverage, mismatches);
+}
+
+void audit_price_member(const nlohmann::json &raw, const char *key,
+                        const std::optional<venice::Price> &typed,
+                        std::string_view model, std::string_view level,
+                        std::map<std::string, int> &coverage,
+                        std::vector<Mismatch> &mismatches) {
+  if (typed)
+    ++coverage[std::string{level} + '.' + key];
+  else
+    coverage.try_emplace(std::string{level} + '.' + key, 0);
+  reconcile_row(raw, typed.has_value(), key, kIsObject, model, level,
+                mismatches);
+  if (const auto *value = venice::detail::opt_object(raw, key); value && typed)
+    audit_price(*value, *typed, model, std::string{level} + '.' + key, coverage,
+                mismatches);
+}
+
+void audit_price_map(const nlohmann::json &raw,
+                     const venice::OptionPriceMap &typed,
+                     std::string_view model, std::string level,
+                     std::map<std::string, int> &coverage,
+                     std::vector<Mismatch> &mismatches) {
+  for (const auto &[key, value] : raw.items()) {
+    if (!value.is_object())
+      continue;
+    const auto found = typed.find(key);
+    if (found == typed.end()) {
+      mismatches.push_back(
+          {std::string{model}, level, key,
+           "usable raw map entry is absent from the typed map"});
+      continue;
+    }
+    audit_price(value, found->second, model, level + '.' + key, coverage,
+                mismatches);
+  }
+  for (const auto &[key, value] : typed) {
+    const auto found = raw.find(key);
+    if (found == raw.end() || !found->is_object())
+      mismatches.push_back({std::string{model}, level, key,
+                            "typed map entry has no usable raw object"});
+  }
+}
+
+template <typename Map, typename AuditEntry>
+void audit_open_map_member(const nlohmann::json &raw, const char *key,
+                           const std::optional<Map> &typed, AuditEntry audit,
+                           std::string_view model, std::string_view level,
+                           std::map<std::string, int> &coverage,
+                           std::vector<Mismatch> &mismatches) {
+  if (typed)
+    ++coverage[std::string{level} + '.' + key];
+  else
+    coverage.try_emplace(std::string{level} + '.' + key, 0);
+  reconcile_row(raw, typed.has_value(), key, kIsObject, model, level,
+                mismatches);
+  if (const auto *value = venice::detail::opt_object(raw, key); value && typed)
+    audit(*value, *typed, model, std::string{level} + '.' + key, coverage,
+          mismatches);
+}
+
+void audit_quality_map(const nlohmann::json &raw,
+                       const venice::ResolutionQualityPriceMap &typed,
+                       std::string_view model, std::string level,
+                       std::map<std::string, int> &coverage,
+                       std::vector<Mismatch> &mismatches) {
+  for (const auto &[resolution, value] : raw.items()) {
+    if (!value.is_object())
+      continue;
+    const auto found = typed.find(resolution);
+    if (found == typed.end()) {
+      mismatches.push_back(
+          {std::string{model}, level, resolution,
+           "usable raw resolution is absent from the typed map"});
+      continue;
+    }
+    audit_price_map(value, found->second, model, level + '.' + resolution,
+                    coverage, mismatches);
+  }
+  for (const auto &[resolution, value] : typed) {
+    const auto found = raw.find(resolution);
+    if (found == raw.end() || !found->is_object())
+      mismatches.push_back({std::string{model}, level, resolution,
+                            "typed resolution has no usable raw object"});
+  }
+}
+
+void audit_upscale(const nlohmann::json &raw,
+                   const venice::ImageUpscalePricing &typed,
+                   std::string_view model, std::string level,
+                   std::map<std::string, int> &coverage,
+                   std::vector<Mismatch> &mismatches) {
+  report_unmodeled(
+      "unmodeled upscale pricing keys [" + std::string{model} + "]: ", raw,
+      kUpscalePricingKeys, "Model::raw[...][\"pricing\"][\"upscale\"]");
+  audit_price_member(raw, "2x", typed.x2, model, level, coverage, mismatches);
+  audit_price_member(raw, "4x", typed.x4, model, level, coverage, mismatches);
+}
+
+void audit_token_pricing(const nlohmann::json &raw,
+                         const venice::TokenPricing &typed,
+                         std::string_view model,
+                         std::map<std::string, int> &coverage,
+                         std::vector<Mismatch> &mismatches) {
+  audit_price_member(raw, "input", typed.base.input, model, "pricing", coverage,
+                     mismatches);
+  audit_price_member(raw, "output", typed.base.output, model, "pricing",
+                     coverage, mismatches);
+  audit_price_member(raw, "cache_input", typed.base.cache_input, model,
+                     "pricing", coverage, mismatches);
+  audit_price_member(raw, "cache_write", typed.base.cache_write, model,
+                     "pricing", coverage, mismatches);
+
+  if (typed.extended)
+    ++coverage["pricing.extended"];
+  else
+    coverage.try_emplace("pricing.extended", 0);
+  reconcile_row(raw, typed.extended.has_value(), "extended", kIsObject, model,
+                "pricing", mismatches);
+  const auto *extended = venice::detail::opt_object(raw, "extended");
+  if (extended == nullptr || !typed.extended)
+    return;
+  report_unmodeled("unmodeled extended pricing keys [" + std::string{model} +
+                       "]: ",
+                   *extended, kExtendedPricingKeys,
+                   "Model::raw[...][\"pricing\"][\"extended\"]");
+  audit_scalar(
+      *extended, "context_token_threshold", typed.extended_threshold_tokens,
+      venice::detail::opt_i64,
+      [](const auto &value) {
+        return venice::detail::integer_if_representable<std::int64_t>(value)
+            .has_value();
+      },
+      model, "pricing.extended", coverage, mismatches);
+  audit_price_member(*extended, "input", typed.extended->input, model,
+                     "pricing.extended", coverage, mismatches);
+  audit_price_member(*extended, "output", typed.extended->output, model,
+                     "pricing.extended", coverage, mismatches);
+  audit_price_member(*extended, "cache_input", typed.extended->cache_input,
+                     model, "pricing.extended", coverage, mismatches);
+  audit_price_member(*extended, "cache_write", typed.extended->cache_write,
+                     model, "pricing.extended", coverage, mismatches);
+}
+
+void audit_image_pricing(const nlohmann::json &raw,
+                         const venice::ImagePricing &typed,
+                         std::string_view model,
+                         std::map<std::string, int> &coverage,
+                         std::vector<Mismatch> &mismatches) {
+  audit_price_member(raw, "generation", typed.generation, model, "pricing",
+                     coverage, mismatches);
+  audit_open_map_member(raw, "resolutions", typed.resolutions, audit_price_map,
+                        model, "pricing", coverage, mismatches);
+  audit_open_map_member(raw, "quality", typed.quality, audit_quality_map, model,
+                        "pricing", coverage, mismatches);
+
+  if (typed.upscale)
+    ++coverage["pricing.upscale"];
+  else
+    coverage.try_emplace("pricing.upscale", 0);
+  reconcile_row(raw, typed.upscale.has_value(), "upscale", kIsObject, model,
+                "pricing", mismatches);
+  if (const auto *value = venice::detail::opt_object(raw, "upscale");
+      value && typed.upscale)
+    audit_upscale(*value, *typed.upscale, model, "pricing.upscale", coverage,
+                  mismatches);
+}
+
+void audit_inpaint_pricing(const nlohmann::json &raw,
+                           const venice::InpaintPricing &typed,
+                           std::string_view model,
+                           std::map<std::string, int> &coverage,
+                           std::vector<Mismatch> &mismatches) {
+  audit_price_member(raw, "inpaint", typed.base, model, "pricing", coverage,
+                     mismatches);
+  audit_open_map_member(raw, "resolutions", typed.resolutions, audit_price_map,
+                        model, "pricing", coverage, mismatches);
+  audit_open_map_member(raw, "quality", typed.quality, audit_quality_map, model,
+                        "pricing", coverage, mismatches);
+
+  if (typed.input_images)
+    ++coverage["pricing.inputImages"];
+  else
+    coverage.try_emplace("pricing.inputImages", 0);
+  reconcile_row(raw, typed.input_images.has_value(), "inputImages", kIsObject,
+                model, "pricing", mismatches);
+  const auto *input_images = venice::detail::opt_object(raw, "inputImages");
+  if (input_images == nullptr || !typed.input_images)
+    return;
+  report_unmodeled("unmodeled inputImages pricing keys [" + std::string{model} +
+                       "]: ",
+                   *input_images, kInputImagePricingKeys,
+                   "Model::raw[...][\"pricing\"][\"inputImages\"]");
+  audit_scalar(*input_images, "included", typed.input_images->included,
+               venice::detail::opt_int, kIsInt, model, "pricing.inputImages",
+               coverage, mismatches);
+  audit_price_member(*input_images, "additional",
+                     typed.input_images->additional, model,
+                     "pricing.inputImages", coverage, mismatches);
+}
+
+void audit_music_duration_map(const nlohmann::json &raw,
+                              const venice::MusicDurationPriceMap &typed,
+                              std::string_view model, std::string level,
+                              std::map<std::string, int> &coverage,
+                              std::vector<Mismatch> &mismatches) {
+  for (const auto &[key, value] : raw.items()) {
+    if (!value.is_object())
+      continue;
+    const auto found = typed.find(key);
+    if (found == typed.end()) {
+      mismatches.push_back(
+          {std::string{model}, level, key,
+           "usable raw duration is absent from the typed map"});
+      continue;
+    }
+    const auto tier_level = level + '.' + key;
+    report_unmodeled(
+        "unmodeled duration price keys [" + std::string{model} + "]: ", value,
+        kMusicDurationPriceKeys, "Model::raw[...][\"pricing\"][\"durations\"]");
+    audit_scalar(value, "usd", found->second.price.usd,
+                 venice::detail::opt_double, kIsNumber, model, tier_level,
+                 coverage, mismatches);
+    audit_scalar(value, "diem", found->second.price.diem,
+                 venice::detail::opt_double, kIsNumber, model, tier_level,
+                 coverage, mismatches);
+    audit_scalar(value, "min_seconds", found->second.min_seconds,
+                 venice::detail::opt_int, kIsInt, model, tier_level, coverage,
+                 mismatches);
+    audit_scalar(value, "max_seconds", found->second.max_seconds,
+                 venice::detail::opt_int, kIsInt, model, tier_level, coverage,
+                 mismatches);
+  }
+  for (const auto &[key, value] : typed) {
+    const auto found = raw.find(key);
+    if (found == raw.end() || !found->is_object())
+      mismatches.push_back({std::string{model}, level, key,
+                            "typed duration has no usable raw object"});
+  }
+}
+
+void audit_music_pricing(const nlohmann::json &raw,
+                         const venice::MusicPricing &typed,
+                         std::string_view model,
+                         std::map<std::string, int> &coverage,
+                         std::vector<Mismatch> &mismatches) {
+  audit_price_member(raw, "generation", typed.generation, model, "pricing",
+                     coverage, mismatches);
+  audit_open_map_member(raw, "durations", typed.durations,
+                        audit_music_duration_map, model, "pricing", coverage,
+                        mismatches);
+  audit_price_member(raw, "per_second", typed.per_second, model, "pricing",
+                     coverage, mismatches);
+  audit_price_member(raw, "per_thousand_characters",
+                     typed.per_thousand_characters, model, "pricing", coverage,
+                     mismatches);
+}
+
+template <typename View>
+void reconcile_pricing_view(bool expected, const std::optional<View> &typed,
+                            std::string_view model,
+                            std::vector<Mismatch> &mismatches) {
+  if (expected && !typed)
+    mismatches.push_back({std::string{model}, "pricing", "view",
+                          "usable modality pricing has no typed view"});
+  if (!expected && typed)
+    mismatches.push_back(
+        {std::string{model}, "pricing", "view",
+         "typed pricing view engaged without a usable bucket"});
+}
+
+void audit_model_pricing(const nlohmann::json &raw, const venice::Model &model,
+                         std::map<std::string, int> &coverage,
+                         std::vector<Mismatch> &mismatches) {
+  using venice::detail::has_any_object;
+  if (model.type == "text" || model.type == "embedding") {
+    report_unmodeled("unmodeled pricing keys [" + model.id + "]: ", raw,
+                     kTokenPricingKeys, "Model::raw[...][\"pricing\"]");
+    const bool expected = has_any_object(
+        raw, {"input", "output", "cache_input", "cache_write", "extended"});
+    reconcile_pricing_view(expected, model.token_pricing, model.id, mismatches);
+    if (model.token_pricing)
+      audit_token_pricing(raw, *model.token_pricing, model.id, coverage,
+                          mismatches);
+  } else if (model.type == "image" || model.type == "upscale") {
+    report_unmodeled("unmodeled pricing keys [" + model.id + "]: ", raw,
+                     kImagePricingKeys, "Model::raw[...][\"pricing\"]");
+    const bool expected = has_any_object(
+        raw, {"generation", "resolutions", "quality", "upscale"});
+    reconcile_pricing_view(expected, model.image_pricing, model.id, mismatches);
+    if (model.image_pricing)
+      audit_image_pricing(raw, *model.image_pricing, model.id, coverage,
+                          mismatches);
+  } else if (model.type == "inpaint") {
+    report_unmodeled("unmodeled pricing keys [" + model.id + "]: ", raw,
+                     kInpaintPricingKeys, "Model::raw[...][\"pricing\"]");
+    const bool expected = has_any_object(
+        raw, {"inpaint", "resolutions", "quality", "inputImages"});
+    reconcile_pricing_view(expected, model.inpaint_pricing, model.id,
+                           mismatches);
+    if (model.inpaint_pricing)
+      audit_inpaint_pricing(raw, *model.inpaint_pricing, model.id, coverage,
+                            mismatches);
+  } else if (model.type == "tts") {
+    report_unmodeled("unmodeled pricing keys [" + model.id + "]: ", raw,
+                     kTtsPricingKeys, "Model::raw[...][\"pricing\"]");
+    const bool expected = has_any_object(raw, {"input"});
+    reconcile_pricing_view(expected, model.tts_pricing, model.id, mismatches);
+    if (model.tts_pricing)
+      audit_price_member(raw, "input",
+                         model.tts_pricing->per_million_characters, model.id,
+                         "pricing", coverage, mismatches);
+  } else if (model.type == "asr") {
+    report_unmodeled("unmodeled pricing keys [" + model.id + "]: ", raw,
+                     kAsrPricingKeys, "Model::raw[...][\"pricing\"]");
+    const bool expected = has_any_object(raw, {"per_audio_second"});
+    reconcile_pricing_view(expected, model.asr_pricing, model.id, mismatches);
+    if (model.asr_pricing)
+      audit_price_member(raw, "per_audio_second",
+                         model.asr_pricing->per_audio_second, model.id,
+                         "pricing", coverage, mismatches);
+  } else if (model.type == "music") {
+    report_unmodeled("unmodeled pricing keys [" + model.id + "]: ", raw,
+                     kMusicPricingKeys, "Model::raw[...][\"pricing\"]");
+    const bool expected =
+        has_any_object(raw, {"generation", "durations", "per_second",
+                             "per_thousand_characters"});
+    reconcile_pricing_view(expected, model.music_pricing, model.id, mismatches);
+    if (model.music_pricing)
+      audit_music_pricing(raw, *model.music_pricing, model.id, coverage,
+                          mismatches);
+  } else {
+    constexpr std::array<std::string_view, 0> kNoPricingKeys{};
+    report_unmodeled("unmodeled pricing keys [" + model.id + "]: ", raw,
+                     kNoPricingKeys, "Model::raw[...][\"pricing\"]");
+  }
+}
+
 // The model_spec keys Model has read since VC-03, plus the VC-39 reads for
 // every type. Cross-modality and per-modality table keys are appended below.
 constexpr std::array<std::string_view, 14> kSharedSpecKeys{
@@ -1688,11 +2075,6 @@ constexpr std::array<std::string_view, 14> kSharedSpecKeys{
 
 constexpr std::array<std::string_view, 7> kModeledEntryKeys{
     "id", "type", "created", "object", "owned_by", "model_spec", "context_length"};
-
-// The modalities this ticket deliberately does not model. Naming them here,
-// and printing their inventory below, is what keeps the scope boundary a
-// decision rather than a gap nobody noticed.
-constexpr std::array<std::string_view, 2> kUnmodeledModalities{"asr", "upscale"};
 
 void report_coverage(const std::map<std::string, int>& coverage, std::size_t total) {
   std::cout << "coverage (engaged / " << total << "):\n";
@@ -1780,6 +2162,8 @@ auto report_modality(const std::vector<venice::Model>& models, std::string_view 
         *spec, m, kModelSpecBoolFields, kIsBool,
         [](const auto& obj, const char* key) { return opt_bool(obj, key); },
         m.id, "model_spec", coverage, mismatches);
+    if (const auto *pricing = opt_object(*spec, "pricing"))
+      audit_model_pricing(*pricing, m, coverage, mismatches);
     if (const auto* c = opt_object(*spec, "constraints"))
       report_unmodeled("unmodeled constraint keys [" + m.id + "]: ", *c, constraint_keys,
                        "Model::raw[\"model_spec\"][\"constraints\"]");
@@ -1964,20 +2348,6 @@ auto report_modality(const std::vector<venice::Model>& models, std::string_view 
   return broken == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-// Modalities with no request-policy view: print what they carry, so the
-// boundary remains visible rather than becoming a silent parser gap.
-void report_unmodeled_modality(const std::vector<venice::Model>& models, std::string_view type) {
-  std::cout << "  nothing modality-specific to type here. model_spec keys carried:\n";
-  std::map<std::string, int> keys;
-  for (const auto& m : models)
-    if (const auto* spec = venice::detail::opt_object(m.raw, "model_spec"))
-      for (const auto& [k, v] : spec->items()) ++keys[k];
-  for (const auto& [k, n] : keys)
-    std::cout << "    " << std::left << std::setw(34) << k << ' ' << n << '/' << models.size()
-              << '\n';
-  (void)type;
-}
-
 // `--modality [type]`: the per-modality typed metadata, against every entry.
 auto show_modality(const venice::Client& client, std::string_view type) -> int {
   const std::vector<std::string_view> types =
@@ -1997,11 +2367,6 @@ auto show_modality(const venice::Client& client, std::string_view type) -> int {
     }
     std::cout << "\n=== " << t << ": " << res->size() << " models ===\n";
 
-    if (std::find(kUnmodeledModalities.begin(), kUnmodeledModalities.end(), t) !=
-        kUnmodeledModalities.end()) {
-      report_unmodeled_modality(*res, t);
-      continue;
-    }
     if (report_modality(*res, t) != EXIT_SUCCESS) worst = EXIT_FAILURE;
   }
   return worst;

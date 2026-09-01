@@ -253,8 +253,9 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   durations, speeds and language codes are caller-supplied values; local guards
   reject only missing required structure and non-finite modeled doubles.
   `MusicModelSpec` exposes the live music constraints, while ASR currently has
-  no distinct live metadata shape and therefore does not grow an empty typed
-  view. Retrieve returns a processing/media union from the actual response, a
+  no distinct request-policy metadata shape; its per-audio-second rate lives in
+  `AsrPricing` rather than an empty ASR spec view. Retrieve returns a
+  processing/media union from the actual response, a
   cleanup body with `success: false` remains a successful retryable result, and
   no method hides polling, cleanup or remote deletion from the caller.
 - **Video is an explicit paid-work lifecycle, never a convenience loop.** Quote,
@@ -417,6 +418,16 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   The keyless modality audit descends into `capabilities`, differences its keys
   and reconciles scalar/list values against `raw` rather than treating the
   parent key as complete coverage (VC-56).
+- **Model pricing is selected by modality and names its unit.** Text and
+  embedding, image/upscale, inpaint, TTS, ASR and music use six distinct
+  optional pricing views; at most one engages for a model. Resolution, quality
+  and duration keys remain open strings, malformed nested buckets become
+  unknown, and `Model::raw` remains complete. The older `Model::pricing` is a
+  source-compatible mirror whose shared `input` and `generation` names are
+  intentionally not the API for new unit-sensitive code. No helper estimates a
+  final charge where Venice has not published the tier semantics. The keyless
+  modality audit differences and reconciles every pricing nesting level, not
+  just the parent `pricing` key (VC-57).
 - **A key the document does not have is not thereby absent from the wire, and a
   key it does have is not thereby present.** VC-39 measured seven keys on 100%
   of video models that appear nowhere in the swagger fetched the same day, and

@@ -648,8 +648,9 @@ for (const auto& m : *list) {
     std::cout << m.id << " accepts " << *m.capabilities->max_videos << " videos\n";
 
   // per-million-token input rate, if quoted
-  if (m.pricing && m.pricing->base.input && m.pricing->base.input->usd)
-    std::cout << m.id << " $" << *m.pricing->base.input->usd << '\n';
+  if (m.token_pricing && m.token_pricing->base.input &&
+      m.token_pricing->base.input->usd)
+    std::cout << m.id << " $" << *m.token_pricing->base.input->usd << '\n';
 }
 ```
 
@@ -666,15 +667,15 @@ literal `maxVideos` capability as a representable integer; the client does not
 invent a limit when it is absent or malformed.
 
 **The bare call lists text models only** — that is Venice's default for the
-endpoint, not a choice this client makes, and it is 111 of the 338 models the
+endpoint, not a choice this client makes, and it is 111 of the 339 models the
 API actually serves. Pass a type to reach the rest:
 
 ```cpp
 client.models();          // no query string — text, as before
 client.models("image");   // 38
-client.models("all");     // 338: text 111, video 128, image 38, inpaint 21,
+client.models("all");     // 339: text 111, video 129, image 38, inpaint 21,
                           //      music 14, tts 11, embedding 9, asr 5,
-                          //      upscale 1   (measured 2026-08-31)
+                          //      upscale 1   (measured 2026-09-01)
 ```
 
 The type is a plain string, not an enum, for the same reason `response_format`
@@ -730,10 +731,10 @@ specification:
 - **`voice_cloning` absent does not mean the model cannot clone.** Models whose
   cloning is behind a private alpha omit the field for non-staff callers while
   still appearing in the listing.
-- **Music is typed where Audio needs policy; ASR has no separate live shape.**
+- **Music is typed where Audio needs policy; ASR has no separate policy shape.**
   Music exposes duration, prompt, lyrics, voice, language, speed and format
-  constraints. ASR entries currently carry only the common model/pricing fields
-  and remain fully available through those fields plus `Model::raw`.
+  constraints. ASR entries carry no ASR-specific request constraints, but their
+  per-audio-second rate is explicit in `Model::asr_pricing`.
 
 `Model::uncensored` is shared catalogue metadata, not music policy: the
 2026-08-31 keyless listing carried `true` on text, image, inpaint, music and
@@ -980,7 +981,7 @@ one, Venice has told you.
 Some models reprice past a context threshold, so an estimate picks a tier:
 
 ```cpp
-const auto& p = *m.pricing;
+const auto& p = *m.token_pricing;
 const venice::PriceTier& tier =
     (p.extended && p.extended_threshold_tokens && tokens > *p.extended_threshold_tokens)
         ? *p.extended : p.base;
@@ -1001,8 +1002,26 @@ unrepresentable value returns `ErrorKind::Parse` on buffered and streamed calls
 rather than becoming a truncated count or a wrapped negative; a streamed caller
 still retains every earlier delta in its `StreamAccumulator`.
 
+The catalogue exposes six unit-aware views selected by `Model::type`:
+
+- `token_pricing` for text and embeddings, with rates per million tokens;
+- `image_pricing` for image generation and upscale, including open resolution
+  and resolution-plus-quality maps;
+- `inpaint_pricing`, keeping base, selection, and additional-input-image rates
+  distinct;
+- `tts_pricing->per_million_characters` and
+  `asr_pricing->per_audio_second`;
+- `music_pricing`, whose observed forms are generation, duration tiers,
+  per-second, and per-thousand-character rates.
+
+Selection strings remain server-owned map keys, so a future resolution,
+quality, or duration label remains readable without a library release. Missing
+or malformed buckets are unknown rather than zero. `Model::pricing` remains as
+the source-compatible legacy mirror, but its `input` and `generation` members
+do not identify their units; new code should use the modality-aware view.
+
 `venice::Price` is the type on both sides, and the two are not the same
-quantity: `Model::pricing` is a **rate** (per million tokens), `res->cost` is an
+quantity: a catalogue pricing field is a **rate**, while `res->cost` is an
 **amount** (what one call charged). Do not multiply the latter by a token count.
 
 **`Model::raw` holds the whole entry verbatim**, modeled fields included. It is
@@ -1012,8 +1031,8 @@ never sent, and it is a superset rather than a complement — so code reading
 typed field. It is also how you reach anything this struct does not model:
 
 ```cpp
-m.raw["model_spec"]["pricing"]["upscale"]["2x"]["usd"];  // image models
-m.raw["model_spec"]["constraints"];                      // per-model defaults
+m.raw["model_spec"]["pricing"]["futureRateForm"];  // future server key
+m.raw["model_spec"]["constraints"];                // complete raw block
 ```
 
 `model_spec` is polymorphic by model type — image models carry generation
@@ -1460,7 +1479,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.12)
+  GIT_TAG        v0.29.13)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
