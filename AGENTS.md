@@ -194,6 +194,9 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   *loses* whenever `tools` is engaged, so the hatch's behaviour would flip on an
   unrelated field. The container stays typed
   (`optional<vector<nlohmann::json>>`) so engaged-but-empty can emit `[]`.
+  `tools::function` models the documented optional `function.strict` control as
+  a trailing `optional<bool>`: unset omits the key, while false and true emit
+  distinct JSON booleans without closing the raw element escape hatch (VC-58).
   Message content and Responses input/output follow the same rule: item
   universes remain raw JSON, while builders cover the documented text, image,
   audio, video, file, cache-control, function-call and reference shapes.

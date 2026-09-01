@@ -115,6 +115,19 @@ have since landed there as CT-14.
 
 ## Next up
 
+**VC-58 (#93) is implemented for v0.29.14.** `tools::function` now exposes the
+documented nested `function.strict` control as a trailing optional boolean for
+both Chat Completions and Responses. Unset omits the key, while explicit false
+and true remain distinct JSON booleans; every existing one-, two- and
+three-argument call keeps its source and wire shape.
+
+Failure-first builder and request fixtures pin all three states plus the exact
+nesting on both request families. Function tools remain raw JSON elements, so
+web search, X search, future tool shapes and endpoint-specific keys stay
+reachable without a typed tool universe or local schema validation. The
+published Swagger checked 2026-09-01 documents `strict` on both operations; no
+paid live call or credential is needed.
+
 **VC-57 (#92) is implemented for v0.29.13.** `Model` now exposes six
 type-selected, unit-aware pricing views: token rates for text/embedding;
 generation, resolution, quality and upscale rates for image/upscale; distinct
