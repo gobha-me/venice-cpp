@@ -618,8 +618,8 @@ selected `ethereum-mainnet`, received `0x1` from `eth_chainId`, and confirmed an
 identical replay through `Idempotent-Replayed: true`; the first call reported 20
 credits and $0.00001400. It submitted no transaction.
 
-**`response_format` is raw JSON, not an enum.** The API accepts both
-`{"type":"json_object"}` and a full `{"type":"json_schema", …}` block, and no
+**`response_format` is raw JSON, not an enum.** The API accepts
+`{"type":"json_object"}` and the OpenAI-compatible JSON Schema wrapper, and no
 enum can carry a schema — so the field is `std::optional<nlohmann::json>` and
 the ergonomics live in builders:
 
@@ -629,6 +629,13 @@ req.response_format = venice::response_format::json_object();
 req.response_format = venice::response_format::json_schema("reply", my_schema);
 // anything the builders don't cover, assign the object yourself
 ```
+
+That wrapper is measured, not inferred from one of Venice's conflicting pages.
+On 2026-09-01 it produced conformant buffered and streamed replies on
+`openai-gpt-4o-mini-2024-07-18`. The generated Chat Completions reference's
+direct-schema form returned HTTP 400 in both modes on that model and HTTP 500 on
+`zai-org-glm-4.7-flash`. The raw field remains the escape hatch for future wire
+contracts; the named helper emits the contract Venice demonstrably executes.
 
 ### Picking a model
 
@@ -1482,7 +1489,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.14)
+  GIT_TAG        v0.29.15)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
@@ -1650,6 +1657,7 @@ These commands settle the rest against the live API:
 ```bash
 VENICE_API_KEY=... venice-cpp --stream "..."   # v0.8.0: the reply shapes
 VENICE_API_KEY=... venice-cpp --tools          # v0.9.0: the request shape
+VENICE_API_KEY=... venice-cpp --structured [model] # v0.29.15: schema contract; prompt on stdin
 VENICE_API_KEY=... venice-cpp --characters     # v0.10.0: the character entry
 VENICE_API_KEY=... venice-cpp --character SLUG # v0.14.0: detail + v0.15.0: reviews
 VENICE_API_KEY=... venice-cpp --usage [model]  # v0.12.0: usage + cost + envelope

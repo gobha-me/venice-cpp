@@ -115,6 +115,26 @@ have since landed there as CT-14.
 
 ## Next up
 
+**VC-59 (#94) is implemented for v0.29.15.** Venice's first-party Structured
+Responses guide and generated Chat Completions reference disagree on whether
+`response_format.json_schema` is OpenAI's `name` / `strict` / nested `schema`
+wrapper or the schema object directly. The live discriminator now settles the
+client contract: on 2026-09-01 `openai-gpt-4o-mini-2024-07-18` returned
+schema-conformant content for the wrapper in both buffered and streaming modes,
+while the direct form returned HTTP 400 in both. A supporting run on
+`zai-org-glm-4.7-flash` also rejected the direct form with HTTP 500; its wrapper
+requests reached 2xx but produced no final content, so it is not the conformance
+proof.
+
+`response_format::json_schema` therefore remains source- and wire-compatible,
+and `ChatRequest::response_format` remains raw JSON so future shapes stay
+reachable. `--structured [model]` reads an unprinted prompt from stdin, exercises
+both shapes and delivery modes, reports only structural conformance and redacted
+error sizes, and never prints model output. Across the conformance run and the
+instrumentation passes needed to classify the empty GLM response, successful
+calls reported 0.00069853 DIEM and zero USD; the catalogue-rate reconstruction
+was approximately $0.00148, below the approved $0.05 cap.
+
 **VC-58 (#93) is implemented for v0.29.14.** `tools::function` now exposes the
 documented nested `function.strict` control as a trailing optional boolean for
 both Chat Completions and Responses. Unset omits the key, while explicit false

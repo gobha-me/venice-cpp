@@ -106,6 +106,22 @@ TEST_CASE("response_format passes an unmodeled object through verbatim", "[reque
   REQUIRE(j["response_format"]["x"] == 1);
 }
 
+TEST_CASE("the rejected direct schema form remains reachable as raw JSON",
+          "[request][response_format][failure]") {
+  auto direct = nlohmann::json::object();
+  direct["type"] = "json_schema";
+  direct["json_schema"] = nlohmann::json::parse(
+      R"({"type":"object","properties":{"answer":{"type":"string"}}})");
+
+  for (const bool stream : {false, true}) {
+    auto r = minimal();
+    r.response_format = direct;
+    const auto j = r.to_json_body(stream);
+    REQUIRE(j["response_format"] == direct);
+    REQUIRE(j["stream"] == stream);
+  }
+}
+
 // ── seed is int64, and provably so ────────────────────────────────────────
 //
 // Callers seed from std::random_device / mt19937, which produce uint32_t values
@@ -425,7 +441,7 @@ TEST_CASE("response_format builders emit the documented shapes", "[request][resp
   REQUIRE(venice::response_format::text().dump() == R"({"type":"text"})");
   REQUIRE(venice::response_format::json_object().dump() == R"({"type":"json_object"})");
 
-  SECTION("json_schema defaults to strict") {
+  SECTION("json_schema emits the live-proven wrapper and defaults to strict") {
     const auto j = venice::response_format::json_schema("n", nlohmann::json::parse(R"({"type":"object"})"));
     REQUIRE(j.dump() ==
             R"({"json_schema":{"name":"n","schema":{"type":"object"},"strict":true},"type":"json_schema"})");
