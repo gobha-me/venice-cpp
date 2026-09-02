@@ -142,6 +142,8 @@ TEST_CASE("kind_for_status maps auth payment and rate-limit distinctly", "[error
   REQUIRE(venice::kind_for_status(500) == ErrorKind::Http);
   REQUIRE(venice::kind_for_status(200) == ErrorKind::Http);  // non-error path maps generic
   REQUIRE(venice::to_string(ErrorKind::PaymentRequired) == "payment_required");
+  REQUIRE(venice::to_string(ErrorKind::ResponseTooLarge) ==
+          "response_too_large");
 }
 
 TEST_CASE("authentication modes emit one canonical transport header", "[auth]") {

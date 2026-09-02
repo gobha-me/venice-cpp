@@ -76,9 +76,10 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
 - **Errors:** `std::expected<T, venice::Error>` everywhere fallible. Never throw
   across the public API; a transport/parse/HTTP failure is a value the caller
   inspects. Error kinds: network / http / parse / auth / rate_limited /
-  payment_required / invalid_arg / cancelled, each carrying `status` + raw
-  `body`. A response-derived error also carries `ResponseMetadata`; 402 is
-  `PaymentRequired`, while 401/403 remain `Auth`. `cancelled` is
+  payment_required / response_too_large / invalid_arg / cancelled, each
+  carrying `status` + raw `body`. A response-derived error also carries
+  `ResponseMetadata`; 402 is `PaymentRequired`, while 401/403 remain `Auth`.
+  `cancelled` is
   deliberately not folded into `network` (VC-06): a dead network is a fault to
   report or retry, a cancellation is the caller's own decision arriving back at
   them, and collapsing the two leaves the difference reachable only by parsing
@@ -92,6 +93,15 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   them `-Wmissing-field-initializers` fires once per omitted member on the
   designated-initializer spelling the type exists for, i.e. on every correct
   caller.
+- **Response ceilings are receive-time boundaries, not post-parse checks.** An
+  engaged `RequestOptions::maximum_response_bytes` counts decoded body chunks
+  before appending, framing or invoking a caller callback; a crossing chunk is
+  rejected whole. Successful overflow is `ResponseTooLarge` with preserved
+  status/metadata and no body prefix, while known non-2xx status classification
+  remains authoritative with an empty body. Cancellation wins a race. The
+  pinned cpp-httplib multipart convenience API exposes no response receiver, so
+  multipart plus an engaged ceiling is `InvalidArg` before transport rather
+  than a ceiling that only detects overflow after allocation.
 - **Authentication is explicit transport state.** `Authentication` distinguishes
   Public, Bearer, pre-signed SIWX and pre-built x402 payment payloads. The
   compatible `Client(std::string)` constructor means Bearer even when the

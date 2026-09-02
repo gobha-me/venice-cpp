@@ -49,6 +49,7 @@
 #include <chrono>
 #include <expected>
 #include <condition_variable>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -306,6 +307,21 @@ class TestServer {
       res.set_header("X-Test-Response", "text");
       res.set_content("plain response", "Text/Plain; charset=UTF-8");
     });
+    m_svr.Get("/api/v1/transport/empty",
+              [](const httplib::Request&, httplib::Response& res) {
+                res.set_header("X-Test-Response", "empty");
+                res.status = 204;
+              });
+    m_svr.Get("/api/v1/transport/declared-large-stall",
+              [this](const httplib::Request&, httplib::Response& res) {
+                res.set_header("X-Test-Response", "declared-large");
+                res.set_content_provider(
+                    1024U, "text/plain",
+                    [this](std::size_t, std::size_t, httplib::DataSink& sink) {
+                      m_gate.wait(kStallCap);
+                      return sink.write("x", 1U);
+                    });
+              });
     m_svr.Get("/api/v1/transport/csv", [](const httplib::Request&, httplib::Response& res) {
       res.set_header("X-Test-Response", "csv");
       res.set_content("a,b\n1,2\n", "text/csv; header=present");
@@ -332,8 +348,11 @@ class TestServer {
                 res.set_header("X-Protocol-Trace", "parse-metadata");
                 res.set_content("{", "application/json");
               });
-    m_svr.Get("/api/v1/transport/http-error", [](const httplib::Request&, httplib::Response& res) {
-      res.status = 418;
+    m_svr.Get("/api/v1/transport/http-error", [](const httplib::Request& req,
+                                                  httplib::Response& res) {
+      res.status = req.has_param("status")
+                       ? std::stoi(req.get_param_value("status"))
+                       : 418;
       res.set_header("X-Protocol-Trace", "http-metadata");
       res.set_content("not JSON and that does not matter", "text/plain");
     });
@@ -4486,7 +4505,8 @@ TEST_CASE("Chat SSE protocol failures are terminal and preserve accepted deltas"
           [&](const venice::StreamDelta&) {
             ++callbacks;
             return true;
-          });
+          },
+          {.maximum_response_bytes = 9U * 1024U * 1024U});
 
       REQUIRE_FALSE(result.has_value());
       REQUIRE(result.error().kind == ErrorKind::Parse);
@@ -4499,6 +4519,46 @@ TEST_CASE("Chat SSE protocol failures are terminal and preserve accepted deltas"
         REQUIRE(result.error().message.find("8 MiB") != std::string::npos);
     }
   }
+}
+
+TEST_CASE("Chat response limits are cumulative and retain only accepted deltas",
+          "[transport][stream][limit][failure]") {
+  const TestServer server;
+  const Client client{"stream-key", server.base_url()};
+  venice::StreamAccumulator acc;
+  int callbacks = 0;
+  const std::string first_frame =
+      "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n";
+
+  const auto result = client.chat_stream(
+      minimal_chat(), acc,
+      [&](const venice::StreamDelta&) {
+        ++callbacks;
+        return true;
+      },
+      {.authentication = Authentication::sign_in_with_x("complete-stream"),
+       .maximum_response_bytes = first_frame.size()});
+
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().kind == ErrorKind::ResponseTooLarge);
+  REQUIRE(result.error().status == 200);
+  REQUIRE(result.error().body.empty());
+  REQUIRE(result.error().metadata.header("x-protocol-trace") == "retained-on-success");
+  REQUIRE(callbacks == 1);
+  REQUIRE(acc.message().text() == "hel");
+
+  const Client payment_client{
+      Authentication::sign_in_with_x("needs-payment"), server.base_url()};
+  venice::StreamAccumulator payment_acc;
+  const auto payment = payment_client.chat_stream(
+      minimal_chat(), payment_acc, {.maximum_response_bytes = 1U});
+  REQUIRE_FALSE(payment.has_value());
+  REQUIRE(payment.error().kind == ErrorKind::PaymentRequired);
+  REQUIRE(payment.error().status == 402);
+  REQUIRE(payment.error().body.empty());
+  REQUIRE(payment.error().metadata.payment_required ==
+          "base64-payment-requirements");
+  REQUIRE(payment_acc.empty());
 }
 
 TEST_CASE("Chat SSE callback exceptions stop observation and cannot escape",
@@ -4620,6 +4680,126 @@ TEST_CASE("Chat SSE joins data fields and treats DONE as terminal success",
 }
 
 // ── buffered substrate: failure matrix first (VC-22) ──────────────────────────
+
+TEST_CASE("buffered response limits reject overflow before retaining body bytes",
+          "[transport][buffered][limit][failure]") {
+  const TestServer server;
+
+  venice::detail::ResponseBodyLimit arithmetic{
+      std::numeric_limits<std::size_t>::max()};
+  REQUIRE(arithmetic.accept(std::numeric_limits<std::size_t>::max()));
+  REQUIRE_FALSE(arithmetic.accept(1U));
+  REQUIRE(arithmetic.exceeded());
+
+  venice::detail::ResponseBodyLimit misleading{1U};
+  REQUIRE(misleading.accept_declared("0"));
+  REQUIRE_FALSE(misleading.accept(2U));
+
+  venice::detail::ResponseBodyLimit missing_or_malformed{1U};
+  REQUIRE(missing_or_malformed.accept_declared({}));
+  REQUIRE(missing_or_malformed.accept_declared("not-a-size"));
+  REQUIRE(missing_or_malformed.accept(1U));
+
+  venice::detail::ResponseBodyLimit encoded{8U};
+  httplib::Response encoded_headers;
+  encoded_headers.set_header("Content-Length", "1024");
+  encoded_headers.set_header("Content-Encoding", "gzip");
+  REQUIRE(venice::detail::response_headers_within_limit(encoded,
+                                                         encoded_headers));
+  REQUIRE(encoded.accept(8U));
+
+  venice::detail::ResponseBodyLimit chunked{8U};
+  httplib::Response chunked_headers;
+  chunked_headers.set_header("Content-Length", "1024");
+  chunked_headers.set_header("Transfer-Encoding", "chunked");
+  REQUIRE(venice::detail::response_headers_within_limit(chunked,
+                                                         chunked_headers));
+  REQUIRE(chunked.accept(8U));
+
+  const auto overflow = venice::detail::send_buffered(
+      server.base_url(),
+      {.method = venice::detail::HttpMethod::Get, .endpoint = "/transport/text"},
+      {.maximum_response_bytes = 13U});
+  REQUIRE_FALSE(overflow.has_value());
+  REQUIRE(overflow.error().kind == ErrorKind::ResponseTooLarge);
+  REQUIRE(overflow.error().status == 200);
+  REQUIRE(overflow.error().body.empty());
+  REQUIRE(overflow.error().metadata.header("x-test-response") == "text");
+
+  const auto zero = venice::detail::send_buffered(
+      server.base_url(),
+      {.method = venice::detail::HttpMethod::Get, .endpoint = "/transport/text"},
+      {.maximum_response_bytes = 0U});
+  REQUIRE_FALSE(zero.has_value());
+  REQUIRE(zero.error().kind == ErrorKind::ResponseTooLarge);
+
+  const auto declared = venice::detail::send_buffered(
+      server.base_url(),
+      {.method = venice::detail::HttpMethod::Get,
+       .endpoint = "/transport/declared-large-stall"},
+      {.read_timeout = 100ms, .maximum_response_bytes = 8U});
+  REQUIRE_FALSE(declared.has_value());
+  REQUIRE(declared.error().kind == ErrorKind::ResponseTooLarge);
+  REQUIRE(declared.error().status == 200);
+  REQUIRE(declared.error().body.empty());
+  REQUIRE(declared.error().metadata.header("x-test-response") ==
+          "declared-large");
+
+  const std::array status_cases{
+      std::pair{401, ErrorKind::Auth},
+      std::pair{402, ErrorKind::PaymentRequired},
+      std::pair{429, ErrorKind::RateLimited},
+      std::pair{500, ErrorKind::Http},
+  };
+  for (const auto& [status, kind] : status_cases) {
+    const auto oversized_http = venice::detail::send_buffered(
+        server.base_url(),
+        {.method = venice::detail::HttpMethod::Get,
+         .endpoint = "/transport/http-error?status=" + std::to_string(status)},
+        {.maximum_response_bytes = 1U});
+    REQUIRE_FALSE(oversized_http.has_value());
+    REQUIRE(oversized_http.error().kind == kind);
+    REQUIRE(oversized_http.error().status == status);
+    REQUIRE(oversized_http.error().body.empty());
+    REQUIRE(oversized_http.error().metadata.header("x-protocol-trace") ==
+            "http-metadata");
+  }
+}
+
+TEST_CASE("buffered response limits accept the exact boundary and empty body",
+          "[transport][buffered][limit]") {
+  const TestServer server;
+
+  const auto exact = venice::detail::send_buffered(
+      server.base_url(),
+      {.method = venice::detail::HttpMethod::Get, .endpoint = "/transport/text"},
+      {.maximum_response_bytes = 14U});
+  REQUIRE(exact.has_value());
+  REQUIRE(exact->body == "plain response");
+
+  const auto empty = venice::detail::send_buffered(
+      server.base_url(),
+      {.method = venice::detail::HttpMethod::Get, .endpoint = "/transport/empty"},
+      {.maximum_response_bytes = 0U});
+  REQUIRE(empty.has_value());
+  REQUIRE(empty->status == 204);
+  REQUIRE(empty->body.empty());
+}
+
+TEST_CASE("requested response limits reject multipart before transport",
+          "[transport][buffered][multipart][limit][failure]") {
+  const TestServer server;
+  const auto response = venice::detail::send_buffered(
+      server.base_url(),
+      {.method = venice::detail::HttpMethod::Post,
+       .endpoint = "/transport/multipart-stall",
+       .body = venice::detail::MultipartBody{}},
+      {.maximum_response_bytes = 1024U});
+
+  REQUIRE_FALSE(response.has_value());
+  REQUIRE(response.error().kind == ErrorKind::InvalidArg);
+  REQUIRE(server.multipart_stall_hits() == 0);
+}
 
 TEST_CASE("redirect responses are returned without contacting another origin",
           "[transport][redirect][buffered][failure]") {
@@ -5444,7 +5624,7 @@ TEST_CASE("speech streaming distinguishes completion early stop cancellation and
         token.cancel();
         return true;
       },
-      {.cancel = &token});
+      {.cancel = &token, .maximum_response_bytes = 2U});
   REQUIRE_FALSE(cancelled);
   REQUIRE(cancelled.error().is(ErrorKind::Cancelled));
 
@@ -5460,6 +5640,20 @@ TEST_CASE("speech streaming distinguishes completion early stop cancellation and
   REQUIRE_FALSE(empty_callback_failure);
   REQUIRE(empty_callback_failure.error().is(ErrorKind::InvalidArg));
   REQUIRE(empty_callback_failure.error().message == "speech callback: ");
+
+  bytes.clear();
+  const auto oversized = client.generate_speech_stream(
+      request,
+      [&](std::string_view chunk) {
+        bytes.append(chunk);
+        return true;
+      },
+      {.maximum_response_bytes = 2U});
+  REQUIRE_FALSE(oversized.has_value());
+  REQUIRE(oversized.error().is(ErrorKind::ResponseTooLarge));
+  REQUIRE(oversized.error().status == 200);
+  REQUIRE(oversized.error().body.empty());
+  REQUIRE(bytes == std::string{"S\0", 2});
 }
 
 TEST_CASE("audio multipart preserves NUL bytes filename type and form fields",

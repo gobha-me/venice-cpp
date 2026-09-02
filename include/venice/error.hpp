@@ -35,6 +35,7 @@ enum class ErrorKind {
   RateLimited,  // 429
   InvalidArg,   // caller passed something we can't send (e.g. empty prompt)
   Cancelled,    // aborted through a RequestOptions::cancel token (VC-06)
+  ResponseTooLarge,  // caller-selected decoded response-body ceiling exceeded
 };
 
 // Owned response metadata shared by successful inference results and failures.
@@ -86,6 +87,7 @@ struct Error {
     case ErrorKind::Auth: return "auth";
     case ErrorKind::PaymentRequired: return "payment_required";
     case ErrorKind::RateLimited: return "rate_limited";
+    case ErrorKind::ResponseTooLarge: return "response_too_large";
     case ErrorKind::InvalidArg: return "invalid_arg";
     case ErrorKind::Cancelled: return "cancelled";
   }

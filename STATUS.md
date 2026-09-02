@@ -16,8 +16,11 @@ AGENTS.md (which holds standing conventions, not state).
 - A reply is a `Message` and a `Message` is what you send — reasoning_content,
   tool_calls, tool_call_id, refusal, multimodal content parts and a tool call's
   `thought_signature`, all round-trippable, all individually withholdable.
-- Per-request timeouts, a `CancelToken`, and an authentication override on every
-  entry point (VC-06/VC-23).
+- Per-request timeouts, a `CancelToken`, an authentication override and an
+  optional decoded response-body ceiling on every entry point
+  (VC-06/VC-23/#111). Overflow is typed, body prefixes are discarded, streaming
+  keeps only earlier complete callbacks/deltas, and multipart use fails before
+  transport until the dependency exposes a receiver-capable path.
 - `models()` list with typed per-model metadata, filterable by modality
   (111 text / 339 all, fetched live 2026-09-01), `balance()`
   rate-limit endpoint.
@@ -81,8 +84,8 @@ AGENTS.md (which holds standing conventions, not state).
   transport and redacted raw/error copies (VC-44).
 - `venice_parameters` extension with forward-compatible `extra` passthrough.
 - Error model: `std::expected<T, Error>`, kinds network/http/parse/auth/
-  payment_required/rate_limited/invalid_arg/cancelled, each carrying status +
-  raw body and response metadata when a response exists.
+  payment_required/rate_limited/response_too_large/invalid_arg/cancelled, each
+  carrying status + raw body and response metadata when a response exists.
 - HTTP redirects are never followed (VC-47). A 3xx remains an `Http` error from
   its original server, so authentication/payment/idempotency headers and JSON,
   multipart or streaming request bodies cannot be replayed to `Location`.

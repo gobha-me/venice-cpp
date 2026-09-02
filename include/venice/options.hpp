@@ -17,6 +17,7 @@
 // shapes everything below.
 
 #include <chrono>
+#include <cstddef>
 #include <condition_variable>
 #include <mutex>
 #include <optional>
@@ -129,6 +130,11 @@ struct RequestOptions {
   // emitted only as Idempotency-Key; Venice owns its accepted syntax and the
   // library never copies it into a JSON body or diagnostic.
   std::optional<std::string> idempotency_key = std::nullopt;
+  // Optional ceiling for decoded response-body bytes accepted from the
+  // transport. An engaged zero permits an empty response body only. Multipart
+  // requests reject an engaged ceiling before transport until the pinned HTTP
+  // dependency exposes a receiver-capable multipart send path.
+  std::optional<std::size_t> maximum_response_bytes = std::nullopt;
 };
 
 namespace detail {
