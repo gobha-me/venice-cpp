@@ -757,6 +757,63 @@ enum class AuthPolicy {
                std::move(metadata)};
 }
 
+[[nodiscard]] inline auto response_too_large_error(
+    int status, ResponseMetadata metadata = {}) -> Error {
+  return Error{ErrorKind::ResponseTooLarge, status,
+               "response body exceeds the configured byte limit", {},
+               std::move(metadata)};
+}
+
+class ResponseBodyLimit final {
+ public:
+  explicit ResponseBodyLimit(std::optional<std::size_t> maximum)
+      : m_maximum(maximum) {}
+
+  [[nodiscard]] auto accept(std::size_t bytes) noexcept -> bool {
+    if (!m_maximum) return true;
+    if (bytes > *m_maximum - m_received) {
+      m_exceeded = true;
+      return false;
+    }
+    m_received += bytes;
+    return true;
+  }
+
+  [[nodiscard]] auto accept_declared(std::string_view bytes) noexcept -> bool {
+    if (!m_maximum || bytes.empty()) return true;
+    std::size_t parsed{};
+    const auto [end, status] =
+        std::from_chars(bytes.data(), bytes.data() + bytes.size(), parsed);
+    if (status == std::errc::result_out_of_range) {
+      m_exceeded = true;
+      return false;
+    }
+    if (status != std::errc{} || end != bytes.data() + bytes.size()) return true;
+    if (parsed <= *m_maximum) return true;
+    m_exceeded = true;
+    return false;
+  }
+
+  [[nodiscard]] auto exceeded() const noexcept -> bool { return m_exceeded; }
+
+ private:
+  std::optional<std::size_t> m_maximum;
+  std::size_t m_received{};
+  bool m_exceeded{};
+};
+
+[[nodiscard]] inline auto response_headers_within_limit(
+    ResponseBodyLimit& limit, const httplib::Response& response) noexcept
+    -> bool {
+  // Content-Length is a useful early rejection only when content coding cannot
+  // change the number of decoded bytes the receiver observes. Missing,
+  // malformed, or smaller declarations never replace the receive-time count.
+  if (response.has_header("Content-Encoding") ||
+      response.has_header("Transfer-Encoding"))
+    return true;
+  return limit.accept_declared(response.get_header_value("Content-Length"));
+}
+
 [[nodiscard]] inline auto normalize_media_type(std::string_view value) -> std::string {
   value = value.substr(0, value.find(';'));
   while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
@@ -829,6 +886,10 @@ template <std::size_t N>
   if (const auto *multipart = std::get_if<MultipartBody>(&request.body)) {
     if (auto valid = validate_multipart_metadata(*multipart); !valid)
       return std::unexpected{std::move(valid.error())};
+    if (opts.maximum_response_bytes)
+      return std::unexpected{Error{
+          ErrorKind::InvalidArg, 0,
+          "response byte limits are unavailable for multipart requests", {}}};
   }
 
   auto transport = make_transport(base_url, opts);
@@ -843,6 +904,7 @@ template <std::size_t N>
   httplib::Response response;
   httplib::Error transport_status = httplib::Error::Success;
   bool sent = false;
+  ResponseBodyLimit body_limit{opts.maximum_response_bytes};
 
   if (const auto* multipart = std::get_if<MultipartBody>(&request.body)) {
     httplib::MultipartFormDataItems items;
@@ -864,12 +926,31 @@ template <std::size_t N>
       wire_request.headers.erase("Content-Type");
       wire_request.set_header("Content-Type", bytes->content_type);
     }
+    if (opts.maximum_response_bytes) {
+      wire_request.response_handler = [&](const httplib::Response& headers) {
+        return response_headers_within_limit(body_limit, headers);
+      };
+      wire_request.content_receiver =
+          [&](const char* data, std::size_t length, std::size_t,
+              std::uint64_t) {
+            if (!body_limit.accept(length)) return false;
+            response.body.append(data, length);
+            return true;
+          };
+    }
     sent = cli.send(wire_request, response, transport_status);
   }
 
   // Cancellation is tested before the transport result because stop() makes a
   // caller cancellation arrive from cpp-httplib as a failed socket operation.
   if (guard.cancelled()) return std::unexpected{cancel_error()};
+  if (body_limit.exceeded()) {
+    auto metadata = metadata_from_headers(response.headers);
+    if (response.status < 200 || response.status >= 300)
+      return std::unexpected{http_error(response.status, {}, std::move(metadata))};
+    return std::unexpected{
+        response_too_large_error(response.status, std::move(metadata))};
+  }
   if (!sent) return std::unexpected{transport_error(transport_status)};
   return response_from_httplib(std::move(response));
 }
@@ -1052,6 +1133,7 @@ class Client {
     std::string error_body;
     std::string terminal_error;
     detail::SseFramer framer;
+    detail::ResponseBodyLimit body_limit{opts.maximum_response_bytes};
 
     auto transport = detail::make_transport(m_base_url, opts);
     if (!transport) return std::unexpected{std::move(transport.error())};
@@ -1075,7 +1157,7 @@ class Client {
       if (const auto it = response.headers.find("Content-Type"); it != response.headers.end())
         response_media_type = detail::normalize_media_type(it->second);
       media_is_sse = response_media_type == "text/event-stream";
-      return true;
+      return detail::response_headers_within_limit(body_limit, response);
     };
 
     // One SSE payload -> one delta per choice -> the accumulator, then the
@@ -1115,6 +1197,7 @@ class Client {
     };
 
     hreq.content_receiver = [&](const char* data, size_t len, size_t /*off*/, uint64_t /*total*/) {
+      if (!body_limit.accept(len)) return false;
       if (!response_is_success || !media_is_sse) {
         error_body.append(data, len);
         return true;
@@ -1172,6 +1255,12 @@ class Client {
     // is waiting for. What `acc` holds is unaffected either way, which is the
     // whole point of it belonging to the caller.
     if (guard.cancelled()) return std::unexpected{detail::cancel_error()};
+    if (body_limit.exceeded()) {
+      if (hres.status < 200 || hres.status >= 300)
+        return std::unexpected{detail::http_error(hres.status, {}, std::move(metadata))};
+      return std::unexpected{
+          detail::response_too_large_error(hres.status, std::move(metadata))};
+    }
     if (terminal == StreamTerminal::CallbackFailure)
       return std::unexpected{Error{ErrorKind::InvalidArg, hres.status,
                                    "chat callback: " + terminal_error, {},
@@ -1429,6 +1518,7 @@ class Client {
     std::string error_body;
     bool callback_failed = false;
     std::string callback_error;
+    detail::ResponseBodyLimit body_limit{opts.maximum_response_bytes};
 
     httplib::Request hreq;
     hreq.method = "POST";
@@ -1442,9 +1532,10 @@ class Client {
         response_media_type = detail::normalize_media_type(it->second);
       media_is_audio =
           detail::media_type_is(response_media_type, detail::kSpeechMediaTypes);
-      return true;
+      return detail::response_headers_within_limit(body_limit, response);
     };
     hreq.content_receiver = [&](const char* data, size_t len, size_t, uint64_t) {
+      if (!body_limit.accept(len)) return false;
       if (!response_is_success || !media_is_audio) {
         error_body.append(data, len);
         return true;
@@ -1472,6 +1563,12 @@ class Client {
     auto metadata = detail::metadata_from_headers(hres.headers);
 
     if (guard.cancelled()) return std::unexpected{detail::cancel_error()};
+    if (body_limit.exceeded()) {
+      if (hres.status < 200 || hres.status >= 300)
+        return std::unexpected{detail::http_error(hres.status, {}, std::move(metadata))};
+      return std::unexpected{
+          detail::response_too_large_error(hres.status, std::move(metadata))};
+    }
     if (callback_failed)
       return std::unexpected{Error{ErrorKind::InvalidArg, hres.status,
                                    "speech callback: " + callback_error, {},

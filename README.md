@@ -109,10 +109,12 @@ right bridge.
   `RequestOptions` with connect/read/write timeout overrides and a
   `CancelToken` that aborts an in-flight request from another thread, including
   one that has received nothing at all, plus an optional authentication
-  override and header-only idempotency key for that call.
+  override, header-only idempotency key and decoded response-body byte ceiling
+  for that call.
 - **Error model** — `std::expected<T, venice::Error>`; network / HTTP / parse /
-  auth / payment-required / rate-limit / invalid-arg / cancelled. Response
-  failures carry status, raw body and response metadata, including x402 headers.
+  auth / payment-required / rate-limit / response-too-large / invalid-arg /
+  cancelled. Response failures carry status, raw body and response metadata,
+  including x402 headers.
 
 Later phases (fed by real use): retries/backoff and high-level async
 workflow helpers.
@@ -1244,6 +1246,17 @@ auto models = client.models("all", {.connect_timeout = 5s, .read_timeout = 10s})
 never serialized into request JSON or copied into an error message. The same
 field-value representability check used for credentials rejects structural
 control bytes before a socket without imposing a Venice-specific key syntax.
+
+`RequestOptions::maximum_response_bytes` bounds decoded response-body bytes as
+they arrive. An engaged zero accepts only an empty body. Exceeding the ceiling
+on a successful response returns `ErrorKind::ResponseTooLarge`, preserves its
+status and response headers, and deliberately retains no body prefix. A known
+non-success HTTP status keeps its existing status classification with an empty
+body. Chat accumulators and speech callbacks keep only complete chunks accepted
+before the crossing chunk; the call still fails. Cancellation wins a race with
+the ceiling. The pinned HTTP transport cannot attach a response receiver to its
+multipart convenience API, so a ceiling on a multipart request is rejected as
+`InvalidArg` before opening a socket rather than silently becoming unbounded.
 
 Cancellation needs a second thread, necessarily: the calling thread is blocked
 inside the transport, so nothing on it can run.
