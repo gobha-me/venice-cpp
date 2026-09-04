@@ -1172,7 +1172,6 @@ class Client {
       }
       try {
         const auto j = nlohmann::json::parse(payload);
-        acc.note_envelope(j);
         for_each_delta_from_chunk(j, [&](const StreamDelta& d) {
           if (terminal != StreamTerminal::None) return;
           acc.ingest(d);

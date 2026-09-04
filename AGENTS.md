@@ -171,6 +171,16 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   and `[DONE]` makes later frames inert. Cancellation still wins every race and
   callback `false` remains deliberate partial success. The caller's
   `StreamAccumulator` retains every delta ingested before any failure (VC-49).
+- **Chat web-search citations are strict optional snapshots, not text
+  decorations.** VC-60's 2026-09-04 bounded live capture carried one final
+  citation-only envelope after usage: ten ordered entries, each with string
+  `title`, `url`, `content` and `date`, and no id or index. `ChatCitation`
+  exposes those capture-proven leaves (`content`/`date` remain optional per the
+  published schema), while `StreamDelta` owns its typed values and the
+  accumulator/`ChatResponse` preserve order and duplicates. Absence differs
+  from an explicit empty list. Malformed containers/entries and different
+  repeated snapshots are `Parse`; an identical retransmission is compatible,
+  but no append/replace/dedup rule exists. Raw chunks/body remain the superset.
 - **Range checking: none, deliberately — representability checking: yes.**
   Structural preconditions that make a request unsendable by construction are
   `ErrorKind::InvalidArg`, checked in `Client::validate` before any socket: an

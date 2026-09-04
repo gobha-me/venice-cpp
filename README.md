@@ -31,8 +31,9 @@ right bridge.
   argument fragments are merged across a stream by index, never by position, and
   the opaque `thought_signature` some families require echoed on the next turn
   is carried back for you.
-- **`venice_parameters`** extension — web search, citations, character,
-  thinking toggles, with forward-compatible passthrough for unmodeled keys.
+- **`venice_parameters`** extension — web search, typed Chat citations,
+  character and thinking toggles, with forward-compatible passthrough for
+  unmodeled keys.
 - **Models list** (`/models`) — typed metadata per model: context window,
   fourteen capability flags (function calling, vision, reasoning, web search,
   …), and a full rate card with cache buckets and extended-context tiers, plus
@@ -1331,12 +1332,24 @@ what guarantees you cannot ask for the rich stream and then lose it.
 
 A `StreamDelta` is one choice within an SSE frame: `content`,
 `reasoning_content`, `role`,
-`finish_reason`, `refusal`, tool-call fragments, `usage`, `cost`, and `chunk`
+`finish_reason`, `refusal`, tool-call fragments, `usage`, `cost`, typed
+`citations`, and `chunk`
 pointing at the whole verbatim frame. Every field is optional because a frame carries some
 of them; an `n > 1` frame produces one callback per choice with the same
 `chunk` pointer and a distinct `choice_index`. It is a struct rather than a variant so that a future field is
-additive instead of an ABI break. **It is a view** — valid only for the duration
-of the callback. Anything worth keeping is already in the accumulator.
+additive instead of an ABI break. Most members are views valid only for the
+duration of the callback; `citations` owns its values so copying a delta during
+the callback is safe. Anything worth keeping is also in the accumulator.
+
+Chat web-search citations are `ChatCitation` values with required `title` and
+`url` strings plus optional `content` and `date`. They appear as
+`std::optional<std::vector<ChatCitation>>` on `StreamDelta` and `ChatResponse`:
+absence differs from an explicitly empty list, and order and duplicate entries
+are preserved. `StreamAccumulator` accepts an identical repeated snapshot but
+returns `ErrorKind::Parse` for a different repeated list; there is no
+capture-backed rule for append, replace or deduplication. Malformed containers
+or entries likewise fail as `Parse`, while the raw body/chunks remain the
+forward-compatible superset.
 
 The stream boundary fails closed. A successful response must carry
 `text/event-stream`; malformed or oversized events and typed-ingest failures

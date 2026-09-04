@@ -180,11 +180,14 @@ class SseFramer {
 
 // ── one chunk, as it arrived ──────────────────────────────────────────────
 //
-// A **view**, valid only for the duration of the callback that receives it. The
-// string_views and pointers borrow from the parsed chunk, which the transport
-// owns and destroys as soon as the callback returns. Anything worth keeping is
-// already in the accumulator; that asymmetry is deliberate, and it is why the
-// callback and the storage are separate objects rather than one.
+// Primarily a **view**, valid only for the duration of the callback that
+// receives it. The string_views and pointers borrow from the parsed chunk,
+// which the transport owns and destroys as soon as the callback returns.
+// Citations are the one owned member: strict parsing creates values rather than
+// views, and ownership keeps them valid for every copy made during a callback.
+// Anything worth keeping is also in the accumulator; that asymmetry is
+// deliberate, and it is why the callback and the storage are separate objects
+// rather than one.
 //
 // A struct of optionals rather than a variant, and this is the ticket's own
 // stated requirement rather than a style preference: "room for tool-call deltas
@@ -197,10 +200,10 @@ class SseFramer {
 //
 // One delta per choice in an SSE frame, not one per kind. The common n==1 case
 // remains one callback per frame; n>1 fans out only at the choice boundary.
-// Venice's final frame carries finish_reason and usage together, and a reasoning
-// model can emit reasoning_content and content in the same choice; a variant
-// would force either fanning one choice into several callbacks or dropping a
-// field.
+// Venice's final frame carries finish_reason and usage together, and a
+// reasoning model can emit reasoning_content and content in the same choice; a
+// variant would force either fanning one choice into several callbacks or
+// dropping a field.
 struct StreamDelta {
   // The whole verbatim chunk. Never null for a delta the accumulator produced.
   const nlohmann::json* chunk{nullptr};
@@ -236,14 +239,18 @@ struct StreamDelta {
   // lifetime: this is a view, and both die with `chunk`.
   const nlohmann::json* cost{nullptr};
   const nlohmann::json* prompt_logprobs{nullptr};
+  // Engaged empty differs from absent. Entries are owned so a callback can copy
+  // this delta without inheriting a second citation-specific lifetime rule.
+  std::optional<std::vector<ChatCitation>> citations{};
 
   // True when the chunk carried nothing this struct models. Not an error: Venice
   // sends role-only openers and empty keep-alive frames.
   [[nodiscard]] auto empty() const noexcept -> bool {
-    return !choice_index && !content && !reasoning_content && reasoning_details == nullptr &&
-           !thought_signature && !role && !finish_reason && !stop_reason && !refusal &&
-           logprobs == nullptr && tool_calls.empty() && usage == nullptr && cost == nullptr &&
-           prompt_logprobs == nullptr;
+    return !choice_index && !content && !reasoning_content &&
+           reasoning_details == nullptr && !thought_signature && !role &&
+           !finish_reason && !stop_reason && !refusal && logprobs == nullptr &&
+           tool_calls.empty() && usage == nullptr && cost == nullptr &&
+           prompt_logprobs == nullptr && !citations;
   }
 };
 
@@ -262,9 +269,11 @@ namespace detail {
 
 }  // namespace detail
 
-// Read one SSE chunk into a delta. Total — never throws, whatever the chunk
-// turns out to be. `frags` owns the tool-call fragments the returned span points
-// at, so it must outlive the delta.
+// Read one SSE chunk into a delta. Provider-shaped optional fields remain
+// tolerant, but a present citation container is strict and throws on malformed
+// entries so Client::chat_stream can return ErrorKind::Parse rather than erase
+// them into absence. `frags` owns the tool-call fragments the returned span
+// points at, so it must outlive the delta.
 //
 namespace detail {
 
@@ -282,6 +291,7 @@ namespace detail {
     if (const auto* c = opt_object(chunk, "cost")) d.cost = c;
     if (const auto it = chunk.find("prompt_logprobs"); it != chunk.end())
       d.prompt_logprobs = &*it;
+    d.citations = parse_chat_citations(chunk);
   }
   if (choice == nullptr || !choice->is_object()) return d;
 
@@ -369,6 +379,16 @@ class StreamAccumulator {
   // ambiguity the three-overload set is shaped to avoid — test/07stream/ pins
   // the non-convertibility with a static_assert so this cannot regress.
   void ingest(const StreamDelta& d) {
+    // Validate repeated snapshot compatibility before mutating any state. The
+    // measured stream carried exactly one citation frame; accepting an equal
+    // retransmission is lossless, but no evidence supports appending, replacing
+    // or deduplicating a different list.
+    if (d.citations && m_citations && *m_citations != *d.citations)
+      throw std::runtime_error{
+          "chat stream carried incompatible repeated web-search citations"};
+
+    if (d.chunk != nullptr && d.first_choice_in_chunk)
+      note_envelope(*d.chunk);
     if (d.chunk != nullptr && d.first_choice_in_chunk && m_keep_chunks)
       m_chunks.push_back(*d.chunk);
 
@@ -410,6 +430,8 @@ class StreamAccumulator {
     if (d.cost != nullptr) m_cost = d.cost->get<Price>();
     if (d.usage != nullptr) m_usage = d.usage->get<Usage>();
     if (d.prompt_logprobs != nullptr) m_prompt_logprobs = *d.prompt_logprobs;
+    if (d.citations && !m_citations)
+      m_citations = *d.citations;
 
     m_saw_anything = m_saw_anything || !d.empty();
   }
@@ -419,7 +441,6 @@ class StreamAccumulator {
   // delta view deliberately does not model id/model, and a caller who only had
   // this entry point would otherwise silently lose them.
   void ingest(const nlohmann::json& chunk) {
-    note_envelope(chunk);
     for_each_delta_from_chunk(chunk, [&](const StreamDelta& delta) { ingest(delta); });
   }
 
@@ -443,6 +464,7 @@ class StreamAccumulator {
     r.usage = m_usage;
     r.cost = m_cost;
     r.prompt_logprobs = m_prompt_logprobs;
+    r.citations = m_citations;
     for (const auto& [index, state] : m_choices) {
       ChatChoice choice;
       choice.index = index;
@@ -478,8 +500,9 @@ class StreamAccumulator {
     *this = StreamAccumulator{m_keep_chunks};
   }
 
-  // Set from the chunk envelope by chat_stream, which sees fields the delta
-  // view does not model.
+  // Set from the chunk envelope during delta ingest. Kept public for callers
+  // with an envelope-only integration, but Client and ingest(chunk) use the
+  // ordered ingest path so a malformed citation frame cannot mutate identity.
   void note_envelope(const nlohmann::json& chunk) {
     if (const auto* s = detail::opt_string_at(chunk, "id")) m_id = *s;
     if (const auto* s = detail::opt_string_at(chunk, "model")) m_model = *s;
@@ -567,6 +590,7 @@ class StreamAccumulator {
   std::optional<Usage> m_usage{};
   std::optional<Price> m_cost{};
   std::optional<nlohmann::json> m_prompt_logprobs{};
+  std::optional<std::vector<ChatCitation>> m_citations{};
   std::map<int, ChoiceState> m_choices{};
   std::vector<nlohmann::json> m_chunks{};
   bool m_keep_chunks{true};
