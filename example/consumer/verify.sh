@@ -14,6 +14,15 @@
 # needs no .gitignore entry.
 set -euo pipefail
 
+BUILD_PARALLEL=(--parallel)
+if [ -n "${VENICE_BUILD_JOBS:-}" ]; then
+  if [[ ! "${VENICE_BUILD_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "VENICE_BUILD_JOBS must be a positive integer" >&2
+    exit 2
+  fi
+  BUILD_PARALLEL+=("${VENICE_BUILD_JOBS}")
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONSUMER_DIR="${REPO_ROOT}/example/consumer"
 NAME="venice-cpp"                      # pinned in the root CMakeLists; see D2 there
@@ -25,6 +34,21 @@ trap 'rm -rf "${WORK}"' EXIT
 pass=0
 fail=0
 
+cares_cache_is() {
+  local build="$1"
+  local name="$2"
+  local expected="$3"
+  grep -Fqx "${name}:BOOL=${expected}" "${build}/CMakeCache.txt"
+}
+
+cares_source_sentinels_survived() {
+  local build="$1"
+  cares_cache_is "${build}" CARES_BUILD_TESTS ON \
+    && cares_cache_is "${build}" CARES_BUILD_CONTAINER_TESTS ON \
+    && cares_cache_is "${build}" CARES_BUILD_TOOLS ON \
+    && cares_cache_is "${build}" CARES_INSTALL ON
+}
+
 # Optional local speed-up: point at an existing _deps directory to reuse already
 # downloaded dependency sources. Deliberately unset in CI, where fetching for
 # real is part of what is being tested.
@@ -32,6 +56,7 @@ fail=0
 #   VENICE_DEPS_CACHE=/path/to/build/_deps example/consumer/verify.sh
 DEP_ARGS=()
 if [ -n "${VENICE_DEPS_CACHE:-}" ]; then
+  DEP_ARGS+=("-DFETCHCONTENT_SOURCE_DIR_C-ARES=${VENICE_DEPS_CACHE}/c-ares-src")
   DEP_ARGS+=("-DFETCHCONTENT_SOURCE_DIR_HTTPLIB=${VENICE_DEPS_CACHE}/httplib-src")
   DEP_ARGS+=("-DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=${VENICE_DEPS_CACHE}/nlohmann_json-src")
 fi
@@ -45,10 +70,12 @@ run_mode() {
   echo "── ${mode} ───────────────────────────────────────────────"
 
   if cmake -S "${CONSUMER_DIR}" -B "${build}" \
-        -DCONSUMER_MODE="${mode}" \
-        "${DEP_ARGS[@]}" \
-        "$@" > "${build}.log" 2>&1 \
-     && cmake --build "${build}" --parallel >> "${build}.log" 2>&1
+       -DCONSUMER_MODE="${mode}" \
+       "${DEP_ARGS[@]}" \
+       "$@" > "${build}.log" 2>&1 \
+     && { [ "${mode}" = find_package ] \
+          || cares_source_sentinels_survived "${build}"; } \
+     && cmake --build "${build}" "${BUILD_PARALLEL[@]}" >> "${build}.log" 2>&1
   then
     local got
     got="$("${build}/consumer")"
@@ -68,7 +95,12 @@ run_mode() {
 }
 
 # ── Mode 1: add_subdirectory ────────────────────────────────────────────────
-run_mode add_subdirectory -DVENICE_SOURCE_DIR="${REPO_ROOT}"
+run_mode add_subdirectory \
+  -DVENICE_SOURCE_DIR="${REPO_ROOT}" \
+  -DCARES_BUILD_TESTS:BOOL=ON \
+  -DCARES_BUILD_CONTAINER_TESTS:BOOL=ON \
+  -DCARES_BUILD_TOOLS:BOOL=ON \
+  -DCARES_INSTALL:BOOL=ON
 
 # ── Mode 2: FetchContent ────────────────────────────────────────────────────
 # A real consumer writes a public URL and a tag. We point at a throwaway repo
@@ -96,7 +128,11 @@ mkdir -p "${SNAPSHOT}"
 
 run_mode fetchcontent \
   -DVENICE_GIT_REPOSITORY="file://${SNAPSHOT}" \
-  -DVENICE_GIT_TAG="$(git -C "${SNAPSHOT}" rev-parse HEAD)"
+  -DVENICE_GIT_TAG="$(git -C "${SNAPSHOT}" rev-parse HEAD)" \
+  -DCARES_BUILD_TESTS:BOOL=ON \
+  -DCARES_BUILD_CONTAINER_TESTS:BOOL=ON \
+  -DCARES_BUILD_TOOLS:BOOL=ON \
+  -DCARES_INSTALL:BOOL=ON
 
 # ── Mode 3: installed find_package ──────────────────────────────────────────
 # Install the library only. The smoke binary and tests are off by their own
@@ -106,8 +142,16 @@ if {
   cmake -S "${REPO_ROOT}" -B "${WORK}/build-install" \
     -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
     "${DEP_ARGS[@]}" \
-    "-D${NAME}_BUILD_BIN=OFF" "-D${NAME}_TESTS=OFF"
-  cmake --build "${WORK}/build-install" --parallel
+    "-D${NAME}_BUILD_BIN=OFF" "-D${NAME}_TESTS=OFF" \
+    -DCARES_BUILD_TESTS:BOOL=ON \
+    -DCARES_BUILD_CONTAINER_TESTS:BOOL=ON \
+    -DCARES_BUILD_TOOLS:BOOL=ON \
+    -DCARES_INSTALL:BOOL=OFF
+  cares_cache_is "${WORK}/build-install" CARES_BUILD_TESTS ON
+  cares_cache_is "${WORK}/build-install" CARES_BUILD_CONTAINER_TESTS ON
+  cares_cache_is "${WORK}/build-install" CARES_BUILD_TOOLS ON
+  cares_cache_is "${WORK}/build-install" CARES_INSTALL OFF
+  cmake --build "${WORK}/build-install" "${BUILD_PARALLEL[@]}"
   cmake --install "${WORK}/build-install"
 } > "${WORK}/install.log" 2>&1
 then

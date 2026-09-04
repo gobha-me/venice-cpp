@@ -27,8 +27,9 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
 
 ## Dependencies
 
-- Transport: **cpp-httplib** (header-only). JSON: **nlohmann/json**
-  (header-only). TLS: **OpenSSL** (link-time; do NOT reimplement TLS).
+- Resolver: **c-ares** (compiled). Transport: **cpp-httplib** (header-only).
+  JSON: **nlohmann/json** (header-only). TLS: **OpenSSL** (link-time; do NOT
+  reimplement TLS).
 - Managed via `find_package` first, `FetchContent` fallback, 100% CMake. No
   conan/vcpkg unless the maintainer asks.
 - **Deps are opt-in via a list, not the filesystem.** A recipe in `cmake/deps/`
@@ -299,6 +300,29 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   normalized `Content-Type`; transcription is typed JSON or exact plain text.
   Provider-shaped `elements`, keyframes and legal `consents` stay raw JSON, and
   a smoke leg may consult the catalogue and quote but must never enqueue work.
+- **Presigned video retrieval is foreign-origin and credential-free.** It uses
+  mandatory byte and whole-operation ceilings, c-ares resolution under that
+  deadline, whole-answer-set public-address validation, and cpp-httplib's
+  hostname-to-address map to pin the connection without weakening TLS hostname
+  verification. Every redirect repeats that process. Never pass Venice auth,
+  caller headers, response bodies, URLs or foreign headers into diagnostics;
+  never poll, persist or call cleanup implicitly.
+- **c-ares has one explicit process-wide lifetime.** Applications initialize
+  their first `VideoDownloadRuntime` on the startup thread before creating any
+  application thread, not merely before creating download workers. They retain
+  at least one owner until every application-created thread has joined and then
+  destroy the final owner on the startup thread. Every c-ares consumer in the
+  process participates in this same `VideoDownloadRuntime` ownership
+  coordinator and lifetime; none owns a separate
+  `ares_library_init`/`ares_library_cleanup` pair. A download without a live
+  owner fails before DNS, but arbitrary application-thread ordering cannot be
+  detected, so violating these preconditions is unsupported caller misuse. The
+  final owner still waits for active resolver calls before cleanup; never add
+  lazy function-static initialization or cleanup on a request/worker path.
+- **Public-address policy follows allocation, not IPv6 shape.** Do not treat all
+  of `2000::/3` as reachable: unlisted Global Unicast space remains reserved by
+  IANA, including returned `3ffe::/16`. Update the checked allocation allowlist
+  and its lower/upper boundary matrix together when IANA changes the registry.
 - **Augment returns source material directly; it is not a chat flag.** Document
   parsing owns multipart bytes and selects typed JSON versus exact text from the
   actual successful Content-Type. Scrape and search keep separate request and
@@ -820,10 +844,11 @@ and PRs note what was actually run to verify.
   include paths; (4) `SameMinorVersion`, since at 0.x `SameMajorVersion` would
   claim 0.1.0 satisfies a request for 0.9.0 — revisit at 1.0.0.
   The public dependencies are the reason any of this needs thought: upstream's
-  library has none, ours has four, so `cmake/project-config.cmake.in` must
-  `find_dependency` each one, and `HTTPLIB_INSTALL` / `JSON_Install` are tied to
-  `venice-cpp_INSTALL` in the dep recipes so those targets land in an export set
-  when we install and stay out of a consumer's prefix when we don't.
+  library has none, ours has five, so `cmake/project-config.cmake.in` must
+  `find_dependency` each one, and `CARES_INSTALL` / `HTTPLIB_INSTALL` /
+  `JSON_Install` are tied to `venice-cpp_INSTALL` in the dep recipes so those
+  targets land in an export set when we install and stay out of a consumer's
+  prefix when we don't.
 - **`cmake/check_artifacts.cmake`** runs in enforce mode here (ctest:
   `artifact-check`) — every rule must report zero hits. Class A catches leftover
   template artifacts; Class B catches wiring drift that stays relevant for the

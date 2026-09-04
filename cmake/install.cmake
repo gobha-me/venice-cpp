@@ -23,7 +23,7 @@ include(CMakePackageConfigHelpers)
 set(_cfg_install_dir ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME})
 
 # ── Which public dependencies are vendored into this build ──────────────────
-# venice-cpp_lib links four packages at INTERFACE, i.e. publicly. Two of them come
+# venice-cpp_lib links five packages at INTERFACE, i.e. publicly. Three of them come
 # from cmake/deps/*.cmake, which prefers find_package and falls back to
 # FetchContent — so each is EITHER an IMPORTED target from an installed package OR
 # a real target built inside this build. That is exactly the distinction
@@ -35,8 +35,23 @@ set(_cfg_install_dir ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME})
 # _FOUND does not separate the two cases cleanly: on the installed path httplib
 # arrives only as httplib::httplib and a bare `httplib` target never exists, while
 # nlohmann_json's own config file *does* create a bare IMPORTED `nlohmann_json`
-# for pre-3.2 compatibility.
+# for pre-3.2 compatibility. c-ares is checked through its stable generic alias
+# so both its shared `c-ares` and optional static `c-ares_static` builds count.
 set(_vendored_deps "")
+if (TARGET c-ares::cares)
+  set(_cares_target c-ares::cares)
+  get_target_property(_cares_aliased_target c-ares::cares ALIASED_TARGET)
+  if (_cares_aliased_target)
+    set(_cares_target ${_cares_aliased_target})
+  endif ()
+  get_target_property(_cares_imported ${_cares_target} IMPORTED)
+  if (NOT _cares_imported)
+    list(APPEND _vendored_deps c-ares)
+  endif ()
+  unset(_cares_imported)
+  unset(_cares_aliased_target)
+  unset(_cares_target)
+endif ()
 foreach (_dep IN ITEMS httplib nlohmann_json)
   if (TARGET ${_dep})
     get_target_property(_dep_imported ${_dep} IMPORTED)

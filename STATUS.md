@@ -55,7 +55,15 @@ AGENTS.md (which holds standing conventions, not state).
 - `quote_video`, `queue_video`, `retrieve_video`, `cleanup_video` and
   `transcribe_video` — the complete Video family, with explicit paid-work and
   deletion boundaries, JSON/MP4 and JSON/text result unions, and no hidden
-  polling or media I/O (VC-29).
+  polling or media I/O (VC-29). `download_video` adds a separately bounded,
+  credential-free presigned-MP4 retrieval boundary: c-ares resolves each hop
+  under the whole-operation deadline, every answer must be public, cpp-httplib
+  connects only to the selected numeric address while retaining hostname TLS
+  verification, and redirects are independently revalidated. The c-ares
+  process lifetime starts before any application-created thread and ends only
+  after all such threads join, with every c-ares consumer sharing that ownership
+  coordinator; final cleanup also drains active resolvers. Unallocated IPv6
+  Global Unicast space fails closed (VC-60/#115).
 - `parse_document`, `scrape_web` and `search_web` — the complete Augment
   family, with owned multipart bytes, actual-media JSON/text selection, ordered
   tolerant search results and verbatim provider metadata (VC-32).
@@ -92,8 +100,9 @@ AGENTS.md (which holds standing conventions, not state).
 - Multipart filenames and media types are validated before transport (VC-50),
   so caller-owned upload metadata cannot inject MIME part headers or disposition
   parameters. File payload bytes remain unrestricted and byte-exact.
-- Header-only INTERFACE lib; cpp-httplib + nlohmann/json (header-only) +
-  OpenSSL (link-time). KDE/Qt-ready shape (UI-free, Qt-linkable).
+- Header-only INTERFACE lib; c-ares (compiled DNS) + cpp-httplib + nlohmann/json
+  (header-only) + OpenSSL (link-time). KDE/Qt-ready shape (UI-free,
+  Qt-linkable).
 - OpenAPI coverage: 48/49 operations implemented. The sole remainder is the
   evidence-backed retired `GET /billing/usage`, explicitly unsupported and
   checked in `cmake/openapi_manifest.json` (VC-35). Characters

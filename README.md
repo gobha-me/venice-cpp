@@ -77,8 +77,9 @@ right bridge.
 - **Video** — explicit quote/queue/retrieve/cleanup generation calls plus URL
   transcription. Retrieval preserves processing JSON or byte-exact MP4 based
   on the actual response media type; transcription likewise preserves typed
-  JSON or exact text. The client never polls, deletes, decodes, displays or
-  writes media implicitly.
+  JSON or exact text. Queue-returned presigned media can be downloaded through
+  a bounded credential-free operation with pinned public DNS answers. The
+  client never polls, deletes, decodes, displays or writes media implicitly.
 - **Augment** — owned multipart document parsing with typed JSON or exact text,
   plus direct web scrape and ordered web search calls. Stable render fields are
   typed, provider metadata remains in `raw`, and the client never writes or
@@ -157,14 +158,16 @@ invalid or unsupported input returns 2.
 Header-only library; consumers link the CMake target and get everything
 transitively:
 
+- [c-ares](https://github.com/c-ares/c-ares) — bounded asynchronous DNS
 - [cpp-httplib](https://github.com/yhirose/cpp-httplib) — HTTP transport (header-only)
 - [nlohmann/json](https://github.com/nlohmann/json) — JSON (header-only)
-- **OpenSSL** — TLS (the one link-time dependency; reimplementing TLS is
+- **OpenSSL** — TLS (reimplementing TLS is
   malpractice, so we link it)
 
 ## Usage
 
 ```cpp
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -555,6 +558,41 @@ if (!queued) return;
 `retrieve_video()` returns `VideoProcessing` or byte-exact `VideoMedia` from
 the successful response's actual JSON/MP4 media type. `cleanup_video()` is the
 explicit destructive operation; `success=false` remains a retryable value.
+
+If queueing returns a presigned `download_url`, retrieve it with explicit byte
+and whole-operation ceilings. This operation resolves every hop once, rejects
+the entire DNS answer set if any address is non-public, pins the selected
+numeric address while retaining the original hostname for TLS verification,
+and forwards no Venice or caller credentials:
+
+```cpp
+// Create the first owner on the startup thread before the application creates
+// any thread, not only before video-download workers. Keep an owner alive until
+// every application-created thread has joined, then destroy the final owner on
+// the startup thread. Startup fails closed if c-ares cannot initialize.
+auto video_download_runtime = venice::VideoDownloadRuntime::initialize();
+if (!video_download_runtime) return;
+
+const auto media = client.download_video({
+    .url = *queued->download_url,
+    .maximum_bytes = 64U * 1024U * 1024U,
+    .maximum_elapsed = std::chrono::minutes{2},
+});
+if (!media) return;  // cleanup remains an explicit, separately retryable call
+```
+
+`download_video()` fails before DNS when no live `VideoDownloadRuntime` owner
+exists. Multiple owners share one process-wide reference and may be nested only
+inside the same startup-to-shutdown lifetime. Every c-ares consumer in the
+process must participate in the same `VideoDownloadRuntime` ownership
+coordinator and lifetime; none may independently call `ares_library_init()` or
+`ares_library_cleanup()`. Create the first owner before the application creates
+any thread and destroy the final owner only after every application-created
+thread has joined. The library cannot enumerate arbitrary application threads,
+so violating this ordering is an unsupported caller error, not a misuse that
+`initialize()` can diagnose. Final destruction still waits for any active
+resolver call before performing the paired process cleanup.
+
 `transcribe_video()` accepts a caller-owned URL and returns typed JSON or exact
 plain text. Nothing polls, deletes, decodes, displays or writes media
 implicitly. Queue `elements`, keyframes and legal `consents` remain raw JSON so
@@ -1540,10 +1578,10 @@ Two things to know about that prefix:
 - **It may contain more than venice-cpp.** Dependencies are `find_package`-first
   with a FetchContent fallback, and a dependency built from source has to be
   installed alongside us — CMake cannot export a target's interface while
-  omitting an edge of it. Configure says which ones, by name. Install
+  omitting an edge of it. Configure says which ones, by name. Install c-ares,
   cpp-httplib and nlohmann/json as packages first and reconfigure for a prefix
-  holding only venice-cpp. Everything third-party is filed under its own name
-  (`share/doc/httplib/`, `share/licenses/httplib/`), never under ours.
+  holding only venice-cpp. Everything third-party is filed under its own package
+  name, never under ours.
 - **`venice-cpp_ROOT` is not usable as a shell environment variable** — POSIX
   variable names cannot contain a hyphen. Point consumers at the prefix with
   `-DCMAKE_PREFIX_PATH=` or `-Dvenice-cpp_DIR=<prefix>/lib/cmake/venice-cpp`.
