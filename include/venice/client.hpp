@@ -26,6 +26,7 @@
 //   * clone_voice(req)              -> expected<ClonedVoice>
 //   * quote/queue/retrieve/cleanup_audio(req)
 //   * quote/queue/retrieve/cleanup_video(req)
+//   * download_video(req)           -> expected<VideoMedia>
 //   * transcribe_video(req)         -> expected<VideoTranscriptionResult>
 //   * parse_document(req)           -> expected<DocumentParseResult>
 //   * scrape_web(req)               -> expected<WebScrapeResponse>
@@ -93,6 +94,7 @@
 #include "venice/options.hpp"
 #include "venice/stream.hpp"
 #include "venice/types.hpp"
+#include "venice/video_download.hpp"
 
 namespace venice {
 
@@ -1834,6 +1836,15 @@ class Client {
                                    std::string{"video retrieve parse: "} + e.what(),
                                    response->body, std::move(metadata)}};
     }
+  }
+
+  // Download a queue-returned presigned MP4 without forwarding this client's
+  // Venice authentication. DNS answers and every redirect hop are validated
+  // and pinned; the request's byte and whole-operation ceilings are mandatory.
+  [[nodiscard]] auto download_video(const VideoDownloadRequest& req,
+                                    const RequestOptions& opts = {}) const
+      -> std::expected<VideoMedia, Error> {
+    return detail::download_video(req, opts);
   }
 
   [[nodiscard]] auto cleanup_video(const VideoCleanupRequest& req,

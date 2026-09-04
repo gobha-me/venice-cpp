@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <initializer_list>
@@ -2073,6 +2074,16 @@ struct VideoMedia {
   std::string bytes{};
   std::string media_type{};
   ResponseMetadata metadata{};
+};
+
+// A presigned media URL is foreign-origin capability material, not a Venice API
+// request. Both ceilings are mandatory so a caller cannot accidentally create
+// an unbounded network operation; the bytes stay process-owned and are never
+// decoded or written by this library.
+struct VideoDownloadRequest {
+  std::string url{};
+  std::size_t maximum_bytes{};
+  std::chrono::milliseconds maximum_elapsed{};
 };
 
 namespace video_input {

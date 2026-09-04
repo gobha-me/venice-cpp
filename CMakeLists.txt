@@ -32,7 +32,7 @@ project(venice-cpp
 )
 
 # CMAKE_INSTALL_{INCLUDE,LIB,BIN}DIR, used by src/lib and cmake/install.cmake.
-# Included explicitly rather than inherited: httplib and nlohmann_json each
+# Included explicitly rather than inherited: c-ares, httplib, and nlohmann_json
 # include this module themselves, so those variables happen to exist today as a
 # side effect of the FetchContent path — and would not on the find_package path.
 include(GNUInstallDirs)
@@ -58,8 +58,8 @@ endif ()
 # The library itself is unconditional: it is the thing worth consuming.
 #
 # Declared above the dependency list because that list is gated on them, and
-# because cmake/deps/httplib.cmake and cmake/deps/nlohmann_json.cmake read
-# _INSTALL to decide whether to enable each dependency's own install rules.
+# because the c-ares, httplib, and nlohmann_json recipes read _INSTALL to decide
+# whether to enable each dependency's own install rules.
 # See cmake/install.cmake for why those must agree with ours.
 option(${PROJECT_NAME}_BUILD_BIN "Build the live-API smoke binary in src/bin"    ${PROJECT_IS_TOP_LEVEL})
 option(${PROJECT_NAME}_TESTS     "Build and register the test suite"             ${PROJECT_IS_TOP_LEVEL})
@@ -70,6 +70,7 @@ option(${PROJECT_NAME}_INSTALL   "Generate install / export / package-config rul
 # file that is not named here is never included, and a name here with no recipe
 # is a hard configure error.
 set(${PROJECT_NAME}_DEPS
+  c_ares         # c-ares       — bounded asynchronous DNS       (src/lib, public)
   catch2         # Catch2 v3     — test framework              (test/)
   httplib        # cpp-httplib   — HTTP/TLS transport          (src/lib, public)
   nlohmann_json  # nlohmann/json — JSON (de)serialization      (src/lib, public)
@@ -82,8 +83,9 @@ set(${PROJECT_NAME}_DEPS
 # The list above stays the single prune point — this only ever REMOVEs a name
 # from it, never adds one.
 #
-# httplib and nlohmann_json are never gated: they are *public* usage requirements
-# of the library itself, so every consumer needs them however it is built.
+# c-ares, httplib, and nlohmann_json are never gated: they are *public* usage
+# requirements of the library itself, so every consumer needs them however it is
+# built.
 if (NOT ${PROJECT_NAME}_TESTS)
   list(REMOVE_ITEM ${PROJECT_NAME}_DEPS catch2)
 endif ()

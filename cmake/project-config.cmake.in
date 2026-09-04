@@ -26,8 +26,8 @@
 include(CMakeFindDependencyMacro)
 
 # ⚠ Vendored-dependency shim. Substituted non-empty only when this package was
-# built with httplib / nlohmann_json fetched from source rather than found
-# installed. In that configuration `cmake --install` also placed those packages'
+# built with c-ares / httplib / nlohmann_json fetched from source rather than
+# found installed. In that configuration `cmake --install` also placed those packages'
 # config files inside THIS prefix, so the calls below have to see them even when
 # the consumer located us with -Dvenice-cpp_DIR=... rather than via
 # CMAKE_PREFIX_PATH.
@@ -52,6 +52,7 @@ endif ()
 # asking for the 0.18.3 that cmake/deps/httplib.cmake pins would reject a
 # perfectly good 0.19.
 find_dependency(OpenSSL)
+find_dependency(c-ares 1.34.0 CONFIG)
 find_dependency(httplib)
 find_dependency(nlohmann_json 3.11)
 

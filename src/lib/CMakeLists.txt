@@ -27,6 +27,7 @@ target_include_directories(${PROJECT_NAME}_lib
 target_compile_features(${PROJECT_NAME}_lib INTERFACE cxx_std_23)
 
 target_link_libraries(${PROJECT_NAME}_lib
+  INTERFACE c-ares::cares
   INTERFACE httplib::httplib
   INTERFACE nlohmann_json::nlohmann_json
 )
