@@ -2810,6 +2810,72 @@ struct ChatChoice {
   }
 };
 
+// One Venice web-search citation. The 2026-09-04 streaming capture and the
+// published Chat schema agree on these four fields and no others: title/url
+// are required strings, while content/date are optional strings. There is no
+// stable id or inline index on the wire, so vector position is the only order
+// exposed and equality is deliberately field-for-field.
+struct ChatCitation {
+  std::string title{};
+  std::string url{};
+  std::optional<std::string> content{};
+  std::optional<std::string> date{};
+
+  friend auto operator==(const ChatCitation&, const ChatCitation&)
+      -> bool = default;
+};
+
+namespace detail {
+
+// Strict only once the citation key is present. `venice_parameters` remains
+// tolerant metadata for every unrelated field, but a claimed citation list
+// must not collapse malformed data into the same state as no citations.
+[[nodiscard]] inline auto parse_chat_citations(const nlohmann::json& envelope)
+    -> std::optional<std::vector<ChatCitation>> {
+  const auto* params = opt_object(envelope, "venice_parameters");
+  if (params == nullptr)
+    return std::nullopt;
+
+  const auto found = params->find("web_search_citations");
+  if (found == params->end())
+    return std::nullopt;
+  if (!found->is_array())
+    throw std::runtime_error{
+        "chat venice_parameters.web_search_citations must be an array"};
+
+  std::vector<ChatCitation> citations;
+  citations.reserve(found->size());
+  for (const auto& item : *found) {
+    if (!item.is_object())
+      throw std::runtime_error{"chat web-search citation must be an object"};
+    const auto title = opt_string(item, "title");
+    const auto url = opt_string(item, "url");
+    if (!title || !url)
+      throw std::runtime_error{
+          "chat web-search citation title and url must be strings"};
+
+    ChatCitation citation;
+    citation.title = *title;
+    citation.url = *url;
+    if (const auto content = item.find("content"); content != item.end()) {
+      if (!content->is_string())
+        throw std::runtime_error{
+            "chat web-search citation content must be a string"};
+      citation.content = content->get<std::string>();
+    }
+    if (const auto date = item.find("date"); date != item.end()) {
+      if (!date->is_string())
+        throw std::runtime_error{
+            "chat web-search citation date must be a string"};
+      citation.date = date->get<std::string>();
+    }
+    citations.push_back(std::move(citation));
+  }
+  return citations;
+}
+
+}  // namespace detail
+
 struct ChatResponse {
   std::string id{};
   std::string model{};
@@ -2884,6 +2950,10 @@ struct ChatResponse {
   // so on. Echoed back on the response and previously discarded, so a caller
   // could not tell whether the venice_parameters they asked for took effect.
   std::optional<nlohmann::json> venice_parameters{};
+  // Absent means the response carried no citation field. Engaged empty means
+  // it explicitly carried `web_search_citations: []`. Wire order and duplicate
+  // entries are preserved; no id or index exists on the measured entries.
+  std::optional<std::vector<ChatCitation>> citations{};
 
   // Parse the non-streaming /chat/completions response body. Throws
   // nlohmann::json exceptions on malformed input — callers wrap in expected.
@@ -2902,6 +2972,7 @@ struct ChatResponse {
     r.created = detail::opt_i64(j, "created");
     r.system_fingerprint = detail::opt_string(j, "system_fingerprint");
     if (const auto* vp = detail::opt_object(j, "venice_parameters")) r.venice_parameters = *vp;
+    r.citations = detail::parse_chat_citations(j);
 
     const auto& choices = j.at("choices");
     if (!choices.is_array()) throw std::runtime_error{"chat choices is not an array"};

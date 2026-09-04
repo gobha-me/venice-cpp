@@ -95,6 +95,32 @@ constexpr auto kReplyBody = R"({
            "completion_tokens_details":{"reasoning_tokens":15}},
   "cost":{"usd":0,"diem":0.001089404}})";
 
+// SANITIZED LIVE CAPTURE, 2026-09-04, api.venice.ai. One cheapest
+// supportsWebSearch model was selected from the live catalogue, then one
+// 32-token-capped streaming request enabled web search, citations and streamed
+// search results. It produced 14 JSON frames plus [DONE]: choice-bearing frames
+// 0..11, usage/cost at 12, and this citation-only envelope at 13. The one
+// citation list had ten entries; every entry had exactly four string fields
+// (content, date, title, url), no id and no inline index. No second citation
+// frame occurred, so this capture supplies no cumulative/incremental merge
+// rule. Every server value below is irreversibly replaced with a redaction
+// marker; no prompt, response content, URL, model id, headers or raw body is
+// retained.
+constexpr auto kSanitizedCitationChunk = R"({
+  "venice_parameters":{"web_search_citations":[
+    {"content":"<redacted>","date":"<redacted>","title":"<redacted>","url":"<redacted>"},
+    {"content":"<redacted>","date":"<redacted>","title":"<redacted>","url":"<redacted>"},
+    {"content":"<redacted>","date":"<redacted>","title":"<redacted>","url":"<redacted>"},
+    {"content":"<redacted>","date":"<redacted>","title":"<redacted>","url":"<redacted>"},
+    {"content":"<redacted>","date":"<redacted>","title":"<redacted>","url":"<redacted>"},
+    {"content":"<redacted>","date":"<redacted>","title":"<redacted>","url":"<redacted>"},
+    {"content":"<redacted>","date":"<redacted>","title":"<redacted>","url":"<redacted>"},
+    {"content":"<redacted>","date":"<redacted>","title":"<redacted>","url":"<redacted>"},
+    {"content":"<redacted>","date":"<redacted>","title":"<redacted>","url":"<redacted>"},
+    {"content":"<redacted>","date":"<redacted>","title":"<redacted>","url":"<redacted>"}
+  ]}
+})";
+
 auto reply() -> ChatResponse {
   return ChatResponse::from_json_body(nlohmann::json::parse(kReplyBody));
 }
@@ -465,6 +491,58 @@ TEST_CASE("raw holds the whole body, including what nothing models", "[response]
   // Unknown choice and envelope keys remain deliberately untyped; this is what
   // makes retaining raw honest rather than lossy.
   REQUIRE(r.raw.at("choices").at(0).at("index") == 0);
+}
+
+TEST_CASE("Chat citations distinguish absence empty and malformed shapes",
+          "[response][citation][parse][failure]") {
+  const auto absent = ChatResponse::from_json_body(
+      nlohmann::json::parse(R"({"choices":[],"venice_parameters":{}})"));
+  REQUIRE_FALSE(absent.citations.has_value());
+
+  const auto empty = ChatResponse::from_json_body(nlohmann::json::parse(
+      R"({"choices":[],"venice_parameters":{"web_search_citations":[]}})"));
+  REQUIRE(empty.citations.has_value());
+  REQUIRE(empty.citations->empty());
+
+  const auto malformed = std::vector<nlohmann::json>{
+      nullptr,
+      nlohmann::json::object(),
+      "not-an-array",
+      nlohmann::json::array({nullptr}),
+      nlohmann::json::array({nlohmann::json{{"url", "u"}}}),
+      nlohmann::json::array({nlohmann::json{{"title", "t"}}}),
+      nlohmann::json::array({nlohmann::json{{"title", 1}, {"url", "u"}}}),
+      nlohmann::json::array({nlohmann::json{{"title", "t"}, {"url", 1}}}),
+      nlohmann::json::array(
+          {nlohmann::json{{"title", "t"}, {"url", "u"}, {"content", nullptr}}}),
+      nlohmann::json::array(
+          {nlohmann::json{{"title", "t"}, {"url", "u"}, {"date", false}}}),
+  };
+  for (const auto& citations : malformed) {
+    INFO("shape: " << citations.type_name());
+    const nlohmann::json body{
+        {"choices", nlohmann::json::array()},
+        {"venice_parameters", {{"web_search_citations", citations}}}};
+    REQUIRE_THROWS(ChatResponse::from_json_body(body));
+  }
+}
+
+TEST_CASE("Chat citations preserve wire order duplicates and optional leaves",
+          "[response][citation][parse][failure]") {
+  const auto response = ChatResponse::from_json_body(nlohmann::json::parse(R"({
+    "choices":[],"venice_parameters":{"web_search_citations":[
+      {"title":"A","url":"u-a","content":"snippet","date":"d"},
+      {"title":"B","url":"u-b"},
+      {"title":"A","url":"u-a","content":"snippet","date":"d"}
+    ]}})"));
+
+  REQUIRE(response.citations.has_value());
+  REQUIRE(response.citations->size() == 3);
+  REQUIRE(response.citations->at(0).title == "A");
+  REQUIRE(response.citations->at(1).title == "B");
+  REQUIRE_FALSE(response.citations->at(1).content.has_value());
+  REQUIRE_FALSE(response.citations->at(1).date.has_value());
+  REQUIRE(response.citations->at(0) == response.citations->at(2));
 }
 
 TEST_CASE("the fields the old parse discarded are all present", "[response][parse]") {
@@ -958,6 +1036,22 @@ TEST_CASE("a frame split across chunk boundaries is reassembled", "[stream][fram
   }
 }
 
+TEST_CASE("a citation-only final frame survives partial SSE delivery",
+          "[stream][framer][citation][failure]") {
+  const std::string whole = std::string{"data: "} +
+                            nlohmann::json::parse(kSanitizedCitationChunk).dump() +
+                            "\n\n";
+  const auto split = whole.find("web_search_citations") + 5U;
+  const auto seen = framed({whole.substr(0, split), whole.substr(split)});
+
+  REQUIRE(seen.size() == 1);
+  const auto chunk = nlohmann::json::parse(seen.front());
+  std::vector<ToolCall> fragments;
+  const auto delta = venice::delta_from_chunk(chunk, fragments);
+  REQUIRE(delta.citations.has_value());
+  REQUIRE(delta.citations->size() == 10);
+}
+
 TEST_CASE("lines that are not data: are ignored", "[stream][framer][failure]") {
   SECTION("an event with no data line yields nothing") {
     REQUIRE(framed({": keep-alive comment\n\n"}).empty());
@@ -1036,7 +1130,8 @@ auto delta_of(const char* body, std::vector<ToolCall>& frags) -> venice::StreamD
 
 }  // namespace
 
-TEST_CASE("delta_from_chunk never throws", "[stream][delta][failure]") {
+TEST_CASE("delta_from_chunk stays tolerant outside a present citation contract",
+          "[stream][delta][failure]") {
   const auto shapes = std::vector<std::string>{
       R"({})",
       R"([])",
@@ -1057,6 +1152,53 @@ TEST_CASE("delta_from_chunk never throws", "[stream][delta][failure]") {
     std::vector<ToolCall> frags;
     REQUIRE_NOTHROW(delta_of(s.c_str(), frags));
   }
+}
+
+TEST_CASE("the sanitized live citation envelope is a typed owned delta",
+          "[stream][delta][citation][live]") {
+  venice::StreamDelta captured;
+  {
+    const auto chunk = nlohmann::json::parse(kSanitizedCitationChunk);
+    std::vector<ToolCall> frags;
+    captured = venice::delta_from_chunk(chunk, frags);
+    REQUIRE(captured.chunk == &chunk);
+    REQUIRE(captured.citations.has_value());
+    REQUIRE(captured.citations->size() == 10);
+    REQUIRE_FALSE(captured.empty());
+  }
+
+  // `chunk` and every ordinary delta view above are now gone. Citation values
+  // remain usable because that member owns its strings instead of borrowing a
+  // callback-local parse tree.
+  REQUIRE(captured.citations.has_value());
+  REQUIRE(captured.citations->front().title == "<redacted>");
+  REQUIRE(captured.citations->front().content == "<redacted>");
+}
+
+TEST_CASE("malformed streamed citation payloads throw before observation",
+          "[stream][delta][citation][failure]") {
+  for (
+      const auto* body : {
+          R"({"venice_parameters":{"web_search_citations":null}})",
+          R"({"venice_parameters":{"web_search_citations":{}}})",
+          R"({"venice_parameters":{"web_search_citations":[false]}})",
+          R"({"venice_parameters":{"web_search_citations":[{"title":"t"}]}})",
+          R"({"venice_parameters":{"web_search_citations":[{"title":"t","url":"u","date":1}]}})",
+      }) {
+    INFO(body);
+    std::vector<ToolCall> frags;
+    REQUIRE_THROWS(delta_of(body, frags));
+  }
+}
+
+TEST_CASE("an explicit empty streamed citation list is not absence",
+          "[stream][delta][citation][failure]") {
+  std::vector<ToolCall> fragments;
+  const auto delta = delta_of(
+      R"({"venice_parameters":{"web_search_citations":[]}})", fragments);
+  REQUIRE(delta.citations.has_value());
+  REQUIRE(delta.citations->empty());
+  REQUIRE_FALSE(delta.empty());
 }
 
 TEST_CASE("an absent content key differs from an empty one", "[stream][delta][failure]") {
@@ -1120,7 +1262,6 @@ auto accumulate(const std::vector<std::string>& chunks) -> venice::StreamAccumul
   venice::StreamAccumulator acc;
   for (const auto& c : chunks) {
     const auto j = nlohmann::json::parse(c);
-    acc.note_envelope(j);
     acc.ingest(j);
   }
   return acc;
@@ -1441,6 +1582,60 @@ TEST_CASE("reset clears cost", "[stream][accumulator][cost]") {
   REQUIRE_FALSE(acc.response().cost.has_value());
 }
 
+TEST_CASE("citations arriving after content and usage survive assembly",
+          "[stream][accumulator][citation][failure]") {
+  const auto acc = accumulate({
+      R"({"choices":[{"delta":{"role":"assistant","reasoning_content":"think "}}]})",
+      R"({"choices":[{"delta":{"content":"answer"}}]})",
+      R"({"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}})",
+      kSanitizedCitationChunk,
+  });
+  const auto response = acc.response();
+  REQUIRE(response.content == "answer");
+  REQUIRE(response.message->reasoning_content == "think ");
+  REQUIRE(response.usage->total_tokens == 3);
+  REQUIRE(response.citations.has_value());
+  REQUIRE(response.citations->size() == 10);
+  REQUIRE(acc.chunks().size() == 4);
+}
+
+TEST_CASE("repeated citation frames must be identical snapshots",
+          "[stream][accumulator][citation][failure]") {
+  const auto first = R"({"id":"accepted-id","venice_parameters":{"web_search_citations":[
+    {"title":"A","url":"u-a"},{"title":"A","url":"u-a"}]}})";
+
+  SECTION("an identical repeat is compatible and keeps list duplicates") {
+    const auto acc = accumulate({first, first});
+    REQUIRE(acc.response().citations.has_value());
+    REQUIRE(acc.response().citations->size() == 2);
+    REQUIRE(acc.chunks().size() == 2); // raw repeated frames remain exact
+  }
+
+  SECTION("a changed repeat throws without replacing the accepted snapshot") {
+    venice::StreamAccumulator acc;
+    acc.ingest(nlohmann::json::parse(first));
+    REQUIRE_THROWS(acc.ingest(nlohmann::json::parse(R"({
+      "id":"rejected-id",
+      "venice_parameters":{"web_search_citations":[{"title":"B","url":"u-b"}]}
+    })")));
+    const auto response = acc.response();
+    REQUIRE(response.id == "accepted-id");
+    REQUIRE(response.citations.has_value());
+    REQUIRE(response.citations->size() == 2);
+    REQUIRE(response.citations->front().title == "A");
+  }
+}
+
+TEST_CASE("citation state resets and works without raw chunk retention",
+          "[stream][accumulator][citation]") {
+  venice::StreamAccumulator acc{/*keep_chunks=*/false};
+  acc.ingest(nlohmann::json::parse(kSanitizedCitationChunk));
+  REQUIRE(acc.response().citations.has_value());
+  REQUIRE(acc.chunks().empty());
+  acc.reset();
+  REQUIRE_FALSE(acc.response().citations.has_value());
+}
+
 TEST_CASE("empty() distinguishes nothing-arrived from no-content-arrived",
           "[stream][accumulator][failure]") {
   // The old fatal-parse test was "content is empty", which reported
@@ -1454,8 +1649,8 @@ TEST_CASE("ingest(chunk) is complete on its own", "[stream][accumulator][failure
   // The chunk overload is the entry point for a caller driving their own
   // transport. StreamDelta deliberately does not model id/model — they are
   // envelope fields, not deltas — so this overload has to take them itself or
-  // that caller silently loses them. The accumulate() helper above calls
-  // note_envelope separately and would not have caught this.
+  // that caller silently loses them. The accumulate() helper above deliberately
+  // uses only this entry point, so it cannot mask the loss with a separate call.
   venice::StreamAccumulator acc;
   acc.ingest(nlohmann::json::parse(
       R"({"id":"chatcmpl-9","model":"m","choices":[{"delta":{"content":"x"}}]})"));
@@ -1507,7 +1702,8 @@ TEST_CASE("reset clears everything but the retention setting", "[stream][accumul
 
 TEST_CASE("a streamed reply assembles to the same message as a non-streamed one",
           "[stream][accumulator][converge]") {
-  const auto non_streamed = ChatResponse::from_json_body(nlohmann::json::parse(R"({
+  const auto non_streamed =
+      ChatResponse::from_json_body(nlohmann::json::parse(R"({
     "id":"chatcmpl-1","model":"deepseek-r1",
     "choices":[{"index":0,"finish_reason":"tool_calls","message":{
       "role":"assistant","reasoning_content":"step one, step two",
@@ -1519,7 +1715,12 @@ TEST_CASE("a streamed reply assembles to the same message as a non-streamed one"
     "usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,
              "prompt_tokens_details":{"cached_tokens":4},
              "completion_tokens_details":{"reasoning_tokens":15}},
-    "cost":{"usd":0,"diem":0.001089404}})"));
+    "cost":{"usd":0,"diem":0.001089404},
+    "venice_parameters":{"web_search_citations":[
+      {"title":"A","url":"u-a","content":"snippet","date":"d"},
+      {"title":"B","url":"u-b"},
+      {"title":"A","url":"u-a","content":"snippet","date":"d"}
+    ]}})"));
 
   // The same reply as chunks: mid-word content splits, a two-fragment
   // arguments, an id present only in the opening fragment, the second call
@@ -1541,6 +1742,10 @@ TEST_CASE("a streamed reply assembles to the same message as a non-streamed one"
            "prompt_tokens_details":{"cached_tokens":4},
            "completion_tokens_details":{"reasoning_tokens":15}},
            "cost":{"usd":0,"diem":0.001089404}})",
+      R"({"venice_parameters":{"web_search_citations":[
+           {"title":"A","url":"u-a","content":"snippet","date":"d"},
+           {"title":"B","url":"u-b"},
+           {"title":"A","url":"u-a","content":"snippet","date":"d"}]}})",
   });
   const auto streamed = acc.response();
 
@@ -1555,6 +1760,10 @@ TEST_CASE("a streamed reply assembles to the same message as a non-streamed one"
   REQUIRE(streamed.usage == non_streamed.usage);
   REQUIRE(streamed.content == non_streamed.content);
   REQUIRE(streamed.cost == non_streamed.cost);
+  REQUIRE(streamed.citations == non_streamed.citations);
+  REQUIRE(streamed.citations.has_value());
+  REQUIRE(streamed.citations->size() == 3);
+  REQUIRE(streamed.citations->front() == streamed.citations->back());
   // The literal, not only the equality — see the section note. Without this
   // line a read deleted from BOTH paths leaves the comparison above green.
   // has_value() first because that break is exactly what leaves cost

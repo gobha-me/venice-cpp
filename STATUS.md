@@ -118,6 +118,32 @@ have since landed there as CT-14.
 
 ## Next up
 
+**VC-60 (#110) is implemented for the next release.** Chat Completions now
+exposes strict typed web-search citations through `StreamDelta`,
+`StreamAccumulator` and `ChatResponse`. The optional list distinguishes absent
+from explicitly empty; every `ChatCitation` owns required title/url and
+optional content/date strings; wire order and duplicate entries survive
+unchanged. A present wrong container, invalid entry or incompatible repeated
+snapshot terminates as `ErrorKind::Parse` rather than disappearing into
+absence. Raw response bodies and retained stream chunks remain the
+forward-compatible superset.
+
+The contract is grounded in one sanitized, cheapest-capable, 32-token-capped
+live streaming capture on 2026-09-04. It carried 14 JSON frames plus `[DONE]`:
+choice frames 0–11, usage/cost at 12, then a citation-only envelope at 13 with
+ten entries. Every entry carried string content/date/title/url and no stable id
+or inline index; no second citation frame arrived. Only that structure and
+counts are retained in the fixture—all prompt, response, URL, model, header and
+raw-body values were discarded. Because the wire supplied no merge evidence,
+the accumulator accepts only a field-for-field equal repeated typed snapshot
+and rejects a changed one; it never appends, replaces or deduplicates entries.
+
+Failure-first coverage pins absent/empty/malformed states, every required and
+optional leaf, ordering/duplicates, owned callback lifetime, citation-only final
+frames after interleaved content/reasoning/usage, partial SSE framing,
+compatible/incompatible repeats, cancellation, deliberate early stop and
+buffered/streamed convergence.
+
 **VC-59 (#94) is implemented for v0.29.15.** Venice's first-party Structured
 Responses guide and generated Chat Completions reference disagree on whether
 `response_format.json_schema` is OpenAI's `name` / `strict` / nested `schema`

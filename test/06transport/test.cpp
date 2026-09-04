@@ -2092,6 +2092,13 @@ class TestServer {
                          "application/json");
                      return;
                    }
+                   if (model == "buffered-bad-citations") {
+                     res.set_content(
+                         R"({"id":"buffered-chat","choices":[],"venice_parameters":{
+                              "web_search_citations":{"title":"not-a-list"}}})",
+                         "application/json");
+                     return;
+                   }
                    const nlohmann::json response{
                        {"id", "buffered-chat"},
                        {"seen_authorization", bearer},
@@ -2129,6 +2136,42 @@ class TestServer {
                            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":"
                            "18446744073709551615,"
                            "\"completion_tokens\":2,\"total_tokens\":3}}\n\n",
+                       "text/event-stream");
+                   return;
+                 }
+                 if (model == "stream-bad-citations-after-content") {
+                   res.set_content(
+                       first_frame +
+                           "data: "
+                           "{\"venice_parameters\":{\"web_search_citations\":"
+                           "[false]}}\n\n",
+                       "text/event-stream");
+                   return;
+                 }
+                 if (model == "stream-incompatible-citations") {
+                   res.set_content(
+                       first_frame +
+                           "data: "
+                           "{\"venice_parameters\":{\"web_search_citations\":"
+                           "[{\"title\":\"A\",\"url\":\"u-a\"}]}}\n\n"
+                           "data: "
+                           "{\"venice_parameters\":{\"web_search_citations\":"
+                           "[{\"title\":\"B\",\"url\":\"u-b\"}]}}\n\n",
+                       "text/event-stream");
+                   return;
+                 }
+                 if (model == "stream-citations-complete") {
+                   res.set_content(
+                       first_frame +
+                           "data: "
+                           "{\"choices\":[],\"usage\":{\"prompt_tokens\":1,"
+                           "\"completion_tokens\":2,\"total_tokens\":3}}\n\n"
+                           "data: "
+                           "{\"venice_parameters\":{\"web_search_citations\":["
+                           "{\"title\":\"A\",\"url\":\"u-a\",\"content\":\"s\","
+                           "\"date\":\"d\"},{\"title\":\"A\",\"url\":\"u-a\","
+                           "\"content\":\"s\",\"date\":\"d\"}]}}\n\n"
+                           "data: [DONE]\n\n",
                        "text/event-stream");
                    return;
                  }
@@ -4518,6 +4561,116 @@ TEST_CASE("Chat SSE protocol failures are terminal and preserve accepted deltas"
       if (model == "stream-overflow")
         REQUIRE(result.error().message.find("8 MiB") != std::string::npos);
     }
+  }
+}
+
+TEST_CASE("malformed Chat citations become Parse on both delivery paths",
+          "[transport][stream][citation][failure]") {
+  const TestServer server;
+  const Client client{"stream-key", server.base_url()};
+
+  auto buffered_request = minimal_chat();
+  buffered_request.model = "buffered-bad-citations";
+  const auto buffered = client.chat(buffered_request);
+  REQUIRE_FALSE(buffered.has_value());
+  REQUIRE(buffered.error().kind == ErrorKind::Parse);
+  REQUIRE(buffered.error().status == 200);
+
+  auto streamed_request = minimal_chat();
+  streamed_request.model = "stream-bad-citations-after-content";
+  venice::StreamAccumulator acc;
+  int callbacks = 0;
+  const auto streamed = client.chat_stream(streamed_request, acc,
+                                           [&](const venice::StreamDelta&) {
+                                             ++callbacks;
+                                             return true;
+                                           });
+  REQUIRE_FALSE(streamed.has_value());
+  REQUIRE(streamed.error().kind == ErrorKind::Parse);
+  REQUIRE(streamed.error().status == 200);
+  REQUIRE(callbacks == 1);
+  REQUIRE(acc.message().text() == "a");
+  REQUIRE_FALSE(acc.response().citations.has_value());
+}
+
+TEST_CASE(
+    "incompatible repeated Chat citation frames fail after accepted state",
+    "[transport][stream][citation][failure]") {
+  const TestServer server;
+  const Client client{"stream-key", server.base_url()};
+  auto request = minimal_chat();
+  request.model = "stream-incompatible-citations";
+  venice::StreamAccumulator acc;
+  int callbacks = 0;
+
+  const auto result =
+      client.chat_stream(request, acc, [&](const venice::StreamDelta&) {
+        ++callbacks;
+        return true;
+      });
+
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().kind == ErrorKind::Parse);
+  REQUIRE(callbacks == 2); // content and the first, compatible snapshot
+  REQUIRE(acc.response().citations.has_value());
+  REQUIRE(acc.response().citations->size() == 1);
+  REQUIRE(acc.response().citations->front().title == "A");
+  REQUIRE(acc.chunks().size() == 2); // the incompatible frame was not accepted
+}
+
+TEST_CASE(
+    "Chat citation deltas complete stop early and cancel without data loss",
+    "[transport][stream][citation][cancel]") {
+  const TestServer server;
+  const Client client{"stream-key", server.base_url()};
+  auto request = minimal_chat();
+  request.model = "stream-citations-complete";
+
+  SECTION(
+      "normal completion exposes the same citations in callback and response") {
+    venice::StreamAccumulator acc;
+    std::optional<std::vector<venice::ChatCitation>> observed;
+    const auto result =
+        client.chat_stream(request, acc, [&](const venice::StreamDelta& delta) {
+          if (delta.citations)
+            observed = delta.citations;
+          return true;
+        });
+    REQUIRE(result.has_value());
+    REQUIRE(observed.has_value());
+    REQUIRE(observed->size() == 2);
+    REQUIRE(result->citations == observed);
+    REQUIRE(result->usage->total_tokens == 3);
+  }
+
+  SECTION("callback false retains the citation frame in partial success") {
+    venice::StreamAccumulator acc;
+    const auto result =
+        client.chat_stream(request, acc, [](const venice::StreamDelta& delta) {
+          return !delta.citations.has_value();
+        });
+    REQUIRE(result.has_value());
+    REQUIRE(result->citations.has_value());
+    REQUIRE(result->citations->size() == 2);
+    REQUIRE(acc.response().citations == result->citations);
+  }
+
+  SECTION(
+      "cancellation wins while the caller-owned accumulator keeps citations") {
+    venice::CancelToken token;
+    venice::StreamAccumulator acc;
+    const auto result =
+        client.chat_stream(request, acc,
+                           [&](const venice::StreamDelta& delta) {
+                             if (delta.citations)
+                               token.cancel();
+                             return true;
+                           },
+                           {.cancel = &token});
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().kind == ErrorKind::Cancelled);
+    REQUIRE(acc.response().citations.has_value());
+    REQUIRE(acc.response().citations->size() == 2);
   }
 }
 
