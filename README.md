@@ -1515,7 +1515,7 @@ add_subdirectory(third_party/venice-cpp)
 include(FetchContent)
 FetchContent_Declare(venice-cpp
   GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-  GIT_TAG        v0.29.16)
+  GIT_TAG        v0.29.17)
 FetchContent_MakeAvailable(venice-cpp)
 
 # 3. An installed package
