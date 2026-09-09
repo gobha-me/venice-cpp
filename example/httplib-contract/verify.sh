@@ -73,6 +73,7 @@ accept installed -DCMAKE_PREFIX_PATH="${WORK}/installed" -DPROBE_EXPECT_IMPORTED
 PROFILE=("-DPROBE_HEADER_DIR=${SOURCE}" -DPROBE_PREEXISTING=interface \
   -DPROBE_DEFINITIONS=CPPHTTPLIB_OPENSSL_SUPPORT)
 accept preexisting "${PROFILE[@]}"
+accept prefix-aliases "${PROFILE[@]}" -DPROBE_PREEXISTING=prefix-aliases
 reject compiled "${PROFILE[@]}" -DPROBE_PREEXISTING=compiled
 reject missing-tls "${PROFILE[@]}" -DPROBE_DEFINITIONS=
 reject missing-tls-link "${PROFILE[@]}" -DPROBE_PREEXISTING=missing-tls-link

@@ -23,6 +23,9 @@ synthetic loopback fixtures; no provider, credential or cluster is involved.
 - Install/export includes the compatibility check and its actual public
   dependencies. Required and optional package discovery both have honest failure
   behavior. CMake and compile-time guards reject incompatible actual headers.
+- Visible aliases inside link generator expressions resolve as exact tokens.
+  Prefix-related aliases retain distinct targets and the original link interface
+  remains unchanged; replacement text is never processed as another alias.
 
 ## Existing runtime contracts to preserve
 
