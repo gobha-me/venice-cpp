@@ -160,7 +160,9 @@ then
   # and #include <venice/venice.hpp> resolve through.
   for want in "lib/cmake/${NAME}/${NAME}Config.cmake" \
               "lib/cmake/${NAME}/${NAME}Targets.cmake" \
-              "include/venice/venice.hpp"; do
+              "include/venice/venice.hpp" \
+              "include/venice/detail/httplib_contract.hpp" \
+              "lib/cmake/${NAME}/httplib-contract.cmake"; do
     if [ ! -f "${PREFIX}/${want}" ]; then
       echo "FAIL install layout: ${want} missing from the prefix"
       fail=$((fail + 1))
@@ -179,6 +181,18 @@ then
 else
   echo "FAIL find_package: could not build and install the project"
   tail -n 30 "${WORK}/install.log" | sed 's/^/     | /'
+  fail=$((fail + 1))
+fi
+
+# The separate focused verifier exercises real upstream package selection and
+# negative macro/API/target profiles on the same compiler as this consumer run.
+HTTPLIB_SOURCE="${VENICE_DEPS_CACHE:-${WORK}/build-install/_deps}/httplib-src"
+if [ -f "${HTTPLIB_SOURCE}/httplib.h" ]; then
+  export VENICE_HTTPLIB_SOURCE="${HTTPLIB_SOURCE}"
+fi
+if "${REPO_ROOT}/example/httplib-contract/verify.sh"; then
+  pass=$((pass + 1))
+else
   fail=$((fail + 1))
 fi
 

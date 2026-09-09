@@ -2,6 +2,13 @@
 add_library(${PROJECT_NAME}_lib INTERFACE)
 add_library(${PROJECT_NAME}::lib ALIAS ${PROJECT_NAME}_lib)
 
+# Coarse installed-package capability marker; the actual header/API probe and
+# public compile-time guards remain mandatory evidence for this profile.
+set_target_properties(${PROJECT_NAME}_lib PROPERTIES
+  VENICE_CPP_HTTP_TRANSPORT_CONTRACT "httplib-0.51-openssl3-header-only-v1"
+  EXPORT_PROPERTIES VENICE_CPP_HTTP_TRANSPORT_CONTRACT
+)
+
 # The two generator expressions are not decoration. Three independent reasons,
 # any one of which is sufficient:
 #   * CMAKE_SOURCE_DIR is the *consumer's* root the moment someone
@@ -37,7 +44,7 @@ target_link_libraries(${PROJECT_NAME}_lib
 # directly rather than leaning on httplib's transitive dependency, because a
 # *system* cpp-httplib may have been built without TLS — that failure belongs
 # here, at our configure step, not in a consumer's link line.
-find_package(OpenSSL REQUIRED)
+find_package(OpenSSL 3 REQUIRED)
 target_link_libraries(${PROJECT_NAME}_lib
   INTERFACE OpenSSL::SSL
   INTERFACE OpenSSL::Crypto

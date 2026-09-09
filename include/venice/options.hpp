@@ -29,7 +29,7 @@
 #include <pthread.h>
 #endif
 
-#include <httplib.h>
+#include "venice/detail/httplib_contract.hpp"
 
 #include "venice/auth.hpp"
 
@@ -160,12 +160,13 @@ namespace detail {
 // ⚠ test/06transport/ cannot catch this, and it is worth knowing exactly why
 // before trusting a green suite here. That test needs a peer, so it constructs
 // an httplib::Server — and httplib::Server's *constructor* does
-// signal(SIGPIPE, SIG_IGN) process-wide (httplib.h:6087). Instantiating the
+// signal(SIGPIPE, SIG_IGN) process-wide (httplib 0.51 Server::Server). Instantiating the
 // fixture disables the very signal the bug depends on. The loopback peer also
-// speaks plain HTTP, which has no close_notify to write in the first place. So
-// the suite is green either way and the only real evidence is the live TLS run
-// above. httplib's own comment at ssl_delete concedes the point: avoiding
-// SIGPIPE there is "merely a best-efforts".
+// speaks plain HTTP, which has no close_notify to write in the first place.
+// test/22video-download now separately exercises real TLS cancellation with the
+// caller's default disposition restored and only the server threads masked.
+// That deterministic fixture complements the keyless live Client::models smoke;
+// neither depends on test/06transport's process-wide ignored disposition.
 //
 // Thread-scoped via pthread_sigmask rather than process-wide signal(): a
 // library has no business changing a signal disposition the application owns,
@@ -225,7 +226,7 @@ class SigPipeBlock {
 // nothing and spawns no thread, which is why every entry point can install one
 // unconditionally.
 //
-// Two facts read out of the vendored httplib.h (v0.18.3) determine this shape,
+// Two facts read out of the vendored httplib.h (v0.51.0) determine this shape,
 // and neither is guessable from the public API:
 //
 //   1. ClientImpl::send_ holds socket_mutex_ only around setup and the

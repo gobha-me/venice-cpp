@@ -1,55 +1,55 @@
-find_package(httplib QUIET)
+# #120: one shared 0.51 header-only OpenSSL3 target. An installed package wins,
+# but its version string alone cannot prove the selected header/API contract.
+if (NOT TARGET httplib::httplib)
+  find_package(httplib 0.51...<0.52 CONFIG QUIET COMPONENTS OpenSSL)
+endif ()
 
-if (httplib_FOUND)
-else ()
+if (NOT TARGET httplib::httplib AND NOT httplib_FOUND)
+  include(FetchContent)
+  if (HTTPLIB_URI OR HTTPLIB_TAG)
     if (NOT HTTPLIB_URI)
-        set(HTTPLIB_URI https://github.com/yhirose/cpp-httplib.git)
-    endif()
-
+      set(HTTPLIB_URI https://github.com/yhirose/cpp-httplib.git)
+    endif ()
     if (NOT HTTPLIB_TAG)
-        set(HTTPLIB_TAG v0.18.3)
-    endif()
+      set(HTTPLIB_TAG d66d9a95997d51a8ba9822a611d1267757741535)
+    endif ()
+    FetchContent_Declare(httplib GIT_REPOSITORY "${HTTPLIB_URI}" GIT_TAG "${HTTPLIB_TAG}")
+  else ()
+    FetchContent_Declare(httplib
+      URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.51.0.tar.gz
+      URL_HASH SHA256=d740ced75352f44e9d66d08806dc231b5621bb3592b5a5d5b2bd890a9a9d86cc)
+  endif ()
 
-    include(FetchContent)
-    FetchContent_Declare(
-        httplib
-        GIT_REPOSITORY ${HTTPLIB_URI}
-        GIT_TAG ${HTTPLIB_TAG}
-    )
-
-    # cpp-httplib needs OpenSSL for HTTPS (the Venice API is TLS-only).
-    set(HTTPLIB_REQUIRE_OPENSSL ON CACHE BOOL "" FORCE)
-    set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE ON CACHE BOOL "" FORCE)
-
-    # cpp-httplib's HTTPLIB_INSTALL defaults ON even as a subproject, and both
-    # states of that are wrong for us — so tie it to our own option instead.
-    #
-    #   _INSTALL=ON  (top level): keeps the `httplib` target in an export set, so
-    #     install(EXPORT venice-cppTargets) can resolve httplib::httplib. Turning
-    #     it OFF here would fail the generate step with
-    #       install(EXPORT ...) includes target "venice-cpp_lib" which requires
-    #       target "httplib" that is not in any export set.
-    #
-    #   _INSTALL=OFF (consumed): stops cpp-httplib's headers, cmake package,
-    #     README, LICENSE and its include(CPack) from landing in a downstream
-    #     project's install prefix. That leak is live today.
-    #
-    # Normal variable, not CACHE FORCE: cpp-httplib requires CMake >= 3.14, so
-    # CMP0077 is NEW there and a parent-scope variable wins over its option().
+  # Normal variables under upstream's NEW CMP0077 policy keep caller cache
+  # values intact. The selected target records these options at construction.
+  block(SCOPE_FOR VARIABLES)
+    set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL TRUE)
+    set(HTTPLIB_REQUIRE_OPENSSL ON)
+    set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE ON)
+    set(HTTPLIB_REQUIRE_WOLFSSL OFF)
+    set(HTTPLIB_USE_WOLFSSL_IF_AVAILABLE OFF)
+    set(HTTPLIB_REQUIRE_MBEDTLS OFF)
+    set(HTTPLIB_USE_MBEDTLS_IF_AVAILABLE OFF)
+    set(HTTPLIB_NO_EXCEPTIONS OFF)
+    set(HTTPLIB_USE_NON_BLOCKING_GETADDRINFO OFF)
+    set(HTTPLIB_COMPILE OFF)
+    set(HTTPLIB_BUILD_MODULES OFF)
+    set(HTTPLIB_TEST OFF)
+    # 0.18 supported zlib/Brotli; preserve those shared optional features. Zstd
+    # is newly available in 0.51 and is not part of this compatibility update.
+    set(HTTPLIB_REQUIRE_ZSTD OFF)
+    set(HTTPLIB_USE_ZSTD_IF_AVAILABLE OFF)
     set(HTTPLIB_INSTALL ${${PROJECT_NAME}_INSTALL})
-
-    # cpp-httplib installs its own README to ${CMAKE_INSTALL_DOCDIR}. GNUInstallDirs
-    # computed that from the *top-level* project name, so it would land at
-    # share/doc/venice-cpp/README.md — someone else's readme filed as our
-    # documentation. Point it at httplib's own docdir for the duration of the
-    # subdirectory, matching the way its LICENSE is already namespaced under
-    # share/licenses/httplib. install() records the value in effect when the
-    # subdirectory is processed, so save/restore around MakeAvailable is enough.
-    set(_venice_saved_docdir "${CMAKE_INSTALL_DOCDIR}")
     set(CMAKE_INSTALL_DOCDIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/httplib")
-
     FetchContent_MakeAvailable(httplib)
+  endblock()
+endif ()
 
-    set(CMAKE_INSTALL_DOCDIR "${_venice_saved_docdir}")
-    unset(_venice_saved_docdir)
-endif()
+include(${CMAKE_CURRENT_LIST_DIR}/../httplib-contract.cmake)
+venice_cpp_check_httplib(_venice_httplib_valid _venice_httplib_reason
+  "${CMAKE_CURRENT_LIST_DIR}/../../include")
+if (NOT _venice_httplib_valid)
+  message(FATAL_ERROR "venice-cpp: ${_venice_httplib_reason}")
+endif ()
+unset(_venice_httplib_valid)
+unset(_venice_httplib_reason)
