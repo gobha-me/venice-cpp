@@ -40,9 +40,23 @@ API (BSD 3-clause). It is the foundation for terminal/desktop AI tooling
   and pulled two libraries nothing linked (VC-01, #2); `artifact-check` rule B2
   now fails the build if that recurs. Rule B6 likewise keeps README's
   `FetchContent` release pin from falling behind the newest reachable tag.
-- cpp-httplib API notes (v0.18.x): `Request` has `body` + `set_header()` for
+- cpp-httplib API notes (v0.51.x): `Request` has `body` + `set_header()` for
   content type (no `set_content`, no `content_type_`); `send(req,res,err)`
   returns `bool`. These bit once — check the vendored header before assuming.
+- **One canonical cpp-httplib 0.51 header-only OpenSSL3 target.** The recipe
+  prefers an installed compatible package and pins official 0.51.0 as fallback.
+  `cmake/httplib-contract.cmake` compiles/links actual target usage requirements;
+  `detail/httplib_contract.hpp` rejects unsupported actual headers/macros too.
+  Compiled wrappers, alternate TLS, nonblocking getaddrinfo, no-exceptions and
+  changed canonical header bounds require a new reviewed compatibility contract.
+  Preserve parent cache options and never inject per-translation-unit variants.
+  Upstream's multipart upload type is `UploadFormDataItems`; server fixtures
+  retain separate `req.form.fields` and `req.form.files`. Shared transport uses
+  `set_path_encode(false)` because Venice already owns path/query encoding.
+  `example/httplib-contract/verify.sh` proves real upstream source/install and
+  rejection profiles; both consumer compiler legs run it. c-ares keeps its
+  existing single explicit runtime owner; synchronous httplib DNS can retain a
+  physical worker beyond a cancellation request.
 - **Buffered HTTP goes through `detail::send_buffered`; endpoint methods do not
   grow their own verb/content helpers.** Its response owns status, headers,
   normalized media type and byte-exact body. Non-2xx status is classified before

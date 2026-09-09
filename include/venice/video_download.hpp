@@ -1097,7 +1097,7 @@ public:
       client.enable_server_certificate_verification(true);
       client.enable_server_hostname_verification(true);
       client.set_follow_location(false);
-      client.set_url_encode(false);
+      client.set_path_encode(false);
       client.set_connection_timeout(capped_timeout(
           options.connect_timeout, std::chrono::seconds{30}, deadline));
       client.set_read_timeout(capped_timeout(

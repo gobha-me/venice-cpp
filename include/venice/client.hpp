@@ -87,7 +87,7 @@
 #include <variant>
 #include <vector>
 
-#include <httplib.h>
+#include "venice/detail/httplib_contract.hpp"
 #include <nlohmann/json.hpp>
 
 #include "venice/error.hpp"
@@ -734,6 +734,9 @@ enum class AuthPolicy {
     // so credentials, payment proofs, idempotency keys and request bodies cannot
     // be replayed to a Location chosen by that response (VC-47).
     cli.set_follow_location(false);
+    // Our path/query builders already encode caller values. cpp-httplib 0.51
+    // otherwise normalizes escaped query bytes (%20 to '+', %2F to '/').
+    cli.set_path_encode(false);
     cli.set_read_timeout(opts.read_timeout.value_or(std::chrono::seconds{300}));
     cli.set_connection_timeout(opts.connect_timeout.value_or(std::chrono::seconds{30}));
     if (opts.write_timeout) cli.set_write_timeout(*opts.write_timeout);
@@ -909,7 +912,7 @@ template <std::size_t N>
   ResponseBodyLimit body_limit{opts.maximum_response_bytes};
 
   if (const auto* multipart = std::get_if<MultipartBody>(&request.body)) {
-    httplib::MultipartFormDataItems items;
+    httplib::UploadFormDataItems items;
     items.reserve(multipart->parts.size());
     for (const auto& part : multipart->parts)
       items.push_back({part.name, part.bytes, part.filename, part.content_type});

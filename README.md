@@ -159,10 +159,41 @@ Header-only library; consumers link the CMake target and get everything
 transitively:
 
 - [c-ares](https://github.com/c-ares/c-ares) — bounded asynchronous DNS
-- [cpp-httplib](https://github.com/yhirose/cpp-httplib) — HTTP transport (header-only)
+- [cpp-httplib](https://github.com/yhirose/cpp-httplib) — HTTP transport (0.51.x, header-only)
 - [nlohmann/json](https://github.com/nlohmann/json) — JSON (header-only)
-- **OpenSSL** — TLS (reimplementing TLS is
-  malpractice, so we link it)
+- **OpenSSL 3 or newer** — TLS
+
+The transport dependency uses one canonical `httplib::httplib` target, shared
+with every consumer. Installed 0.51.x packages are preferred; the official
+0.51.0 archive is the pinned fallback. Configuration compiles and links the
+selected header/API, and installed public headers repeat the key compatibility
+checks. The exported target property `VENICE_CPP_HTTP_TRANSPORT_CONTRACT` is
+`httplib-0.51-openssl3-header-only-v1`, a coarse installed-capability marker that
+does not replace those checks. A version string alone is insufficient: compiled/split headers,
+alternate TLS backends, exception-disabled builds, nonblocking resolver profiles
+and changed default header limits are outside this initial contract. The
+canonical limits are 100 headers, 8192 bytes per header line and 32768 bytes
+for line-buffer growth; they are separate
+from each operation's response-body ceiling.
+
+The fallback uses OpenSSL and synchronous `getaddrinfo`; it preserves optional
+zlib/Brotli support and leaves the newly available zstd integration disabled.
+An installed package must use the same supported resolver/TLS profile. Do not
+compile different httplib headers or feature/limit macros into different
+translation units: private linkage does not isolate inline definitions. Parent
+CMake cache options remain unchanged when Venice configures its fallback.
+
+Synchronous DNS may retain the calling worker until the operating system returns;
+request cancellation does not promise a hard DNS interruption deadline.
+Presigned video retrieval keeps its existing deadline-driven c-ares resolver and
+explicit `VideoDownloadRuntime` startup/shutdown ownership. This update creates
+no second process-wide resolver owner and changes no request or approval API.
+
+The fallback tag resolves to
+`d66d9a95997d51a8ba9822a611d1267757741535`; its official tag archive SHA256 is
+`d740ced75352f44e9d66d08806dc231b5621bb3592b5a5d5b2bd890a9a9d86cc`.
+The upgrade preserves encoded path/query bytes explicitly because 0.51 otherwise
+normalizes already escaped query values.
 
 ## Usage
 

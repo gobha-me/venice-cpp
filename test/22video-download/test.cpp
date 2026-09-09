@@ -17,6 +17,11 @@
 #include <utility>
 #include <vector>
 
+#ifndef _WIN32
+#include <csignal>
+#include <pthread.h>
+#endif
+
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
 #include <openssl/x509v3.h>
@@ -161,8 +166,13 @@ class TlsDownloadFixture final {
 public:
   TlsDownloadFixture() {
     const auto &identity = test_tls_identity();
-    m_server = std::make_unique<httplib::SSLServer>(identity.certificate(),
-                                                    identity.private_key());
+    m_server = std::make_unique<httplib::SSLServer>(
+        [&identity](httplib::tls::ctx_t context) {
+          auto* ssl = static_cast<SSL_CTX*>(context);
+          return SSL_CTX_use_certificate(ssl, identity.certificate()) == 1 &&
+                 SSL_CTX_use_PrivateKey(ssl, identity.private_key()) == 1 &&
+                 SSL_CTX_check_private_key(ssl) == 1;
+        });
     if (!m_server->is_valid())
       throw std::runtime_error{
           "could not initialize video download TLS fixture"};
@@ -216,7 +226,8 @@ public:
                   });
 #endif
     m_server->Get(
-        "/slow", [](const httplib::Request &, httplib::Response &res) {
+        "/slow", [this](const httplib::Request &, httplib::Response &res) {
+          m_slow_started.store(true, std::memory_order_release);
           auto sent = std::make_shared<int>(0);
           res.set_chunked_content_provider(
               "video/mp4", [sent](std::size_t, httplib::DataSink &sink) {
@@ -258,12 +269,50 @@ public:
     return m_safe_request.load(std::memory_order_acquire);
   }
 
+  [[nodiscard]] auto slow_request_started() const noexcept -> bool {
+    return m_slow_started.load(std::memory_order_acquire);
+  }
+
 private:
   std::unique_ptr<httplib::SSLServer> m_server;
   int m_port{};
   std::thread m_thread;
+  std::atomic<bool> m_slow_started{};
   std::atomic<bool> m_safe_request{};
 };
+
+#ifndef _WIN32
+// The TLS server's constructor ignores SIGPIPE globally. Its own threads must
+// inherit a blocked mask before we restore the caller's default disposition;
+// otherwise a server-side write could be mistaken for client teardown.
+class TlsSignalState final {
+public:
+  TlsSignalState() {
+    if (sigaction(SIGPIPE, nullptr, &m_action) != 0)
+      throw std::runtime_error{"could not read TLS fixture signal disposition"};
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGPIPE);
+    if (pthread_sigmask(SIG_BLOCK, &blocked, &m_mask) != 0)
+      throw std::runtime_error{"could not mask TLS fixture server signal"};
+  }
+  ~TlsSignalState() {
+    static_cast<void>(sigaction(SIGPIPE, &m_action, nullptr));
+    static_cast<void>(pthread_sigmask(SIG_SETMASK, &m_mask, nullptr));
+  }
+  auto enter_caller() -> void {
+    struct sigaction action {};
+    action.sa_handler = SIG_DFL;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGPIPE, &action, nullptr) != 0 ||
+        pthread_sigmask(SIG_SETMASK, &m_mask, nullptr) != 0)
+      throw std::runtime_error{"could not restore TLS fixture caller signal"};
+  }
+private:
+  struct sigaction m_action {};
+  sigset_t m_mask{};
+};
+#endif
 
 class ScopedEnvironment final {
 public:
@@ -810,6 +859,43 @@ TEST_CASE("video download transport interrupts slow receive on cancellation",
                 "video download cancelled by caller");
   CHECK(elapsed < 500ms);
 }
+
+#ifndef _WIN32
+TEST_CASE("TLS cancellation preserves an unmasked default SIGPIPE disposition",
+          "[video-download][failure][transport][tls][cancel]") {
+  sigset_t before;
+  REQUIRE(pthread_sigmask(SIG_BLOCK, nullptr, &before) == 0);
+  REQUIRE(sigismember(&before, SIGPIPE) == 0);
+  TlsSignalState signals;
+  TlsDownloadFixture server;
+  signals.enter_caller();
+  venice::detail::HttplibVideoDownloadFetcher fetcher{
+      test_tls_identity().certificate_pem()};
+  venice::CancelToken cancellation;
+  std::jthread cancel{[&] {
+    const auto deadline = Clock::now() + 1s;
+    while (!server.slow_request_started() && Clock::now() < deadline)
+      std::this_thread::yield();
+    cancellation.cancel();
+  }};
+  const auto response = fetcher.fetch(server.url("media.example.test", "/slow"),
+      "127.0.0.1", 8, Clock::now() + 2s,
+      {.connect_timeout = 1s, .read_timeout = 1s, .cancel = &cancellation});
+  cancel.join();
+  REQUIRE(server.slow_request_started());
+  require_error(response, venice::ErrorKind::Cancelled,
+                "video download cancelled by caller");
+  sigset_t after;
+  REQUIRE(pthread_sigmask(SIG_BLOCK, nullptr, &after) == 0);
+  CHECK(sigismember(&after, SIGPIPE) == 0);
+  sigset_t pending;
+  REQUIRE(sigpending(&pending) == 0);
+  CHECK(sigismember(&pending, SIGPIPE) == 0);
+  struct sigaction action {};
+  REQUIRE(sigaction(SIGPIPE, nullptr, &action) == 0);
+  CHECK(action.sa_handler == SIG_DFL);
+}
+#endif
 
 TEST_CASE("video download URL validation fails closed before DNS",
           "[video-download][failure][url]") {

@@ -286,12 +286,20 @@ class TestServer {
     m_svr.Post("/api/v1/transport/multipart",
                [](const httplib::Request& req, httplib::Response& res) {
                  nlohmann::json parts = nlohmann::json::array();
-                 for (const auto& [name, part] : req.files) {
+                 for (const auto& [name, part] : req.form.files) {
                    parts.push_back({{"name", name},
                                     {"filename", part.filename},
                                     {"content_type", part.content_type},
                                     {"content", part.content}});
                  }
+                 for (const auto& [name, field] : req.form.fields) {
+                   const auto type = field.headers.find("Content-Type");
+                   parts.push_back({{"name", name}, {"filename", ""},
+                                    {"content_type", type == field.headers.end() ? "" : type->second},
+                                    {"content", field.content}});
+                 }
+                 res.set_header("X-Multipart-Fields", std::to_string(req.form.fields.size()));
+                 res.set_header("X-Multipart-Files", std::to_string(req.form.files.size()));
                  res.set_header("X-Multipart-Seen", "yes");
                  res.set_content(nlohmann::json{{"parts", std::move(parts)}}.dump(),
                                  "application/json");
@@ -955,8 +963,13 @@ class TestServer {
       capture.authorization = bearer;
       capture.siwx = siwx;
       capture.body = req.body;
-      for (const auto& [name, part] : req.files)
+      for (const auto& [name, part] : req.form.files)
         capture.parts.push_back({name, part.filename, part.content_type, part.content});
+      for (const auto& [name, field] : req.form.fields) {
+        const auto type = field.headers.find("Content-Type");
+        capture.parts.push_back({name, "", type == field.headers.end() ? "" : type->second,
+                                 field.content});
+      }
       {
         const std::lock_guard<std::mutex> lock{m_transform_mu};
         m_last_transform = std::move(capture);
@@ -965,9 +978,9 @@ class TestServer {
       std::string control;
       std::string output_format;
       if (req.is_multipart_form_data()) {
-        if (const auto it = req.files.find("prompt"); it != req.files.end())
+        if (const auto it = req.form.fields.find("prompt"); it != req.form.fields.end())
           control = it->second.content;
-        if (const auto it = req.files.find("output_format"); it != req.files.end())
+        if (const auto it = req.form.fields.find("output_format"); it != req.form.fields.end())
           output_format = it->second.content;
       } else {
         const auto body = nlohmann::json::parse(req.body);
@@ -1092,8 +1105,8 @@ class TestServer {
                });
 
     const auto form_value = [](const httplib::Request& req, const char* name) {
-      const auto it = req.files.find(name);
-      return it == req.files.end() ? std::string{} : it->second.content;
+      const auto it = req.form.fields.find(name);
+      return it == req.form.fields.end() ? std::string{} : it->second.content;
     };
 
     m_svr.Post("/api/v1/audio/transcriptions",
@@ -1123,8 +1136,8 @@ class TestServer {
                    res.set_content(R"({"text":7})", "application/json");
                    return;
                  }
-                 const auto file = req.files.find("file");
-                 const auto file_size = file == req.files.end() ? 0U : file->second.content.size();
+                 const auto file = req.form.files.find("file");
+                 const auto file_size = file == req.form.files.end() ? 0U : file->second.content.size();
                  const auto response_format = form_value(req, "response_format");
                  res.set_header("X-Balance-Remaining", "3.000000");
                  if (response_format == "text") {
@@ -1139,9 +1152,9 @@ class TestServer {
                           {{"word", nlohmann::json::array(
                                         {{{"word", "fixture"}, {"start", 0}, {"end", 1.25}}})}}},
                          {"seen_file_size", file_size},
-                         {"seen_filename", file == req.files.end() ? "" : file->second.filename},
+                         {"seen_filename", file == req.form.files.end() ? "" : file->second.filename},
                          {"seen_media_type",
-                          file == req.files.end() ? "" : file->second.content_type},
+                          file == req.form.files.end() ? "" : file->second.content_type},
                          {"seen_timestamps", form_value(req, "timestamps")},
                          {"seen_language", form_value(req, "language")}}
                          .dump(),
@@ -1151,7 +1164,7 @@ class TestServer {
     m_svr.Post("/api/v1/audio/voices",
                [this, form_value](const httplib::Request& req, httplib::Response& res) {
                  ++m_audio_hits;
-                 const auto file = req.files.find("file");
+                 const auto file = req.form.files.find("file");
                  const auto model = form_value(req, "model");
                  if (model == "wrong-media") {
                    res.set_content("not json", "text/plain");
@@ -1167,10 +1180,10 @@ class TestServer {
                      nlohmann::json{
                          {"id", "vv_fixture"},
                          {"model", model},
-                         {"seen_file_size", file == req.files.end() ? 0U : file->second.content.size()},
-                         {"seen_filename", file == req.files.end() ? "" : file->second.filename},
+                         {"seen_file_size", file == req.form.files.end() ? 0U : file->second.content.size()},
+                         {"seen_filename", file == req.form.files.end() ? "" : file->second.filename},
                          {"seen_media_type",
-                          file == req.files.end() ? "" : file->second.content_type}}
+                          file == req.form.files.end() ? "" : file->second.content_type}}
                          .dump(),
                      "application/json");
                });
@@ -1490,7 +1503,7 @@ class TestServer {
         return;
       }
 
-      const auto file = req.files.find("file");
+      const auto file = req.form.files.find("file");
       res.set_header("X-Balance-Remaining", "1.500000");
       res.set_header("PAYMENT-RESPONSE", "augment-payment-receipt");
       if (control == "text") {
@@ -1503,11 +1516,11 @@ class TestServer {
               {"text", "fixture document"},
               {"tokens", 2.5},
               {"seen_file_size",
-               file == req.files.end() ? 0U : file->second.content.size()},
+               file == req.form.files.end() ? 0U : file->second.content.size()},
               {"seen_filename",
-               file == req.files.end() ? "" : file->second.filename},
+               file == req.form.files.end() ? "" : file->second.filename},
               {"seen_media_type",
-               file == req.files.end() ? "" : file->second.content_type},
+               file == req.form.files.end() ? "" : file->second.content_type},
               {"seen_authorization", req.get_header_value("Authorization")},
               {"seen_siwx", req.get_header_value("SIGN-IN-WITH-X")}}
               .dump(),
@@ -5229,16 +5242,23 @@ TEST_CASE("multipart preserves repeated names filenames media types and NUL byte
            {.name = "images", .bytes = nul_bytes, .filename = "one.bin", .content_type = "application/octet-stream"},
            {.name = "images", .bytes = "second", .filename = "two.txt", .content_type = "text/plain"},
            {.name = "prompt", .bytes = "edit this", .filename = {}, .content_type = "text/plain"},
+           {.name = "zero", .bytes = "", .filename = {}, .content_type = "text/plain"},
        }}});
   REQUIRE(response.has_value());
   const auto seen_header = response->headers.find("X-Multipart-Seen");
   REQUIRE(seen_header != response->headers.end());
   REQUIRE(seen_header->second == "yes");
+  const auto field_count = response->headers.find("X-Multipart-Fields");
+  const auto file_count = response->headers.find("X-Multipart-Files");
+  REQUIRE(field_count != response->headers.end());
+  REQUIRE(file_count != response->headers.end());
+  REQUIRE(field_count->second == "2");
+  REQUIRE(file_count->second == "2");
 
   const auto decoded = venice::detail::decode_json(*response);
   REQUIRE(decoded.has_value());
   const auto& parts = decoded->at("parts");
-  REQUIRE(parts.size() == 3);
+  REQUIRE(parts.size() == 4);
   REQUIRE(parts[0]["name"] == "images");
   REQUIRE(parts[0]["filename"] == "one.bin");
   REQUIRE(parts[0]["content_type"] == "application/octet-stream");
@@ -5249,6 +5269,9 @@ TEST_CASE("multipart preserves repeated names filenames media types and NUL byte
   REQUIRE(parts[2]["name"] == "prompt");
   REQUIRE(parts[2]["filename"] == "");
   REQUIRE(parts[2]["content"] == "edit this");
+  REQUIRE(parts[3]["name"] == "zero");
+  REQUIRE(parts[3]["filename"] == "");
+  REQUIRE(parts[3]["content"] == "");
 }
 
 TEST_CASE("cancellation interrupts the multipart transport path",

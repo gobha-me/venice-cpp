@@ -1,5 +1,8 @@
 @PACKAGE_INIT@
 
+# Dependencies may replace PACKAGE_PREFIX_DIR on CMake 3.28.
+set(_venice_cpp_contract_include "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@")
+
 # Package config input for configure_package_config_file() — see
 # cmake/install.cmake. This is what a consumer's find_package(venice-cpp CONFIG)
 # ends up executing.
@@ -48,12 +51,12 @@ endif ()
 # consumer's. Writing it would turn an optional find_package(venice-cpp CONFIG)
 # into a FATAL_ERROR instead of setting venice-cpp_FOUND to FALSE.
 #
-# ⚠ No version bound on httplib. Its own ConfigVersion is SameMinorVersion, so
-# asking for the 0.18.3 that cmake/deps/httplib.cmake pins would reject a
-# perfectly good 0.19.
-find_dependency(OpenSSL)
+# Header/API compatibility is intentionally limited to the tested minor.
+find_dependency(OpenSSL 3)
 find_dependency(c-ares 1.34.0 CONFIG)
-find_dependency(httplib)
+if (NOT TARGET httplib::httplib)
+  find_dependency(httplib 0.51...<0.52 CONFIG COMPONENTS OpenSSL)
+endif ()
 find_dependency(nlohmann_json 3.11)
 
 set(CMAKE_PREFIX_PATH "${_venice_cpp_saved_prefix_path}")
@@ -69,6 +72,18 @@ unset(_venice_cpp_vendored)
 # facility located by a CMake find module and is never one of them, so widening
 # the window to cover it would misfile it as vendorable.
 find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/httplib-contract.cmake")
+venice_cpp_check_httplib(_venice_httplib_valid _venice_httplib_reason
+  "${_venice_cpp_contract_include}")
+unset(_venice_cpp_contract_include)
+if (NOT _venice_httplib_valid)
+  set(@PROJECT_NAME@_FOUND FALSE)
+  set(@PROJECT_NAME@_NOT_FOUND_MESSAGE "${_venice_httplib_reason}")
+  return()
+endif ()
+unset(_venice_httplib_valid)
+unset(_venice_httplib_reason)
 
 include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@Targets.cmake")
 

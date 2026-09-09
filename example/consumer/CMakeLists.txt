@@ -89,6 +89,11 @@ foreach (_leak IN ITEMS ${VENICE_PACKAGE} Catch2 01client-test 30sanitizer-smoke
   endif ()
 endforeach ()
 
+get_target_property(_http_contract ${VENICE_PACKAGE}::lib VENICE_CPP_HTTP_TRANSPORT_CONTRACT)
+if (NOT _http_contract STREQUAL "httplib-0.51-openssl3-header-only-v1")
+  message(FATAL_ERROR "${CONSUMER_MODE}: missing coordinated HTTP transport capability")
+endif ()
+
 add_executable(consumer main.cpp)
 
 # The only line a real consumer writes. No include directories, no C++ standard,

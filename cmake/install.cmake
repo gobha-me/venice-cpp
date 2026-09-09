@@ -178,5 +178,6 @@ write_basic_package_version_file(
 install(FILES
     ${PROJECT_BINARY_DIR}/${PROJECT_NAME}Config.cmake
     ${PROJECT_BINARY_DIR}/${PROJECT_NAME}ConfigVersion.cmake
+    ${CMAKE_CURRENT_LIST_DIR}/httplib-contract.cmake
   DESTINATION ${_cfg_install_dir}
 )
